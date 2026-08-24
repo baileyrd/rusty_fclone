@@ -1,14 +1,15 @@
 # Project Status
-- Last verified main commit: `b616294` (PR #14, merged) — the redb
-  incremental hash cache (PR #12) and SQLite scan-history store (PR #13)
-  are fully merged; this branch adds `RELEASE-BINARIES` (PR TBD) on top
-- Tagged: `v0.1.0` at commit `b616294`, GitHub Release published but
-  (until `RELEASE-BINARIES` lands and is manually dispatched against it)
-  with no attached binaries
+- Last verified main commit: `f32f93e` (PR #16, merged) —
+  `RELEASE-BINARIES` (PRs #15, #16) is merged; this branch adds
+  `DETECTION-FCLONES-CACHE-IMPORT` (PR TBD) on top
+- Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
+  four platform archives attached (verified via the GitHub API after
+  `.github/workflows/release.yml`'s first real dispatch succeeded — see
+  `docs/decisions/ADR-0018-release-binaries.md`)
 - Verified at: 2026-08-24
-- Current milestone: `RELEASE-BINARIES` — tag-triggered release workflow
-  so `v0.1.0` (and every future `vX.Y.Z` tag) gets real downloadable
-  binaries. See `docs/roadmap/ROADMAP.md`.
+- Current milestone: `DETECTION-FCLONES-CACHE-IMPORT` — opt-in import of
+  full-file hashes from an existing upstream-`fclones` cache database.
+  See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace builds, lints, and tests clean on the pinned
   toolchain
 
@@ -60,20 +61,43 @@
   tests), and manually smoke-tested (two real scans — plain, then
   `--action delete --apply` — produced two correctly-populated rows,
   confirmed via a direct SQL query). Merged via PR #13.
+- `RELEASE-BINARIES`: `.github/workflows/release.yml`, triggered on `v*`
+  tag pushes and manual `workflow_dispatch`, builds `rusty-fclone` for
+  `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
+  `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`, then uses
+  `softprops/action-gh-release` to attach each platform's archive to the
+  tag's GitHub Release. ADR-0018. Merged via PR #15; a follow-up fix
+  (PR #16) added an optional `tag` `workflow_dispatch` input after
+  discovering GitHub can only dispatch a workflow from a ref where the
+  workflow file itself already exists — `v0.1.0` predates `release.yml`,
+  so it must be dispatched from `main` with `tag=v0.1.0` instead of
+  directly from the tag. That dispatch (run #1, `workflow_dispatch`,
+  `conclusion: success`) attached all four platform archives to `v0.1.0`'s
+  release, confirmed via the GitHub API:
+  `rusty-fclone-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` (2,444,918 B),
+  `rusty-fclone-v0.1.0-aarch64-apple-darwin.tar.gz` (2,161,166 B),
+  `rusty-fclone-v0.1.0-x86_64-apple-darwin.tar.gz` (2,310,563 B),
+  `rusty-fclone-v0.1.0-x86_64-pc-windows-msvc.zip` (2,246,772 B).
+- `DETECTION-FCLONES-CACHE-IMPORT`: new opt-in `fclones_import` module —
+  reads an existing upstream-`fclones` `--cache` `sled` database
+  directly (its on-disk schema reverse-engineered from fclones 0.35.0's
+  own source, not documented anywhere) and reuses a file's full hash
+  fclones already computed, when fclones used its `xxhash3` algorithm
+  (the only one byte-compatible with this project's own xxh3-128 hash)
+  and the entry isn't stale. Tried after a `--cache` miss, before any
+  real I/O; an imported hit is also written to `--cache` if set.
+  `ScanOptions::fclones_import_path`/CLI `--import-fclones-cache <path>`,
+  off by default, independent of `--cache`. ADR-0019,
+  `FCLONE-DETECTION-001` 0.1.9 (NFR-005). Implemented, tested (76/76
+  tests — 9 new `fclones_import` unit tests, including one asserting a
+  decoded hash matches a value captured from a real fclones run), and
+  additionally verified end-to-end against the actual `fclones` 0.35.0
+  binary in this environment (both a small-file and a large-file
+  duplicate pair, confirming both the exact-match and default-prefix-
+  length lookup paths via `-vvv` trace output).
 
 ## In progress
-- `RELEASE-BINARIES`: new `.github/workflows/release.yml`, triggered on
-  `v*` tag pushes and manual `workflow_dispatch`, builds `rusty-fclone`
-  for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
-  `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`, then uses
-  `softprops/action-gh-release` to attach each platform's archive
-  (binary + README + both license files) to the tag's GitHub Release
-  without touching its title/body. ADR-0018. `cargo fmt`/`clippy`/`test`
-  unaffected (workflow-only change, no Rust code touched). Not yet
-  exercised by a real GitHub Actions run — the plan is to merge this,
-  then manually dispatch the workflow against the existing `v0.1.0` tag
-  to retroactively give that release its binaries, and verify the
-  uploaded assets via the GitHub API afterward.
+- None.
 
 ## Blocked
 - None.
@@ -90,13 +114,14 @@
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-24)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-24)
-- `cargo test --workspace`: pass, 66/66 (2026-08-24)
+- `cargo test --workspace`: pass, 76/76 (2026-08-24)
 - `cargo bench -p rusty_fclone-core --no-run`: pass (2026-08-24)
 - Manual CLI smoke tests across the project: verbosity flags, `RUST_LOG`
   override, default output silent on success, action dry runs, JSON
   format, progress checkpoints, confirmation prompt decline/accept,
-  cold/warm `--cache` behavior, and now `--history` across two real scans
-  (2026-08-24)
+  cold/warm `--cache` behavior, `--history` across two real scans, and
+  now `--import-fclones-cache` against a real `fclones` binary and its
+  real cache database (2026-08-24)
 
 ## Risks and decisions needed
 - The action layer is the first genuinely destructive capability in this
@@ -124,3 +149,10 @@
 - `DETECTION-STREAMING-OVERLAP` proper needs a decision on how to relax or
   redesign `ScanEvent`'s "no group revision after emission" finality
   contract (ADR-0004) before it can be implemented — not yet made.
+- `DETECTION-FCLONES-CACHE-IMPORT` is Unix only (fclones' Windows file-id
+  encoding isn't reproducible via the `file-id` crate this project
+  depends on) and only recovers a small file's hash when fclones used one
+  of its two documented default prefix lengths (4 KiB/16 KiB) — a tree
+  cached with an explicit non-default `--max-prefix-size` won't be found.
+  Both are deliberate, documented scope cuts (ADR-0019): a missed
+  optimization, never a wrong result.

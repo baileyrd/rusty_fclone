@@ -12,6 +12,7 @@ use rayon::prelude::*;
 use crate::cache::{self, HashCache};
 use crate::device::default_io_threads;
 use crate::error::{FileError, ScanError};
+use crate::fclones_import::{self, FclonesImportCache};
 use crate::hash::{hash_chunks, sample_ranges};
 use crate::io_pool::IoPool;
 use crate::model::{DuplicateGroup, ScanEvent, ScanOptions, ScanProgress, ScanSummary};
@@ -173,13 +174,23 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
             }
         }
     });
+    let fclones_import = options
+        .fclones_import_path
+        .as_ref()
+        .and_then(|path| FclonesImportCache::open(path));
 
     candidate_groups
         .into_par_iter()
         .for_each(|(size, members)| {
-            for group in
-                process_size_group(size, members, &io_pool, &options, cache.as_ref(), &event_tx)
-            {
+            for group in process_size_group(
+                size,
+                members,
+                &io_pool,
+                &options,
+                cache.as_ref(),
+                fclones_import.as_ref(),
+                &event_tx,
+            ) {
                 duplicate_groups.fetch_add(1, Ordering::Relaxed);
                 duplicate_files.fetch_add(group.paths.len() as u64, Ordering::Relaxed);
                 let _ = event_tx.send(ScanEvent::DuplicateGroup(group));
@@ -200,14 +211,17 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
 /// hash to prune, full hash to confirm, optional byte-verify — returning
 /// every subgroup that survives as a [`DuplicateGroup`]. `cache`, when
 /// present, lets the full-hash stage reuse a previous scan's hash for a
-/// file whose `(size, mtime)` haven't changed (ADR-0016).
-#[tracing::instrument(skip(members, io_pool, options, cache, event_tx), fields(members = members.len()))]
+/// file whose `(size, mtime)` haven't changed (ADR-0016). `fclones_import`,
+/// when present, is tried after a `cache` miss, before any real hashing
+/// (ADR-0019).
+#[tracing::instrument(skip(members, io_pool, options, cache, fclones_import, event_tx), fields(members = members.len()))]
 fn process_size_group(
     size: u64,
     members: Vec<FileGroup>,
     io_pool: &IoPool,
     options: &ScanOptions,
     cache: Option<&HashCache>,
+    fclones_import: Option<&FclonesImportCache>,
     event_tx: &Sender<ScanEvent>,
 ) -> Vec<DuplicateGroup> {
     let small_file = size <= options.small_file_threshold;
@@ -249,7 +263,9 @@ fn process_size_group(
     let full_hashed: Vec<FullHashResult> = full_hash_input
         .into_par_iter()
         .filter_map(|(representative, aliases)| {
-            let stat = cache.and_then(|_| cache::stat(&representative));
+            let stat = (cache.is_some() || fclones_import.is_some())
+                .then(|| cache::stat(&representative))
+                .flatten();
 
             if let (Some(cache), Some(stat)) = (cache, stat) {
                 if let Some(hash) = cache.get(&representative, stat) {
@@ -258,6 +274,20 @@ fn process_size_group(
                         hash,
                         group: (representative, aliases),
                         cache_write: None,
+                    });
+                }
+            }
+
+            if let (Some(fclones_import), Some(stat)) = (fclones_import, stat) {
+                let modified_ms = fclones_import::to_millis(stat.1);
+                if let Some(hash) =
+                    fclones_import.lookup_full_hash(&representative, stat.0, modified_ms)
+                {
+                    tracing::trace!(path = %representative.display(), "fclones cache import hit");
+                    return Some(FullHashResult {
+                        hash,
+                        group: (representative, aliases),
+                        cache_write: cache.is_some().then_some(stat),
                     });
                 }
             }
@@ -553,7 +583,7 @@ mod tests {
             (dup2.clone().into(), vec![dup2.clone().into()]),
         ];
 
-        let groups = process_size_group(3, members, &io_pool, &options, None, &tx);
+        let groups = process_size_group(3, members, &io_pool, &options, None, None, &tx);
         drop(tx);
 
         assert_eq!(
