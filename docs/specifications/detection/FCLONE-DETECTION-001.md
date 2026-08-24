@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.1.4
+- Version: 0.1.5
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -172,11 +172,6 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Open questions
 
-- Symlink-cycle handling when `follow_symlinks = true` relies entirely on
-  jwalk's own loop detection; the gap-closure pass added a test for the
-  broken-symlink error-reporting case
-  (`traversal_errors_are_reported_and_do_not_abort_the_scan`), but no
-  dedicated test exercises an actual symlink *cycle* yet.
 - "Fastest possible" is now a measured claim across all four benchmark
   scenarios: rusty_fclone wins ~2.6–2.7x on small-file-heavy trees and is
   within measurement noise of (fractionally behind fclones' best-tuned
@@ -191,8 +186,6 @@ See `docs/traceability/TRACEABILITY.md`.
   cache performance, not raw disk I/O speed. This is intentional (repeat
   scans of an unchanged tree are a realistic use case) but worth reading
   the numbers with that caveat in mind.
-- Streaming full-file hashing (avoiding buffering an entire large file
-  before hashing it) is not implemented; see ADR-0002's implementation note.
 - `FCLONE-DETECTION-001-NFR-001`'s test verifies the streaming *contract*
   (groups always precede `Finished`) but not actual wall-clock overlap
   between traversal and hashing — see `DETECTION-STREAMING-OVERLAP` on the
@@ -200,6 +193,15 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.1.5 (2026-08-24): Closed two known gaps. Added
+  `traversal::tests::follow_symlinks_terminates_on_a_cycle`, a real symlink
+  cycle under `--follow-symlinks` with a bounded timeout, confirming
+  jwalk's loop detection actually protects the scan rather than just being
+  assumed to. `IoPool::hash_full_file`/`files_equal` now stream full-file
+  hashing and `--verify` byte-comparison in fixed 1 MiB chunks instead of
+  buffering whole files — `--verify`'s peak memory no longer scales with
+  duplicate-group size at all. ADR-0002 addendum; no requirement text
+  changed, both were already-implied behavior gaps, not new requirements.
 - 0.1.4 (2026-08-24): Closed the large-file benchmark gap found in 0.1.3.
   Split `ScanOptions::small_file_threshold` from a new
   `partial_hash_sample_size` field (ADR-0007, `DETECTION-ADAPTIVE-SAMPLE-SIZE`)
