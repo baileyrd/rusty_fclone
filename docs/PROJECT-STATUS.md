@@ -1,15 +1,18 @@
 # Project Status
-- Last verified main commit: `f32f93e` (PR #16, merged) —
-  `RELEASE-BINARIES` (PRs #15, #16) is merged; this branch adds
-  `DETECTION-FCLONES-CACHE-IMPORT` (PR TBD) on top
+- Last verified main commit: `9ce0d7b` (PR #18, merged) —
+  `DETECTION-FCLONES-CACHE-IMPORT` (PR #17) and a README sync (PR #18)
+  are merged; this branch bumps the workspace version to `0.2.0` on top
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
-  `docs/decisions/ADR-0018-release-binaries.md`)
+  `docs/decisions/ADR-0018-release-binaries.md`). `v0.2.0` pending —
+  everything merged since `v0.1.0` (`RELEASE-BINARIES`,
+  `DETECTION-FCLONES-CACHE-IMPORT`, the README sync) will be tagged once
+  this version-bump branch merges.
 - Verified at: 2026-08-24
-- Current milestone: `DETECTION-FCLONES-CACHE-IMPORT` — opt-in import of
-  full-file hashes from an existing upstream-`fclones` cache database.
-  See `docs/roadmap/ROADMAP.md`.
+- Current milestone: none in progress — bumping the workspace version to
+  `0.2.0` to tag everything merged since `v0.1.0`. See
+  `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace builds, lints, and tests clean on the pinned
   toolchain
 
@@ -94,10 +97,19 @@
   additionally verified end-to-end against the actual `fclones` 0.35.0
   binary in this environment (both a small-file and a large-file
   duplicate pair, confirming both the exact-match and default-prefix-
-  length lookup paths via `-vvv` trace output).
+  length lookup paths via `-vvv` trace output). Merged via PR #17.
+- README's Options block and examples synced with the CLI's actual
+  `--help` output (`--cache`, `--import-fclones-cache`, `--history`,
+  `-y`/`--yes`, `--format`, `-v`/`--verbose` were all missing; the Status
+  section and two other spots still said reflink support wasn't built).
+  Merged via PR #18.
 
 ## In progress
-- None.
+- Workspace version bump `0.1.0` → `0.2.0` (`Cargo.toml`
+  `workspace.package.version`), to tag everything merged since `v0.1.0`
+  (`RELEASE-BINARIES`, `DETECTION-FCLONES-CACHE-IMPORT`, README sync) as
+  `v0.2.0`. No functional change — `Cargo.lock` updated to match, no
+  other code touched.
 
 ## Blocked
 - None.
