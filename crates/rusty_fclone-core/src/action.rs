@@ -21,6 +21,14 @@ pub enum ActionKind {
     /// Replace the redundant copy with a hardlink to the kept file, freeing
     /// its storage while every path involved keeps working.
     Hardlink,
+    /// Replace the redundant copy with a copy-on-write clone (reflink) of
+    /// the kept file: an independent inode that shares the kept file's
+    /// data blocks until either is modified, freeing storage today without
+    /// coupling the two paths' futures the way a hardlink does. Only
+    /// supported on filesystems with CoW cloning (Btrfs, XFS with reflink
+    /// enabled, APFS, ZFS on some setups) — fails per-file, not silently,
+    /// wherever it isn't (ADR-0014).
+    Reflink,
 }
 
 /// One redundant copy and what will happen to it.
@@ -104,6 +112,7 @@ pub fn apply(plan: &ActionPlan) -> ApplyReport {
         let result = match action.kind {
             ActionKind::Delete => fs::remove_file(&action.path),
             ActionKind::Hardlink => hardlink_over(&plan.kept, &action.path),
+            ActionKind::Reflink => reflink_over(&plan.kept, &action.path),
         };
         match result {
             Ok(()) => {
@@ -128,6 +137,27 @@ pub fn apply(plan: &ActionPlan) -> ApplyReport {
 fn hardlink_over(kept: &Path, path: &Path) -> std::io::Result<()> {
     let tmp = tmp_sibling(path);
     fs::hard_link(kept, &tmp)?;
+    fs::rename(&tmp, path)
+}
+
+/// Replaces `path` with a reflink (copy-on-write clone) of `kept`, using
+/// the same safe temp-then-rename pattern as [`hardlink_over`]. Unlike
+/// [`hardlink_over`], the temp file *is* created by the underlying reflink
+/// call before the clone ioctl runs, so a failed clone can leave an empty
+/// stub behind — cleaned up here rather than left as filesystem litter.
+///
+/// Deliberately does not fall back to a plain copy when reflink isn't
+/// supported: `reflink_copy::reflink` (not `reflink_or_copy`) fails with
+/// an `io::Error`, surfaced to the caller as a per-file failure like any
+/// other action error (ADR-0014). A silent copy fallback would look like
+/// it worked while not actually freeing any space — the one outcome this
+/// action exists to produce.
+fn reflink_over(kept: &Path, path: &Path) -> std::io::Result<()> {
+    let tmp = tmp_sibling(path);
+    if let Err(err) = reflink_copy::reflink(kept, &tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
     fs::rename(&tmp, path)
 }
 
@@ -230,6 +260,58 @@ mod tests {
         assert_eq!(fs::read(&b).unwrap(), b"dup");
         // ...because it's now the same inode as a.txt, not a separate copy.
         assert_eq!(get_file_id(&a).unwrap(), get_file_id(&b).unwrap());
+    }
+
+    #[test]
+    fn apply_reflink_succeeds_or_fails_cleanly_depending_on_filesystem_support() {
+        // Reflink only works on CoW-capable filesystems (Btrfs, XFS with
+        // reflink, APFS, some ZFS setups); most CI runners and this
+        // sandbox's tempdir are not one. Both outcomes are correct
+        // behavior here -- what must hold either way is ADR-0014's
+        // contract: no silent copy fallback, the kept file is untouched,
+        // and a failure leaves the redundant copy exactly as it was
+        // (no stray temp file, no data loss).
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let plan = plan(&group(3, vec![a.clone(), b.clone()]), ActionKind::Reflink);
+        let report = apply(&plan);
+
+        assert!(a.exists(), "the kept file must survive either way");
+        assert_eq!(fs::read(&a).unwrap(), b"dup");
+        assert!(b.exists(), "the redundant path must never vanish");
+        assert_eq!(
+            fs::read(&b).unwrap(),
+            b"dup",
+            "content must be correct whether reflinked or left untouched"
+        );
+
+        let stray_temp_files: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("rusty-fclone-tmp")
+            })
+            .collect();
+        assert!(
+            stray_temp_files.is_empty(),
+            "a failed reflink must not leave a temp file behind"
+        );
+
+        if report.failed.is_empty() {
+            assert_eq!(report.succeeded, vec![b.clone()]);
+            assert_eq!(report.bytes_reclaimed, 3);
+        } else {
+            assert_eq!(report.failed.len(), 1);
+            assert_eq!(report.failed[0].path.as_ref(), b.as_path());
+            assert_eq!(report.bytes_reclaimed, 0);
+        }
     }
 
     #[test]

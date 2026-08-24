@@ -1,5 +1,5 @@
 # FCLONE-ACTION-001 — Duplicate Action Layer
-- Version: 0.1.1
+- Version: 0.2.0
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`
@@ -14,8 +14,6 @@ nature.
 
 ## Non-goals
 
-- Reflink (copy-on-write clone) support — platform/filesystem-specific,
-  deferred to `ACTION-REFLINK` on the roadmap (ADR-0009).
 - Configurable keep-strategy (by mtime, by directory priority, interactive
   per-group choice) — v1 always keeps the alphabetically-first path.
 - An interactive confirmation prompt — v1's safety model is the two-flag
@@ -38,8 +36,8 @@ nature.
 ## Requirements
 
 - `FCLONE-ACTION-001-FR-001`: Given a `DuplicateGroup` and an `ActionKind`
-  (`Delete` or `Hardlink`), `plan` SHALL identify the kept file as
-  `paths[0]` and SHALL include every other path not already sharing the
+  (`Delete`, `Hardlink`, or `Reflink`), `plan` SHALL identify the kept file
+  as `paths[0]` and SHALL include every other path not already sharing the
   kept file's platform file-id as a planned action.
 - `FCLONE-ACTION-001-FR-002`: `plan` SHALL NOT perform any filesystem
   mutation — it only reads file identity to determine hardlink aliases.
@@ -53,6 +51,11 @@ nature.
   denied, vanished, cross-device link) SHALL be recorded in
   `ApplyReport::failed` and SHALL NOT prevent the remaining planned actions
   from being attempted.
+- `FCLONE-ACTION-001-FR-008`: `apply` with `ActionKind::Reflink` SHALL
+  replace every planned path with a copy-on-write clone of the kept file
+  via the same temp-name-then-rename sequence as FR-004, and SHALL record
+  a per-file failure (FR-005) rather than silently falling back to a plain
+  copy when the underlying filesystem doesn't support cloning.
 - `FCLONE-ACTION-001-FR-006`: The CLI SHALL NOT mutate the filesystem when
   `--action` is `delete` or `hardlink` unless `--apply` is also passed;
   without `--apply` it SHALL print the same plan information (kept path,
@@ -68,7 +71,7 @@ nature.
 Public API (`crates/rusty_fclone-core/src/action.rs`):
 
 ```rust
-pub enum ActionKind { Delete, Hardlink }
+pub enum ActionKind { Delete, Hardlink, Reflink }
 pub struct FileAction { pub path: PathBuf, pub kind: ActionKind }
 pub struct ActionPlan { pub size: u64, pub kept: PathBuf,
                          pub actions: Vec<FileAction>, pub bytes_reclaimed: u64 }
@@ -79,10 +82,13 @@ pub fn plan(group: &DuplicateGroup, kind: ActionKind) -> ActionPlan;
 pub fn apply(plan: &ActionPlan) -> ApplyReport;
 ```
 
-CLI (`rusty_fclone-cli`): `--action <report|delete|hardlink>` (default
-`report`) and `--apply` (bool). The CLI's `Action` enum is a thin wrapper
-adding `Report` — kept CLI-side rather than in core, since core stays
-CLI-agnostic (ADR-0005).
+`Reflink` uses the `reflink-copy` crate's strict `reflink` function (not
+`reflink_or_copy`) — see ADR-0014.
+
+CLI (`rusty_fclone-cli`): `--action <report|delete|hardlink|reflink>`
+(default `report`) and `--apply` (bool). The CLI's `Action` enum is a thin
+wrapper adding `Report` — kept CLI-side rather than in core, since core
+stays CLI-agnostic (ADR-0005).
 
 ## Data/state and invariants
 
@@ -102,23 +108,31 @@ CLI-agnostic (ADR-0005).
 
 ## Security, privacy, and compatibility
 
-- `Delete` and `Hardlink` are both irreversible or hard-to-reverse
+- `Delete`, `Hardlink`, and `Reflink` are all irreversible or hard-to-reverse
   operations on the user's filesystem — this is the first genuinely
   destructive capability in the codebase. The dry-run-by-default,
   two-flag-to-apply design (ADR-0009) is the primary safeguard.
 - Hardlinking requires the kept file and the target path to be on the same
   filesystem; a cross-device attempt fails per-file (FR-005) rather than
   aborting the whole run.
+- Reflinking requires a CoW-capable filesystem (Btrfs, XFS with reflink
+  enabled, APFS, some ZFS setups); anywhere else it fails per-file (FR-005,
+  FR-008) rather than silently degrading to a full copy — a copy wouldn't
+  free any space, defeating the point of choosing reflink over hardlink.
 
 ## Acceptance criteria
 
 - All functional requirements above are exercised by a dedicated test:
-  FR-001 through FR-005 in `crates/rusty_fclone-core/src/action.rs`;
+  FR-001 through FR-005 and FR-008 in `crates/rusty_fclone-core/src/action.rs`;
   FR-006/FR-007 (CLI-level dry-run/apply/default gating) in
   `crates/rusty_fclone-cli/src/main.rs`.
 - Manual CLI smoke tests additionally confirmed real stdout/stderr output
-  shape (preview lines, reclaimed-bytes summary) for both `delete` and
-  `hardlink`, in dry-run and `--apply` modes.
+  shape (preview lines, reclaimed-bytes summary) for `delete`, `hardlink`,
+  and `reflink`, in dry-run and `--apply` modes. The `reflink` smoke test
+  ran on this environment's non-CoW filesystem and confirmed the clean
+  per-file-failure path (FR-008): a reported warning, zero bytes
+  reclaimed, both files left with correct, unmodified content, no stray
+  temp file.
 
 ## Verification plan
 
@@ -126,7 +140,9 @@ Unit tests in `action::tests` (core crate) cover: planning every non-kept
 path, skipping existing hardlink aliases of the kept file, a plan whose
 only non-kept paths are aliases (empty action list), `apply`'s delete and
 hardlink paths (including that hardlinked files verifiably share an inode
-afterward), and per-file failure tolerance.
+afterward), per-file failure tolerance, and `apply`'s reflink path
+(tolerant of both possible outcomes — CoW support present or absent —
+since that depends on the filesystem running the test; see FR-008).
 
 Unit tests in `main::tests` (CLI crate) cover: default (`Action::Report`)
 never mutates the filesystem; `--action <kind>` without `--apply` is a true
@@ -155,6 +171,13 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.2.0 (2026-08-24): Added `ActionKind::Reflink` (FR-008,
+  `ACTION-REFLINK`) — copy-on-write clone as a third action kind, using
+  the `reflink-copy` crate's strict `reflink` (not `reflink_or_copy`) so
+  an unsupported filesystem fails per-file rather than silently
+  degrading to a full copy. Same temp-name-then-rename safety pattern as
+  `Hardlink` (FR-004), with cleanup of the temp file on a failed clone.
+  No change to FR-001 through FR-007's behavior. ADR-0014.
 - 0.1.1 (2026-08-24): Added dedicated unit tests for FR-006/FR-007
   (CLI-level dry-run/apply/default gating), which had only been manually
   smoke-tested. Required extracting `rusty_fclone-cli::run` from `main` —
