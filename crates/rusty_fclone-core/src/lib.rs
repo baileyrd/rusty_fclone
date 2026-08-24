@@ -18,5 +18,5 @@ mod pipeline;
 mod traversal;
 
 pub use error::{FileError, ScanError};
-pub use model::{DuplicateGroup, ScanEvent, ScanOptions, ScanSummary};
+pub use model::{DuplicateGroup, ScanEvent, ScanOptions, ScanProgress, ScanSummary};
 pub use pipeline::{scan, ScanHandle};

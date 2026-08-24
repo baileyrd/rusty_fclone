@@ -631,6 +631,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "rusty_fclone-core",
+ "serde",
+ "serde_json",
  "tempfile",
  "tracing",
  "tracing-subscriber",

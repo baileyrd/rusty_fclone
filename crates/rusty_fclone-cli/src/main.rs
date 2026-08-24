@@ -1,9 +1,14 @@
-use std::path::PathBuf;
+use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
-use rusty_fclone_core::action::{self, ActionKind};
-use rusty_fclone_core::{scan, DuplicateGroup, ScanEvent, ScanOptions};
+use rusty_fclone_core::action::{self, ActionKind, ActionPlan, ApplyReport};
+use rusty_fclone_core::{
+    scan, DuplicateGroup, FileError, ScanEvent, ScanOptions, ScanProgress, ScanSummary,
+};
+use serde::Serialize;
 
 /// What to do with redundant copies once a duplicate group is confirmed.
 /// Mirrors `rusty_fclone_core::action::ActionKind`, plus `Report` (the
@@ -33,6 +38,15 @@ impl Action {
             Action::Reflink => Some(ActionKind::Reflink),
         }
     }
+}
+
+/// Output format for scan results (ADR-0015, `CLI-UX-001`).
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Format {
+    /// Human-readable text. Default.
+    Text,
+    /// One JSON object per line (NDJSON), machine-readable.
+    Json,
 }
 
 /// Find duplicate files, fast.
@@ -70,15 +84,26 @@ struct Cli {
     io_threads: Option<usize>,
 
     /// What to do with redundant copies once a group is confirmed.
-    /// Without --apply, delete/hardlink only preview what would happen.
+    /// Without --apply, delete/hardlink/reflink only preview what would
+    /// happen.
     #[arg(long, value_enum, default_value_t = Action::Report)]
     action: Action,
 
-    /// Actually perform --action's effect. Without this flag, delete and
-    /// hardlink only print a preview and touch nothing — a deliberate
-    /// two-flag confirmation so a single typo can't cause data loss.
+    /// Actually perform --action's effect. Without this flag, delete,
+    /// hardlink, and reflink only print a preview and touch nothing — a
+    /// deliberate two-flag confirmation so a single typo can't cause data
+    /// loss.
     #[arg(long)]
     apply: bool,
+
+    /// Skip the interactive confirmation prompt normally shown before
+    /// --apply mutates anything (ADR-0015).
+    #[arg(short = 'y', long)]
+    yes: bool,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    format: Format,
 
     /// Increase log verbosity (-v info, -vv debug, -vvv trace). Ignored if
     /// RUST_LOG is set, which always takes precedence (ADR-0010).
@@ -122,6 +147,13 @@ fn init_tracing(verbose: u8) {
 fn run(cli: Cli) -> ExitCode {
     let action_kind = cli.action.as_core_kind();
 
+    if let Some(kind) = action_kind {
+        if cli.apply && !cli.yes && !confirm_apply(&cli.root, kind) {
+            eprintln!("aborted");
+            return ExitCode::SUCCESS;
+        }
+    }
+
     let options = ScanOptions {
         follow_symlinks: cli.follow_symlinks,
         cross_filesystems: cli.cross_filesystems,
@@ -142,52 +174,44 @@ fn run(cli: Cli) -> ExitCode {
     let mut had_errors = false;
     let mut total_bytes_reclaimed = 0u64;
     let mut total_files_acted_on = 0u64;
+    let mut progress_line = ProgressLine::new(cli.format);
 
     for event in handle {
         match event {
             ScanEvent::DuplicateGroup(group) => {
+                progress_line.finish();
                 had_errors |= handle_group(
                     &group,
                     action_kind,
                     cli.apply,
+                    cli.format,
                     &mut total_bytes_reclaimed,
                     &mut total_files_acted_on,
                 );
             }
             ScanEvent::Error(err) => {
+                progress_line.finish();
                 had_errors = true;
-                eprintln!("warning: {err}");
+                report_error(cli.format, &err);
+            }
+            ScanEvent::Progress(progress) => {
+                report_progress(cli.format, &progress, &mut progress_line);
             }
             ScanEvent::Finished(summary) => {
-                eprintln!(
-                    "scanned {} files ({} bytes), found {} duplicate groups ({} files)",
-                    summary.files_scanned,
-                    summary.bytes_scanned,
-                    summary.duplicate_groups,
-                    summary.duplicate_files
-                );
+                progress_line.finish();
+                report_finished(cli.format, &summary);
             }
         }
     }
 
-    match action_kind {
-        None => {}
-        Some(kind) if cli.apply => {
-            eprintln!(
-                "{}: reclaimed {} bytes across {} files",
-                action_word(kind),
-                total_bytes_reclaimed,
-                total_files_acted_on
-            );
-        }
-        Some(kind) => {
-            eprintln!(
-                "dry run ({}): would reclaim {} bytes across {} files -- pass --apply to actually do this",
-                action_word(kind),
-                total_bytes_reclaimed,
-                total_files_acted_on
-            );
-        }
+    if let Some(kind) = action_kind {
+        report_action_summary(
+            cli.format,
+            kind,
+            cli.apply,
+            total_bytes_reclaimed,
+            total_files_acted_on,
+        );
     }
 
     if had_errors {
@@ -197,51 +221,307 @@ fn run(cli: Cli) -> ExitCode {
     }
 }
 
-/// Prints one duplicate group and, if an action was requested, its plan
-/// (and, with --apply, the result of actually running it). Returns whether
-/// any per-file error occurred.
+/// Prompts on stderr and reads a yes/no answer from stdin, describing what
+/// `--apply` is about to do. Exact totals aren't known upfront -- the scan
+/// hasn't run yet, and groups/actions are applied incrementally as they're
+/// found (ADR-0004's streaming design) -- so this is a general warning
+/// naming the root and action, not a precise preview (ADR-0015).
+fn confirm_apply(root: &Path, kind: ActionKind) -> bool {
+    eprint!(
+        "This will scan {} and {} redundant files as duplicates are found. Proceed? [y/N] ",
+        root.display(),
+        action_word(kind)
+    );
+    let _ = io::stderr().flush();
+    confirm(io::stdin().lock())
+}
+
+/// The confirmation prompt's actual yes/no decision, factored out from
+/// `confirm_apply` so it's testable without a real stdin/terminal.
+fn confirm(mut reader: impl BufRead) -> bool {
+    let mut input = String::new();
+    if reader.read_line(&mut input).is_err() {
+        return false;
+    }
+    matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Tracks the live-updating "scanning..." line on stderr (Text format,
+/// real terminal only -- ADR-0015). Each update overwrites the previous
+/// line in place via `\r`, padded to erase any leftover characters from a
+/// longer prior line; `finish` clears it before other output is printed,
+/// so a duplicate group or error never collides with it mid-line.
+struct ProgressLine {
+    active: bool,
+    last_len: usize,
+}
+
+impl ProgressLine {
+    fn new(format: Format) -> Self {
+        Self {
+            active: format == Format::Text && io::stderr().is_terminal(),
+            last_len: 0,
+        }
+    }
+
+    fn update(&mut self, progress: &ScanProgress) {
+        if !self.active {
+            return;
+        }
+        let line = format!(
+            "scanning... {} files, {} bytes",
+            progress.files_scanned, progress.bytes_scanned
+        );
+        let pad = " ".repeat(self.last_len.saturating_sub(line.len()));
+        eprint!("\r{line}{pad}");
+        let _ = io::stderr().flush();
+        self.last_len = line.len();
+    }
+
+    fn finish(&mut self) {
+        if !self.active || self.last_len == 0 {
+            return;
+        }
+        eprint!("\r{}\r", " ".repeat(self.last_len));
+        let _ = io::stderr().flush();
+        self.last_len = 0;
+    }
+}
+
+fn report_progress(format: Format, progress: &ScanProgress, progress_line: &mut ProgressLine) {
+    match format {
+        Format::Text => progress_line.update(progress),
+        Format::Json => print_json(&JsonEvent::Progress {
+            files_scanned: progress.files_scanned,
+            bytes_scanned: progress.bytes_scanned,
+        }),
+    }
+}
+
+fn report_error(format: Format, err: &FileError) {
+    match format {
+        Format::Text => eprintln!("warning: {err}"),
+        Format::Json => print_json(&JsonEvent::Error {
+            path: err.path.display().to_string(),
+            message: err.source.to_string(),
+        }),
+    }
+}
+
+fn report_finished(format: Format, summary: &ScanSummary) {
+    match format {
+        Format::Text => eprintln!(
+            "scanned {} files ({} bytes), found {} duplicate groups ({} files)",
+            summary.files_scanned,
+            summary.bytes_scanned,
+            summary.duplicate_groups,
+            summary.duplicate_files
+        ),
+        Format::Json => print_json(&JsonEvent::Finished {
+            files_scanned: summary.files_scanned,
+            bytes_scanned: summary.bytes_scanned,
+            duplicate_groups: summary.duplicate_groups,
+            duplicate_files: summary.duplicate_files,
+        }),
+    }
+}
+
+fn report_action_summary(
+    format: Format,
+    kind: ActionKind,
+    applied: bool,
+    bytes_reclaimed: u64,
+    files: u64,
+) {
+    match format {
+        Format::Text if applied => eprintln!(
+            "{}: reclaimed {bytes_reclaimed} bytes across {files} files",
+            action_word(kind)
+        ),
+        Format::Text => eprintln!(
+            "dry run ({}): would reclaim {bytes_reclaimed} bytes across {files} files -- pass --apply to actually do this",
+            action_word(kind)
+        ),
+        Format::Json => print_json(&JsonEvent::ActionSummary {
+            kind: action_word(kind),
+            applied,
+            bytes_reclaimed,
+            files,
+        }),
+    }
+}
+
+/// Handles one duplicate group: prints it (and, if an action was
+/// requested, its plan and, with --apply, the result of actually running
+/// it) in the requested format. Returns whether any per-file error
+/// occurred.
 fn handle_group(
     group: &DuplicateGroup,
     action_kind: Option<ActionKind>,
     apply: bool,
+    format: Format,
     total_bytes_reclaimed: &mut u64,
     total_files_acted_on: &mut u64,
 ) -> bool {
-    println!("--- {} bytes, {} copies ---", group.size, group.paths.len());
-    for path in &group.paths {
-        println!("{}", path.display());
-    }
-
     let Some(kind) = action_kind else {
+        print_group(format, group, None);
         return false;
     };
 
     let plan = action::plan(group, kind);
     if plan.actions.is_empty() {
+        print_group(format, group, None);
         return false;
     }
 
+    let report = if apply {
+        Some(action::apply(&plan))
+    } else {
+        None
+    };
+
+    let (bytes_reclaimed, files_acted_on, had_errors) = match &report {
+        Some(report) => (
+            report.bytes_reclaimed,
+            report.succeeded.len() as u64,
+            !report.failed.is_empty(),
+        ),
+        None => (plan.bytes_reclaimed, plan.actions.len() as u64, false),
+    };
+    *total_bytes_reclaimed += bytes_reclaimed;
+    *total_files_acted_on += files_acted_on;
+
+    print_group(format, group, Some((kind, &plan, apply, report.as_ref())));
+
+    if let Some(report) = &report {
+        for err in &report.failed {
+            eprintln!("warning: {err}");
+        }
+    }
+
+    had_errors
+}
+
+fn print_group(
+    format: Format,
+    group: &DuplicateGroup,
+    action: Option<(ActionKind, &ActionPlan, bool, Option<&ApplyReport>)>,
+) {
+    match format {
+        Format::Text => print_group_text(group, action),
+        Format::Json => print_group_json(group, action),
+    }
+}
+
+fn print_group_text(
+    group: &DuplicateGroup,
+    action: Option<(ActionKind, &ActionPlan, bool, Option<&ApplyReport>)>,
+) {
+    println!("--- {} bytes, {} copies ---", group.size, group.paths.len());
+    for path in &group.paths {
+        println!("{}", path.display());
+    }
+    let Some((kind, plan, ..)) = action else {
+        return;
+    };
     println!("  keep: {}", plan.kept.display());
     for file_action in &plan.actions {
         println!("  {}: {}", action_word(kind), file_action.path.display());
     }
+}
 
-    if !apply {
-        *total_bytes_reclaimed += plan.bytes_reclaimed;
-        *total_files_acted_on += plan.actions.len() as u64;
-        return false;
-    }
+fn print_group_json(
+    group: &DuplicateGroup,
+    action: Option<(ActionKind, &ActionPlan, bool, Option<&ApplyReport>)>,
+) {
+    let action = action.map(|(kind, plan, applied, report)| {
+        let (succeeded, failed) = match report {
+            Some(report) => (
+                paths_to_strings(&report.succeeded),
+                report
+                    .failed
+                    .iter()
+                    .map(|e| e.path.display().to_string())
+                    .collect(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        JsonAction {
+            kind: action_word(kind),
+            kept: plan.kept.display().to_string(),
+            applied,
+            planned: plan
+                .actions
+                .iter()
+                .map(|a| a.path.display().to_string())
+                .collect(),
+            succeeded,
+            failed,
+            bytes_reclaimed: report.map_or(plan.bytes_reclaimed, |r| r.bytes_reclaimed),
+        }
+    });
+    print_json(&JsonEvent::DuplicateGroup {
+        size: group.size,
+        paths: arc_paths_to_strings(&group.paths),
+        action,
+    });
+}
 
-    let report = action::apply(&plan);
-    *total_bytes_reclaimed += report.bytes_reclaimed;
-    *total_files_acted_on += report.succeeded.len() as u64;
+fn paths_to_strings(paths: &[PathBuf]) -> Vec<String> {
+    paths.iter().map(|p| p.display().to_string()).collect()
+}
 
-    let mut had_errors = false;
-    for err in &report.failed {
-        had_errors = true;
-        eprintln!("warning: {err}");
-    }
-    had_errors
+fn arc_paths_to_strings(paths: &[Arc<Path>]) -> Vec<String> {
+    paths.iter().map(|p| p.display().to_string()).collect()
+}
+
+fn print_json(event: &JsonEvent) {
+    println!(
+        "{}",
+        serde_json::to_string(event).expect("JsonEvent always serializes")
+    );
+}
+
+/// NDJSON event shape for `--format json` (ADR-0015, `CLI-UX-001`).
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum JsonEvent {
+    DuplicateGroup {
+        size: u64,
+        paths: Vec<String>,
+        action: Option<JsonAction>,
+    },
+    Error {
+        path: String,
+        message: String,
+    },
+    Progress {
+        files_scanned: u64,
+        bytes_scanned: u64,
+    },
+    Finished {
+        files_scanned: u64,
+        bytes_scanned: u64,
+        duplicate_groups: u64,
+        duplicate_files: u64,
+    },
+    ActionSummary {
+        kind: &'static str,
+        applied: bool,
+        bytes_reclaimed: u64,
+        files: u64,
+    },
+}
+
+#[derive(Serialize)]
+struct JsonAction {
+    kind: &'static str,
+    kept: String,
+    applied: bool,
+    planned: Vec<String>,
+    succeeded: Vec<String>,
+    failed: Vec<String>,
+    bytes_reclaimed: u64,
 }
 
 fn action_word(kind: ActionKind) -> &'static str {
@@ -268,6 +548,8 @@ mod tests {
             io_threads: ScanOptions::default().io_threads,
             action: Action::Report,
             apply: false,
+            yes: false,
+            format: Format::Text,
             verbose: 0,
         }
     }
@@ -310,7 +592,8 @@ mod tests {
     }
 
     /// FR-006 (the other half): `--action delete --apply` must actually
-    /// perform the action.
+    /// perform the action. `--yes` bypasses the confirmation prompt so
+    /// this doesn't block on real stdin (FR-009 covers the prompt itself).
     #[test]
     fn action_with_apply_actually_deletes() {
         let dir = tempfile::tempdir().unwrap();
@@ -322,6 +605,7 @@ mod tests {
         let mut cli = base_cli(dir.path().to_path_buf());
         cli.action = Action::Delete;
         cli.apply = true;
+        cli.yes = true;
         let exit = run(cli);
 
         assert_eq!(exit, ExitCode::SUCCESS);
@@ -340,6 +624,7 @@ mod tests {
         let mut cli = base_cli(dir.path().to_path_buf());
         cli.action = Action::Hardlink;
         cli.apply = true;
+        cli.yes = true;
         let exit = run(cli);
 
         assert_eq!(exit, ExitCode::SUCCESS);
@@ -360,9 +645,64 @@ mod tests {
         );
     }
 
+    /// FR-009: `--apply` without `--yes` is gated on the confirmation
+    /// prompt; since tests don't have a real interactive stdin answering
+    /// "y", the prompt is declined (empty/EOF input) and no mutation
+    /// happens. See `confirm`'s own tests for the prompt's decision logic
+    /// in isolation.
+    #[test]
+    fn apply_without_yes_is_blocked_by_the_unanswered_confirmation_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.action = Action::Delete;
+        cli.apply = true;
+        cli.yes = false;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS, "declining is not a failure");
+        assert!(a.exists());
+        assert!(b.exists(), "nothing must be mutated without confirmation");
+    }
+
+    #[test]
+    fn confirm_accepts_y_and_yes_case_insensitively() {
+        assert!(confirm(io::Cursor::new(b"y\n" as &[u8])));
+        assert!(confirm(io::Cursor::new(b"Y\n" as &[u8])));
+        assert!(confirm(io::Cursor::new(b"yes\n" as &[u8])));
+        assert!(confirm(io::Cursor::new(b"YES\n" as &[u8])));
+    }
+
+    #[test]
+    fn confirm_rejects_anything_else() {
+        assert!(!confirm(io::Cursor::new(b"n\n" as &[u8])));
+        assert!(!confirm(io::Cursor::new(b"\n" as &[u8])));
+        assert!(!confirm(io::Cursor::new(b"" as &[u8])));
+        assert!(!confirm(io::Cursor::new(b"maybe\n" as &[u8])));
+    }
+
     #[test]
     fn rejects_nonexistent_root() {
         let exit = run(base_cli(PathBuf::from("/does/not/exist/at/all")));
         assert_eq!(exit, ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn json_format_reports_duplicates_as_ndjson() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.format = Format::Json;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
     }
 }
