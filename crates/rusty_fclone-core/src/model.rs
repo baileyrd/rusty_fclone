@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::error::FileError;
 
@@ -52,8 +53,11 @@ pub struct DuplicateGroup {
     /// Size in bytes shared by every file in the group.
     pub size: u64,
     /// Every path reporting this content, including hardlink aliases.
-    /// Sorted for stable, diffable output.
-    pub paths: Vec<PathBuf>,
+    /// Sorted for stable, diffable output. `Arc<Path>` rather than
+    /// `PathBuf`: the same path is cloned across several internal grouping
+    /// stages during a scan (ADR-0004's "path storage" note), and an `Arc`
+    /// clone is a refcount bump instead of a fresh heap allocation + copy.
+    pub paths: Vec<Arc<Path>>,
 }
 
 /// One item of a streaming scan result (see ADR-0004).

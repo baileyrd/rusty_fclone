@@ -1,6 +1,7 @@
 # Project Status
 - Last verified main commit: `8d36c62` (PR #4, merged) — tracing/observability
-  work below is on a new branch, not yet merged
+  and Arc<Path> work below are on branches stacked atop each other, not yet
+  merged
 - Verified at: 2026-08-24
 - Current milestone: closing out the roadmap's "Not Started" units and known
   gaps (see `docs/roadmap/ROADMAP.md`)
@@ -32,20 +33,30 @@
   `process_size_group`; leveled events at stage boundaries and every
   per-file error path; CLI wires up `tracing-subscriber` on stderr with a
   repeated `-v`/`--verbose` flag (`RUST_LOG` always takes precedence).
-  ADR-0010. Implemented, tested (fmt/clippy/test/bench all green, 42/42
-  tests), and manually smoke-tested (`-v`, `-vv`, default-silent, and
-  `RUST_LOG` override all confirmed). Not yet through the PR → CI → merge →
-  sync loop.
+  ADR-0010. Implemented, tested, and manually smoke-tested (`-v`, `-vv`,
+  default-silent, and `RUST_LOG` override all confirmed). PR #5 open,
+  awaiting CI.
+- Path storage: `Arc<Path>` instead of `PathBuf` for every path carried
+  through the detection pipeline (`Candidate.path`, `FileGroup`,
+  `FileError.path`, `DuplicateGroup.paths`), so cloning a path across the
+  hardlink-collapse/size/partial-hash/full-hash grouping stages is a
+  refcount bump instead of a fresh allocation and copy. ADR-0011. Stacked
+  on the tracing branch; implemented, tested (fmt/clippy/test/bench all
+  green, 42/42 tests), and manually smoke-tested against a real
+  `--action delete` dry run. Not yet through the PR → CI → merge → sync
+  loop.
 
 ## Blocked
 - None.
 
 ## Next
-1. Open a PR for the tracing/observability work, get CI green, merge, sync.
-2. Remaining open roadmap units, no strong ordering constraint between
-   them: path storage (`Arc<Path>`), `DETECTION-STREAMING-OVERLAP` (scoped
-   to merging traversal/collapse/size-grouping into one streaming pass, not
-   full hash-before-traversal-completes overlap), `DETECTION-LINUX-FASTPATH`
+1. Get CI green and merge PR #5 (tracing/observability), sync main.
+2. Rebase/PR the `Arc<Path>` branch onto the updated main, get CI green,
+   merge, sync.
+3. Remaining open roadmap units, no strong ordering constraint between
+   them: `DETECTION-STREAMING-OVERLAP` (scoped to merging
+   traversal/collapse/size-grouping into one streaming pass, not full
+   hash-before-traversal-completes overlap), `DETECTION-LINUX-FASTPATH`
    (scoped to rotational-vs-SSD-aware `io_threads` sizing, not
    io_uring/FIEMAP), `ACTION-REFLINK`, `CLI-UX` (JSON output, progress
    reporting, an interactive confirmation prompt as a second safety layer

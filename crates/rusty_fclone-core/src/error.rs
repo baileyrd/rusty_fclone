@@ -1,5 +1,6 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -18,7 +19,7 @@ pub enum ScanError {
 #[derive(Debug, Error)]
 #[error("{path}: {source}")]
 pub struct FileError {
-    pub path: PathBuf,
+    pub path: Arc<Path>,
     #[source]
     pub source: io::Error,
 }

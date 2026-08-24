@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -16,8 +17,11 @@ use crate::traversal::traverse;
 
 /// One distinct file, identified by its representative path (the first
 /// alias, alphabetically) plus every path — including hardlink aliases —
-/// that shares its content.
-type FileGroup = (PathBuf, Vec<PathBuf>);
+/// that shares its content. `Arc<Path>` so the representative and each
+/// alias can be cloned cheaply as they move through the size/partial/full
+/// hash grouping stages below, instead of re-allocating a `PathBuf` at
+/// every stage (ADR-0004's "path storage" note).
+type FileGroup = (Arc<Path>, Vec<Arc<Path>>);
 
 /// A running (or finished) scan. Yields [`ScanEvent`]s as they're found —
 /// consumers don't wait for the whole tree to finish before seeing the
@@ -88,7 +92,7 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
 
     // Collapse existing hardlinks: files sharing a (device, inode) / file-id
     // already share storage, so hash only one representative per id.
-    let mut by_file_id: HashMap<FileId, (u64, Vec<PathBuf>)> = HashMap::new();
+    let mut by_file_id: HashMap<FileId, (u64, Vec<Arc<Path>>)> = HashMap::new();
     for candidate in candidates {
         by_file_id
             .entry(candidate.file_id)
@@ -214,7 +218,7 @@ fn process_size_group(
             if group.len() <= 1 {
                 return None;
             }
-            let mut paths: Vec<PathBuf> =
+            let mut paths: Vec<Arc<Path>> =
                 group.into_iter().flat_map(|(_, aliases)| aliases).collect();
             paths.sort();
             Some(DuplicateGroup { size, paths })
@@ -224,7 +228,7 @@ fn process_size_group(
 
 /// Sends a [`ScanEvent::Error`] for a file that failed to read during
 /// hashing or verification (FR-009: per-file errors never abort the scan).
-fn report_error(event_tx: &Sender<ScanEvent>, path: PathBuf, source: io::Error) {
+fn report_error(event_tx: &Sender<ScanEvent>, path: Arc<Path>, source: io::Error) {
     tracing::warn!(path = %path.display(), error = %source, "file error during hashing/verification");
     let _ = event_tx.send(ScanEvent::Error(FileError { path, source }));
 }
@@ -383,7 +387,7 @@ mod tests {
         assert_eq!(groups.len(), 1);
         let mut paths = groups[0].paths.clone();
         paths.sort();
-        let mut expected = vec![a, b, c];
+        let mut expected: Vec<Arc<Path>> = vec![a.into(), b.into(), c.into()];
         expected.sort();
         assert_eq!(paths, expected);
     }
@@ -434,18 +438,18 @@ mod tests {
 
         let io_pool = IoPool::new(2);
         let (tx, _rx) = unbounded();
-        let group = vec![
-            (a.clone(), vec![a.clone()]),
-            (b.clone(), vec![b.clone()]),
-            (c.clone(), vec![c.clone()]),
+        let group: Vec<FileGroup> = vec![
+            (a.clone().into(), vec![a.clone().into()]),
+            (b.clone().into(), vec![b.clone().into()]),
+            (c.clone().into(), vec![c.clone().into()]),
         ];
 
         let survivors = verify_representatives(group, &io_pool, &tx);
-        let survivor_paths: Vec<PathBuf> = survivors.into_iter().map(|(rep, _)| rep).collect();
+        let survivor_paths: Vec<Arc<Path>> = survivors.into_iter().map(|(rep, _)| rep).collect();
         assert_eq!(survivor_paths.len(), 2);
-        assert!(survivor_paths.contains(&a));
-        assert!(survivor_paths.contains(&b));
-        assert!(!survivor_paths.contains(&c));
+        assert!(survivor_paths.iter().any(|p| p.as_ref() == a.as_path()));
+        assert!(survivor_paths.iter().any(|p| p.as_ref() == b.as_path()));
+        assert!(!survivor_paths.iter().any(|p| p.as_ref() == c.as_path()));
     }
 
     #[test]
@@ -460,10 +464,10 @@ mod tests {
         let io_pool = IoPool::new(2);
         let options = ScanOptions::default();
         let (tx, rx) = unbounded();
-        let members = vec![
-            (missing.clone(), vec![missing.clone()]),
-            (dup1.clone(), vec![dup1.clone()]),
-            (dup2.clone(), vec![dup2.clone()]),
+        let members: Vec<FileGroup> = vec![
+            (missing.clone().into(), vec![missing.clone().into()]),
+            (dup1.clone().into(), vec![dup1.clone().into()]),
+            (dup2.clone().into(), vec![dup2.clone().into()]),
         ];
 
         let groups = process_size_group(3, members, &io_pool, &options, &tx);
@@ -476,7 +480,7 @@ mod tests {
         );
         let mut paths = groups[0].paths.clone();
         paths.sort();
-        let mut expected = vec![dup1, dup2];
+        let mut expected: Vec<Arc<Path>> = vec![dup1.into(), dup2.into()];
         expected.sort();
         assert_eq!(paths, expected);
 
@@ -487,7 +491,7 @@ mod tests {
             "the missing file must be reported exactly once"
         );
         match &errors[0] {
-            ScanEvent::Error(err) => assert_eq!(err.path, missing),
+            ScanEvent::Error(err) => assert_eq!(err.path.as_ref(), missing.as_path()),
             other => panic!("expected ScanEvent::Error, got {other:?}"),
         }
     }
