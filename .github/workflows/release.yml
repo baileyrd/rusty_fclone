@@ -5,6 +5,16 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Existing release tag to attach binaries to. GitHub can only
+          dispatch this workflow from a ref where release.yml itself
+          exists, so a tag created before this workflow was added (e.g.
+          v0.1.0) can't be dispatched from directly -- dispatch from
+          main instead and set this input to that tag name.
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -13,6 +23,8 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -27,6 +39,8 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install Rust toolchain
         run: |
@@ -49,7 +63,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          staging="rusty-fclone-${{ github.ref_name }}-${{ matrix.target }}"
+          staging="rusty-fclone-${{ env.RELEASE_TAG }}-${{ matrix.target }}"
           mkdir "$staging"
           cp "target/${{ matrix.target }}/release/rusty-fclone" "$staging/"
           cp README.md LICENSE-MIT LICENSE-APACHE "$staging/"
@@ -60,7 +74,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $staging = "rusty-fclone-${{ github.ref_name }}-${{ matrix.target }}"
+          $staging = "rusty-fclone-${{ env.RELEASE_TAG }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $staging | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/rusty-fclone.exe" "$staging/"
           Copy-Item README.md,LICENSE-MIT,LICENSE-APACHE "$staging/"
@@ -70,6 +84,6 @@ jobs:
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: ${{ env.ASSET }}
           fail_on_unmatched_files: true
