@@ -1,5 +1,5 @@
 # Project Status
-- Last verified main commit: none yet — `main` has no commits; this branch (`claude/custom-fclone-detection-bufv7b`) holds the first baseline and has not been merged
+- Last verified main commit: none yet — `main` has no commits; this branch (`claude/custom-fclone-detection-bufv7b`) holds the first baseline at `4cb7c91` and has not been merged
 - Verified at: 2026-08-24
 - Current milestone: `DETECTION-BASELINE` (see `docs/roadmap/ROADMAP.md`)
 - Health: green — workspace builds, lints, and tests clean on the pinned toolchain
