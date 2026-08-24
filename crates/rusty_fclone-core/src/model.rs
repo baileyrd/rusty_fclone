@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::error::FileError;
@@ -33,6 +33,12 @@ pub struct ScanOptions {
     /// and ADR-0013 for the device-aware default this refines it into.
     /// `Some(n)` pins it explicitly and skips detection.
     pub io_threads: Option<usize>,
+    /// Path to a `redb` full-file-hash cache. `None` (the default) disables
+    /// caching entirely -- opt in explicitly, since it means writing a file
+    /// to disk. When set, a file whose `(size, mtime)` match a cached entry
+    /// reuses that hash instead of re-reading and re-hashing it; a
+    /// newly-computed hash is written back for next time (ADR-0016).
+    pub cache_path: Option<PathBuf>,
 }
 
 impl Default for ScanOptions {
@@ -44,6 +50,7 @@ impl Default for ScanOptions {
             small_file_threshold: 128 * 1024,
             partial_hash_sample_size: 16 * 1024,
             io_threads: None,
+            cache_path: None,
         }
     }
 }

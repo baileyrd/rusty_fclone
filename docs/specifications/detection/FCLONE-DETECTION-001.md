@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.1.7
+- Version: 0.1.8
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -87,6 +87,13 @@ reporting, a GUI) is out of scope for this specification and depends on it.
   core count otherwise — see ADR-0008, ADR-0013), so that I/O latency and
   hashing CPU cost are not serialized through the same thread pool (see
   ADR-0002).
+- `FCLONE-DETECTION-001-NFR-004`: When `ScanOptions::cache_path` is set, a
+  file whose `(size, mtime)` match a cached full-hash entry SHALL reuse
+  that hash rather than being re-read and re-hashed; a newly-computed full
+  hash SHALL be persisted to the cache for future scans (ADR-0016). Caching
+  SHALL be off by default and SHALL NOT change detection results — a
+  cache hit and a freshly-computed hash for the same unchanged file are
+  interchangeable.
 
 ## Architecture and interfaces
 
@@ -103,12 +110,14 @@ pub struct ScanProgress { pub files_scanned: u64, pub bytes_scanned: u64 }
 pub struct DuplicateGroup { pub size: u64, pub paths: Vec<Arc<Path>> }
 pub struct ScanOptions { pub follow_symlinks: bool, pub cross_filesystems: bool,
                           pub verify_matches: bool, pub small_file_threshold: u64,
-                          pub partial_hash_sample_size: u64, pub io_threads: Option<usize> }
+                          pub partial_hash_sample_size: u64, pub io_threads: Option<usize>,
+                          pub cache_path: Option<PathBuf> }
 ```
 
 Internal modules: `traversal` (jwalk-based walk + file-id), `io_pool`
 (hand-rolled blocking read workers), `hash` (xxh3-128 + sampling), `device`
-(Linux rotational-disk detection for `io_threads` auto-sizing), `pipeline`
+(Linux rotational-disk detection for `io_threads` auto-sizing), `cache`
+(`redb`-backed full-hash cache, ADR-0016), `pipeline`
 (orchestration: hardlink collapse → size-group → partial hash → full hash →
 optional verify → emit).
 
@@ -200,6 +209,12 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.1.8 (2026-08-24): Added `ScanOptions::cache_path: Option<PathBuf>`
+  (NFR-004) and a new `cache` module: an opt-in, `redb`-backed cache of
+  each file's full hash, keyed by path and invalidated by `(size, mtime)`.
+  A cache hit skips both the partial-hash and full-hash stages for that
+  file entirely. Off by default; no change to detection results either
+  way. ADR-0016, new CLI `--cache <path>` flag.
 - 0.1.7 (2026-08-24): Added `ScanEvent::Progress(ScanProgress)`, a
   traversal progress checkpoint emitted every 256 files scanned, always
   before `Finished`. Consumed by the CLI's new `--format json`/live
