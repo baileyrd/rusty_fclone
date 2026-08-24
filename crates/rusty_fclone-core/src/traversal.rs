@@ -15,26 +15,32 @@ pub(crate) struct Candidate {
 }
 
 /// Walks `root` in parallel (via jwalk's built-in rayon-backed walker),
-/// stat-ing every regular file it finds.
+/// stat-ing every regular file it finds and handing each one to
+/// `on_candidate` as soon as it's ready, rather than collecting a `Vec`
+/// the caller has to loop over separately (DETECTION-STREAMING-OVERLAP:
+/// this merges the traversal and hardlink-collapse stages into one pass —
+/// see `pipeline::run_scan`'s caller for the collapse step now folded into
+/// `on_candidate`).
 ///
 /// Symlinks are skipped unless `options.follow_symlinks` is set, and the
 /// walk stays on the filesystem `root` lives on unless
 /// `options.cross_filesystems` is set (ADR-0003). Per-file errors are
 /// reported through `on_error` and otherwise ignored — one bad file never
 /// aborts the whole traversal (ADR-0004).
-#[tracing::instrument(skip(options, on_error), fields(root = %root.display()))]
+#[tracing::instrument(skip(options, on_error, on_candidate), fields(root = %root.display()))]
 pub(crate) fn traverse(
     root: &Path,
     options: &ScanOptions,
     mut on_error: impl FnMut(FileError),
-) -> Vec<Candidate> {
+    mut on_candidate: impl FnMut(Candidate),
+) {
     let root_device = get_file_id(root).ok().and_then(|id| device_component(&id));
 
     let walker = WalkDir::new(root)
         .follow_links(options.follow_symlinks)
         .skip_hidden(false);
 
-    let mut candidates = Vec::new();
+    let mut candidate_count = 0u64;
     for entry in walker {
         let entry = match entry {
             Ok(entry) => entry,
@@ -88,15 +94,15 @@ pub(crate) fn traverse(
             continue;
         }
 
-        candidates.push(Candidate {
+        candidate_count += 1;
+        on_candidate(Candidate {
             path,
             size: metadata.len(),
             file_id,
         });
     }
 
-    tracing::debug!(candidates = candidates.len(), "traversal finished");
-    candidates
+    tracing::debug!(candidates = candidate_count, "traversal finished");
 }
 
 /// Decides whether a candidate should be skipped for being on a different
@@ -138,6 +144,20 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Test helper matching `traverse`'s pre-streaming call shape: collect
+    /// every candidate into a `Vec`, the way `pipeline::run_scan` did
+    /// before folding the collapse step into `on_candidate` directly
+    /// (DETECTION-STREAMING-OVERLAP).
+    fn traverse_collect(
+        root: &Path,
+        options: &ScanOptions,
+        on_error: impl FnMut(FileError),
+    ) -> Vec<Candidate> {
+        let mut candidates = Vec::new();
+        traverse(root, options, on_error, |c| candidates.push(c));
+        candidates
+    }
+
     #[test]
     fn finds_regular_files_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -146,7 +166,7 @@ mod tests {
         fs::write(dir.path().join("sub/b.txt"), b"bb").unwrap();
 
         let options = ScanOptions::default();
-        let candidates = traverse(dir.path(), &options, |_| {});
+        let candidates = traverse_collect(dir.path(), &options, |_| {});
 
         let mut sizes: Vec<u64> = candidates.iter().map(|c| c.size).collect();
         sizes.sort();
@@ -163,7 +183,7 @@ mod tests {
                 .unwrap();
 
             let options = ScanOptions::default();
-            let candidates = traverse(dir.path(), &options, |_| {});
+            let candidates = traverse_collect(dir.path(), &options, |_| {});
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].path.file_name().unwrap(), "real.txt");
         }
@@ -188,7 +208,7 @@ mod tests {
                 ..ScanOptions::default()
             };
             let mut errors = Vec::new();
-            let candidates = traverse(dir.path(), &options, |err| errors.push(err));
+            let candidates = traverse_collect(dir.path(), &options, |err| errors.push(err));
 
             assert_eq!(
                 candidates.len(),
@@ -230,7 +250,7 @@ mod tests {
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let mut errors = Vec::new();
-                let candidates = traverse(&root, &options, |err| errors.push(err));
+                let candidates = traverse_collect(&root, &options, |err| errors.push(err));
                 let _ = tx.send((candidates.len(), errors.len()));
             });
 

@@ -78,28 +78,35 @@ pub fn scan(root: impl Into<PathBuf>, options: ScanOptions) -> Result<ScanHandle
 fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
     let mut summary = ScanSummary::default();
 
-    let candidates = traverse(&root, &options, |err| {
-        let _ = event_tx.send(ScanEvent::Error(err));
-    });
+    // Traversal and hardlink-collapse run as one streaming pass
+    // (DETECTION-STREAMING-OVERLAP): each candidate is folded into
+    // `by_file_id` as soon as jwalk produces it, rather than first
+    // materializing a `Vec<Candidate>` and looping over it separately.
+    // Files sharing a (device, inode) / file-id already share storage, so
+    // only one representative per id needs hashing.
+    let mut by_file_id: HashMap<FileId, (u64, Vec<Arc<Path>>)> = HashMap::new();
+    traverse(
+        &root,
+        &options,
+        |err| {
+            let _ = event_tx.send(ScanEvent::Error(err));
+        },
+        |candidate| {
+            summary.files_scanned += 1;
+            summary.bytes_scanned += candidate.size;
+            by_file_id
+                .entry(candidate.file_id)
+                .or_insert_with(|| (candidate.size, Vec::new()))
+                .1
+                .push(candidate.path);
+        },
+    );
 
-    summary.files_scanned = candidates.len() as u64;
-    summary.bytes_scanned = candidates.iter().map(|c| c.size).sum();
     tracing::info!(
         files_scanned = summary.files_scanned,
         bytes_scanned = summary.bytes_scanned,
         "traversal complete"
     );
-
-    // Collapse existing hardlinks: files sharing a (device, inode) / file-id
-    // already share storage, so hash only one representative per id.
-    let mut by_file_id: HashMap<FileId, (u64, Vec<Arc<Path>>)> = HashMap::new();
-    for candidate in candidates {
-        by_file_id
-            .entry(candidate.file_id)
-            .or_insert_with(|| (candidate.size, Vec::new()))
-            .1
-            .push(candidate.path);
-    }
 
     // Group representatives by size — only sizes shared by 2+ distinct
     // files can possibly be duplicates.
