@@ -24,6 +24,7 @@ reflink-copy = { version = "0.1.30", features = ["tracing"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 redb = "4.2.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [profile.release]
 lto = true
