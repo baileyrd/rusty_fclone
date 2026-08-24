@@ -1,0 +1,16 @@
+[package]
+name = "rusty_fclone-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line interface for rusty_fclone"
+publish = false
+
+[[bin]]
+name = "rusty-fclone"
+path = "src/main.rs"
+
+[dependencies]
+rusty_fclone-core = { path = "../rusty_fclone-core" }
+clap.workspace = true

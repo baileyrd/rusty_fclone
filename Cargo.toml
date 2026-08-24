@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/rusty_fclone-core", "crates/rusty_fclone-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_fclone"
+
+[workspace.dependencies]
+jwalk = "0.8"
+rayon = "1"
+crossbeam-channel = "0.5"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+file-id = "0.2"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1

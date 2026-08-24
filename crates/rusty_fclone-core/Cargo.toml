@@ -1,0 +1,19 @@
+[package]
+name = "rusty_fclone-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Duplicate file detection engine for rusty_fclone"
+publish = false
+
+[dependencies]
+jwalk.workspace = true
+rayon.workspace = true
+crossbeam-channel.workspace = true
+xxhash-rust.workspace = true
+file-id.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
