@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.1.0
+- Version: 0.1.1
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -112,11 +112,19 @@ optional verify → emit).
   byte-verified, for distinct inodes).
 - `ScanSummary.duplicate_files` counts every path across every emitted
   group, including hardlink aliases.
+- A set of paths that are *only* hardlink aliases of one inode, with no
+  other file matching their content, is never reported as a
+  `DuplicateGroup` — they already share storage, so there is nothing
+  actionable to report (see `pipeline::tests::standalone_hardlink_pair_is_not_reported_as_duplicate`).
 
 ## Errors, failure, recovery, and observability
 
 - Traversal errors (unreadable directory, broken entry) and per-file read
-  errors both surface as `ScanEvent::Error(FileError { path, source })`.
+  errors — during partial-hash, full-hash, *and* `--verify`'s byte-compare
+  read — all surface as `ScanEvent::Error(FileError { path, source })`. (The
+  hashing/verification-stage reporting was added in the traceability
+  gap-closure pass; earlier code silently dropped those failures instead of
+  reporting them — see change history.)
 - A non-directory or non-existent root is rejected synchronously by `scan()`
   as `ScanError::InvalidRoot`, before any background work starts.
 - No structured logging/tracing exists yet in v1 — see roadmap.
@@ -151,13 +159,28 @@ See `docs/traceability/TRACEABILITY.md`.
 ## Open questions
 
 - Symlink-cycle handling when `follow_symlinks = true` relies entirely on
-  jwalk's own loop detection; no dedicated test exercises this path yet.
+  jwalk's own loop detection; the gap-closure pass added a test for the
+  broken-symlink error-reporting case
+  (`traversal_errors_are_reported_and_do_not_abort_the_scan`), but no
+  dedicated test exercises an actual symlink *cycle* yet.
 - No benchmark exists yet to validate the "fastest possible" goal against
   fclones or a synthetic large-tree workload.
 - Streaming full-file hashing (avoiding buffering an entire large file
   before hashing it) is not implemented; see ADR-0002's implementation note.
+- `FCLONE-DETECTION-001-NFR-001`'s test verifies the streaming *contract*
+  (groups always precede `Finished`) but not actual wall-clock overlap
+  between traversal and hashing — see `DETECTION-STREAMING-OVERLAP` on the
+  roadmap.
 
 ## Change history
 
+- 0.1.1 (2026-08-24): Closed all traceability gaps flagged "needs dedicated
+  unit test" with direct tests (FR-005, FR-006, FR-008, FR-009, NFR-001).
+  While closing FR-009, found and fixed a real gap: read failures during the
+  partial-hash, full-hash, and `--verify` stages were silently dropped
+  instead of being reported via `ScanEvent::Error` — only traversal-stage
+  failures were reported before this fix. No architectural decision changed
+  (ADR-0004 already required this); this was a bug relative to an existing
+  requirement, not a new decision.
 - 0.1.0 (2026-08-24): Initial specification, written against the v1
   baseline implementation landed alongside ADR-0001 through ADR-0006.

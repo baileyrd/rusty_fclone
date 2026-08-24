@@ -8,7 +8,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use file_id::FileId;
 use rayon::prelude::*;
 
-use crate::error::ScanError;
+use crate::error::{FileError, ScanError};
 use crate::hash::{hash_chunks, sample_ranges};
 use crate::io_pool::IoPool;
 use crate::model::{DuplicateGroup, ScanEvent, ScanOptions, ScanSummary};
@@ -115,7 +115,7 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
     candidate_groups
         .into_par_iter()
         .for_each(|(size, members)| {
-            for group in process_size_group(size, members, &io_pool, &options) {
+            for group in process_size_group(size, members, &io_pool, &options, &event_tx) {
                 duplicate_groups.fetch_add(1, Ordering::Relaxed);
                 duplicate_files.fetch_add(group.paths.len() as u64, Ordering::Relaxed);
                 let _ = event_tx.send(ScanEvent::DuplicateGroup(group));
@@ -135,6 +135,7 @@ fn process_size_group(
     members: Vec<FileGroup>,
     io_pool: &IoPool,
     options: &ScanOptions,
+    event_tx: &Sender<ScanEvent>,
 ) -> Vec<DuplicateGroup> {
     let small_file = size <= options.small_file_threshold;
 
@@ -145,8 +146,13 @@ fn process_size_group(
             .into_par_iter()
             .filter_map(|(representative, aliases)| {
                 let ranges = sample_ranges(size, options.small_file_threshold);
-                let bytes = io_pool.read_ranges(&representative, ranges).ok()?;
-                Some((hash_chunks(&[&bytes]), (representative, aliases)))
+                match io_pool.read_ranges(&representative, ranges) {
+                    Ok(bytes) => Some((hash_chunks(&[&bytes]), (representative, aliases))),
+                    Err(source) => {
+                        report_error(event_tx, representative, source);
+                        None
+                    }
+                }
             })
             .collect();
 
@@ -164,10 +170,15 @@ fn process_size_group(
 
     let full_hashed: Vec<(u128, FileGroup)> = full_hash_input
         .into_par_iter()
-        .filter_map(|(representative, aliases)| {
-            let bytes = io_pool.read_full(&representative).ok()?;
-            Some((hash_chunks(&[&bytes]), (representative, aliases)))
-        })
+        .filter_map(
+            |(representative, aliases)| match io_pool.read_full(&representative) {
+                Ok(bytes) => Some((hash_chunks(&[&bytes]), (representative, aliases))),
+                Err(source) => {
+                    report_error(event_tx, representative, source);
+                    None
+                }
+            },
+        )
         .collect();
 
     let mut by_full: HashMap<u128, Vec<FileGroup>> = HashMap::new();
@@ -180,7 +191,7 @@ fn process_size_group(
         .filter(|group| group.len() > 1)
         .filter_map(|group| {
             let group = if options.verify_matches {
-                verify_representatives(group, io_pool)
+                verify_representatives(group, io_pool, event_tx)
             } else {
                 group
             };
@@ -195,11 +206,27 @@ fn process_size_group(
         .collect()
 }
 
+/// Sends a [`ScanEvent::Error`] for a file that failed to read during
+/// hashing or verification (FR-009: per-file errors never abort the scan).
+fn report_error(event_tx: &Sender<ScanEvent>, path: PathBuf, source: io::Error) {
+    let _ = event_tx.send(ScanEvent::Error(FileError { path, source }));
+}
+
+/// `io::Error` isn't `Clone`; this preserves the kind and message when we
+/// need to both report an error and keep the original for later use.
+fn clone_io_error(err: &io::Error) -> io::Error {
+    io::Error::new(err.kind(), err.to_string())
+}
+
 /// Byte-compares every representative in `group` against the first,
 /// dropping any that don't actually match (ADR-0001's `--verify` mode).
 /// Hardlink aliases are never re-verified — they share an inode with their
 /// representative by construction, so they're trivially identical.
-fn verify_representatives(group: Vec<FileGroup>, io_pool: &IoPool) -> Vec<FileGroup> {
+fn verify_representatives(
+    group: Vec<FileGroup>,
+    io_pool: &IoPool,
+    event_tx: &Sender<ScanEvent>,
+) -> Vec<FileGroup> {
     let mut with_bytes: Vec<(PathBuf, Vec<PathBuf>, io::Result<Vec<u8>>)> = group
         .into_par_iter()
         .map(|(representative, aliases)| {
@@ -208,6 +235,11 @@ fn verify_representatives(group: Vec<FileGroup>, io_pool: &IoPool) -> Vec<FileGr
         })
         .collect();
 
+    for (path, _, bytes) in &with_bytes {
+        if let Err(err) = bytes {
+            report_error(event_tx, path.clone(), clone_io_error(err));
+        }
+    }
     with_bytes.retain(|(_, _, bytes)| bytes.is_ok());
     if with_bytes.len() < 2 {
         return Vec::new();
@@ -299,5 +331,165 @@ mod tests {
         let file = dir.path().join("f.txt");
         fs::write(&file, b"x").unwrap();
         assert!(scan(file, ScanOptions::default()).is_err());
+    }
+
+    #[test]
+    fn hardlink_aliases_are_included_when_content_matches_another_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let c = dir.path().join("c.txt");
+        fs::write(&a, b"shared content").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        fs::write(&c, b"shared content").unwrap();
+
+        let groups = collect_groups(dir.path(), ScanOptions::default());
+        assert_eq!(groups.len(), 1);
+        let mut paths = groups[0].paths.clone();
+        paths.sort();
+        let mut expected = vec![a, b, c];
+        expected.sort();
+        assert_eq!(paths, expected);
+    }
+
+    #[test]
+    fn standalone_hardlink_pair_is_not_reported_as_duplicate() {
+        // Two paths to the same inode already share storage; with nothing
+        // else matching their content, there's nothing to report — they
+        // aren't "duplicates" in any actionable sense (ADR-0001).
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"only one file's worth of content").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+
+        let groups = collect_groups(dir.path(), ScanOptions::default());
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn verify_matches_true_still_reports_real_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"identical").unwrap();
+        fs::write(dir.path().join("b.txt"), b"identical").unwrap();
+
+        let options = ScanOptions {
+            verify_matches: true,
+            ..ScanOptions::default()
+        };
+        let groups = collect_groups(dir.path(), options);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].paths.len(), 2);
+    }
+
+    #[test]
+    fn verify_representatives_drops_entries_that_do_not_byte_match() {
+        // Exercises the --verify byte-compare path directly: even if two
+        // files reached this stage with the same hash, verification must
+        // still drop one whose actual bytes differ rather than trusting the
+        // hash blindly.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let c = dir.path().join("c.txt");
+        fs::write(&a, b"match").unwrap();
+        fs::write(&b, b"match").unwrap();
+        fs::write(&c, b"MATCH").unwrap(); // same length, different bytes
+
+        let io_pool = IoPool::new(2);
+        let (tx, _rx) = unbounded();
+        let group = vec![
+            (a.clone(), vec![a.clone()]),
+            (b.clone(), vec![b.clone()]),
+            (c.clone(), vec![c.clone()]),
+        ];
+
+        let survivors = verify_representatives(group, &io_pool, &tx);
+        let survivor_paths: Vec<PathBuf> = survivors.into_iter().map(|(rep, _)| rep).collect();
+        assert_eq!(survivor_paths.len(), 2);
+        assert!(survivor_paths.contains(&a));
+        assert!(survivor_paths.contains(&b));
+        assert!(!survivor_paths.contains(&c));
+    }
+
+    #[test]
+    fn read_failures_during_hashing_are_reported_and_do_not_abort_the_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let dup1 = dir.path().join("dup1.txt");
+        let dup2 = dir.path().join("dup2.txt");
+        fs::write(&dup1, b"dup").unwrap();
+        fs::write(&dup2, b"dup").unwrap();
+        let missing = dir.path().join("vanished.txt"); // never created
+
+        let io_pool = IoPool::new(2);
+        let options = ScanOptions::default();
+        let (tx, rx) = unbounded();
+        let members = vec![
+            (missing.clone(), vec![missing.clone()]),
+            (dup1.clone(), vec![dup1.clone()]),
+            (dup2.clone(), vec![dup2.clone()]),
+        ];
+
+        let groups = process_size_group(3, members, &io_pool, &options, &tx);
+        drop(tx);
+
+        assert_eq!(
+            groups.len(),
+            1,
+            "the two real duplicates must still be found"
+        );
+        let mut paths = groups[0].paths.clone();
+        paths.sort();
+        let mut expected = vec![dup1, dup2];
+        expected.sort();
+        assert_eq!(paths, expected);
+
+        let errors: Vec<ScanEvent> = rx.try_iter().collect();
+        assert_eq!(
+            errors.len(),
+            1,
+            "the missing file must be reported exactly once"
+        );
+        match &errors[0] {
+            ScanEvent::Error(err) => assert_eq!(err.path, missing),
+            other => panic!("expected ScanEvent::Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finished_event_is_always_last_and_reports_every_group() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a1.txt"), b"aa").unwrap();
+        fs::write(dir.path().join("a2.txt"), b"aa").unwrap();
+        fs::write(dir.path().join("b1.txt"), b"bbb").unwrap();
+        fs::write(dir.path().join("b2.txt"), b"bbb").unwrap();
+
+        let events: Vec<ScanEvent> = scan(dir.path(), ScanOptions::default()).unwrap().collect();
+
+        let finished_positions: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, ScanEvent::Finished(_)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            finished_positions,
+            vec![events.len() - 1],
+            "Finished must be the only, final event"
+        );
+
+        let group_count = events
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::DuplicateGroup(_)))
+            .count();
+        assert_eq!(
+            group_count, 2,
+            "both duplicate pairs must be streamed before Finished"
+        );
+
+        match events.last().unwrap() {
+            ScanEvent::Finished(summary) => assert_eq!(summary.duplicate_groups, 2),
+            other => panic!("expected ScanEvent::Finished, got {other:?}"),
+        }
     }
 }
