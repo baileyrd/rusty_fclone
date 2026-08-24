@@ -15,8 +15,13 @@
 
 ## Known gaps carried from the v1 baseline (not blocking, but tracked)
 
-- Path storage is the naive `HashMap`-based model; prefix-compression
-  deferred until benchmarked as necessary (ADR-0004).
+None currently open — see "Closed" below. Path storage still uses a plain
+`HashMap`-based model rather than fclones-style prefix-compressed storage,
+but that's a deliberate, standing design choice (ADR-0004), not a tracked
+gap: it's explicitly conditioned on benchmark evidence from a real
+multi-million-file tree showing it's the actual bottleneck, which doesn't
+exist yet. The redundant-clone cost that *was* a genuine, unconditional gap
+is closed (see below).
 
 Closed: cycle-detection test for `--follow-symlinks`
 (`traversal::tests::follow_symlinks_terminates_on_a_cycle`, confirms jwalk's
@@ -25,4 +30,7 @@ loudly instead of hanging); full-file hashing and `--verify` now stream in
 fixed-size chunks instead of buffering whole files (ADR-0002 addendum);
 structured logging/observability via `tracing` spans/events on the
 traversal and pipeline stages, with a CLI `-v`/`--verbose` flag and
-`RUST_LOG` support (ADR-0010).
+`RUST_LOG` support (ADR-0010); redundant path-clone cost in the detection
+pipeline, by switching internal path storage from `PathBuf` to `Arc<Path>`
+so cloning a path through the grouping stages is a refcount bump instead of
+a fresh allocation and copy (ADR-0011).

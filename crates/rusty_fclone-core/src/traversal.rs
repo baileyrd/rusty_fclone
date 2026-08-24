@@ -1,4 +1,5 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use file_id::{get_file_id, FileId};
 use jwalk::WalkDir;
@@ -8,7 +9,7 @@ use crate::model::ScanOptions;
 
 /// A file found during traversal, stat-ed but not yet read.
 pub(crate) struct Candidate {
-    pub path: PathBuf,
+    pub path: Arc<Path>,
     pub size: u64,
     pub file_id: FileId,
 }
@@ -38,10 +39,7 @@ pub(crate) fn traverse(
         let entry = match entry {
             Ok(entry) => entry,
             Err(err) => {
-                let path = err
-                    .path()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| root.to_path_buf());
+                let path: Arc<Path> = err.path().map(Arc::from).unwrap_or_else(|| Arc::from(root));
                 tracing::warn!(path = %path.display(), error = %err, "traversal entry error");
                 on_error(FileError {
                     path,
@@ -55,7 +53,7 @@ pub(crate) fn traverse(
             continue;
         }
 
-        let path = entry.path();
+        let path: Arc<Path> = Arc::from(entry.path());
 
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,

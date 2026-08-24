@@ -67,7 +67,7 @@ pub struct ApplyReport {
 /// surface that as a per-file failure rather than `plan` silently dropping
 /// it, keeping the plan an honest preview of what `apply` will attempt.
 pub fn plan(group: &DuplicateGroup, kind: ActionKind) -> ActionPlan {
-    let kept = group.paths[0].clone();
+    let kept = group.paths[0].to_path_buf();
     let kept_id = get_file_id(&kept).ok();
 
     let actions: Vec<FileAction> = group.paths[1..]
@@ -80,7 +80,7 @@ pub fn plan(group: &DuplicateGroup, kind: ActionKind) -> ActionPlan {
             !same_file
         })
         .map(|path| FileAction {
-            path: path.clone(),
+            path: path.to_path_buf(),
             kind,
         })
         .collect();
@@ -111,7 +111,7 @@ pub fn apply(plan: &ActionPlan) -> ApplyReport {
                 report.bytes_reclaimed += plan.size;
             }
             Err(source) => report.failed.push(FileError {
-                path: action.path.clone(),
+                path: action.path.clone().into(),
                 source,
             }),
         }
@@ -149,7 +149,10 @@ mod tests {
     use std::fs;
 
     fn group(size: u64, paths: Vec<PathBuf>) -> DuplicateGroup {
-        DuplicateGroup { size, paths }
+        DuplicateGroup {
+            size,
+            paths: paths.into_iter().map(Into::into).collect(),
+        }
     }
 
     #[test]
@@ -246,7 +249,7 @@ mod tests {
 
         assert_eq!(report.succeeded, vec![b.clone()]);
         assert_eq!(report.failed.len(), 1);
-        assert_eq!(report.failed[0].path, missing);
+        assert_eq!(report.failed[0].path.as_ref(), missing.as_path());
         assert_eq!(report.bytes_reclaimed, 3);
     }
 

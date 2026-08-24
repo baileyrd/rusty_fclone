@@ -340,7 +340,7 @@ mod tests {
             rusty_fclone_core::action::plan(
                 &DuplicateGroup {
                     size: 3,
-                    paths: vec![a.clone(), b.clone()]
+                    paths: vec![a.clone().into(), b.clone().into()]
                 },
                 ActionKind::Delete
             )
