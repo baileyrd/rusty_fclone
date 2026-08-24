@@ -14,12 +14,21 @@
 | `FCLONE-DETECTION-001-NFR-001` | `DETECTION-BASELINE` | ADR-0004 | `pipeline::ScanHandle` (`Iterator`) | `pipeline::tests::finished_event_is_always_last_and_reports_every_group` (contract-level: `Finished` is always terminal and every group precedes it), manual CLI smoke test | gap-closure commit | Implemented, Verified (contract only — no test measures wall-clock overlap between traversal and hashing; see roadmap's `DETECTION-STREAMING-OVERLAP`) |
 | `FCLONE-DETECTION-001-NFR-002` | `DETECTION-BASELINE` | ADR-0001 | `pipeline::process_size_group` | `pipeline::tests::no_duplicates_when_only_prefix_matches` (indirect) | initial commit | Implemented |
 | `FCLONE-DETECTION-001-NFR-003` | `DETECTION-BASELINE` | ADR-0002, ADR-0008 | `io_pool::IoPool` + rayon `into_par_iter` | `io_pool::tests::*` (pool mechanics only); default sizing validated by `docs/benchmarks/FCLONES-COMPARISON.md`'s `--io-threads` sweep | initial commit; default changed in io-thread-sizing commit | Implemented, benchmarked |
+| `FCLONE-ACTION-001-FR-001` | `ACTION-LAYER` | ADR-0009 | `action::plan` | `action::tests::plans_every_non_kept_path`, `action::tests::plan_skips_existing_hardlink_aliases_of_kept` | action-layer commit | Implemented, Verified |
+| `FCLONE-ACTION-001-FR-002` | `ACTION-LAYER` | ADR-0009 | `action::plan` (no `fs::` mutation calls) | `action::tests::plans_every_non_kept_path` (implicitly: files still exist and are unmodified after `plan` alone) | action-layer commit | Implemented, Verified |
+| `FCLONE-ACTION-001-FR-003` | `ACTION-LAYER` | ADR-0009 | `action::apply` (`ActionKind::Delete`) | `action::tests::apply_delete_removes_redundant_copies_and_keeps_the_kept_file` | action-layer commit | Implemented, Verified |
+| `FCLONE-ACTION-001-FR-004` | `ACTION-LAYER` | ADR-0009 | `action::hardlink_over` | `action::tests::apply_hardlink_replaces_redundant_copy_and_preserves_its_path` | action-layer commit | Implemented, Verified |
+| `FCLONE-ACTION-001-FR-005` | `ACTION-LAYER` | ADR-0004 (error-tolerance contract), ADR-0009 | `action::apply` | `action::tests::apply_reports_per_file_failure_without_aborting_the_rest` | action-layer commit | Implemented, Verified |
+| `FCLONE-ACTION-001-FR-006` | `ACTION-LAYER` | ADR-0009 | `rusty_fclone-cli::run` (`--apply` gate in `handle_group`) | `main::tests::action_without_apply_is_a_dry_run`, `main::tests::action_with_apply_actually_deletes`, `main::tests::action_with_apply_actually_hardlinks` | action-layer commit | Implemented, Verified |
+| `FCLONE-ACTION-001-FR-007` | `ACTION-LAYER` | ADR-0009 | `rusty_fclone-cli::run` (`Action::Report` → `action_kind: None`) | `main::tests::default_report_action_leaves_files_untouched` | action-layer commit | Implemented, Verified |
 
 State legend: `Implemented, Verified` = a requirement with a dedicated test
 exercising it directly. `Implemented` (no `Verified`) = code exists and
 matches the requirement but only indirect/no test coverage exists yet.
 
-All requirements previously flagged "needs dedicated unit test" are closed
-as of the gap-closure commit. Remaining open items are non-functional and
-tracked on the roadmap (`DETECTION-STREAMING-OVERLAP`,
-`DETECTION-LINUX-FASTPATH`), not functional gaps.
+All requirements previously flagged "needs dedicated unit test" — across
+both detection and action layer — are closed. Adding
+`FCLONE-ACTION-001-FR-006`/`FR-007`'s tests required extracting a testable
+`run(cli: Cli) -> ExitCode` from `rusty_fclone-cli`'s `main`, giving the CLI
+crate its first test suite (`rusty_fclone-cli`'s `unittests src/main.rs`
+previously always ran 0 tests).

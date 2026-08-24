@@ -587,6 +587,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "rusty_fclone-core",
+ "tempfile",
 ]
 
 [[package]]
