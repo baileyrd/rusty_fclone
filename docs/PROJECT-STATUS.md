@@ -1,10 +1,14 @@
 # Project Status
-- Last verified main commit: `bff4249` (PR #13, merged) — both new,
-  user-requested units (a `redb` incremental hash cache, PR #12, and a
-  SQLite scan-history store, PR #13) are now fully merged
+- Last verified main commit: `b616294` (PR #14, merged) — the redb
+  incremental hash cache (PR #12) and SQLite scan-history store (PR #13)
+  are fully merged; this branch adds `RELEASE-BINARIES` (PR TBD) on top
+- Tagged: `v0.1.0` at commit `b616294`, GitHub Release published but
+  (until `RELEASE-BINARIES` lands and is manually dispatched against it)
+  with no attached binaries
 - Verified at: 2026-08-24
-- Current milestone: none in progress — both `DETECTION-INCREMENTAL-CACHE`
-  and `CLI-SCAN-HISTORY` are done. See `docs/roadmap/ROADMAP.md`.
+- Current milestone: `RELEASE-BINARIES` — tag-triggered release workflow
+  so `v0.1.0` (and every future `vX.Y.Z` tag) gets real downloadable
+  binaries. See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace builds, lints, and tests clean on the pinned
   toolchain
 
@@ -58,7 +62,18 @@
   confirmed via a direct SQL query). Merged via PR #13.
 
 ## In progress
-- None.
+- `RELEASE-BINARIES`: new `.github/workflows/release.yml`, triggered on
+  `v*` tag pushes and manual `workflow_dispatch`, builds `rusty-fclone`
+  for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
+  `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`, then uses
+  `softprops/action-gh-release` to attach each platform's archive
+  (binary + README + both license files) to the tag's GitHub Release
+  without touching its title/body. ADR-0018. `cargo fmt`/`clippy`/`test`
+  unaffected (workflow-only change, no Rust code touched). Not yet
+  exercised by a real GitHub Actions run — the plan is to merge this,
+  then manually dispatch the workflow against the existing `v0.1.0` tag
+  to retroactively give that release its binaries, and verify the
+  uploaded assets via the GitHub API afterward.
 
 ## Blocked
 - None.
