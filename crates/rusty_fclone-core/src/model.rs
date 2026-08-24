@@ -25,24 +25,25 @@ pub struct ScanOptions {
     /// "should we partial-hash at all" and "how much to sample" cost real
     /// throughput on large files.
     pub partial_hash_sample_size: u64,
-    /// Number of worker threads in the I/O-bound read pool. Defaults to the
-    /// core count, not an oversubscribed multiple of it — see ADR-0008 for
-    /// why ADR-0002's original oversubscription default was revised.
-    pub io_threads: usize,
+    /// Number of worker threads in the I/O-bound read pool. `None` (the
+    /// default) auto-detects a sensible value from the scan root's
+    /// filesystem at scan time: oversubscribed on a rotational disk (Linux
+    /// only, best-effort), core count otherwise — see ADR-0008 for why
+    /// ADR-0002's original blanket oversubscription default was revised,
+    /// and ADR-0013 for the device-aware default this refines it into.
+    /// `Some(n)` pins it explicitly and skips detection.
+    pub io_threads: Option<usize>,
 }
 
 impl Default for ScanOptions {
     fn default() -> Self {
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
         Self {
             follow_symlinks: false,
             cross_filesystems: false,
             verify_matches: false,
             small_file_threshold: 128 * 1024,
             partial_hash_sample_size: 16 * 1024,
-            io_threads: cores,
+            io_threads: None,
         }
     }
 }

@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.1.5
+- Version: 0.1.6
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -82,9 +82,11 @@ reporting, a GUI) is out of scope for this specification and depends on it.
   of a file whose size or partial hash is unique within its size-group.
 - `FCLONE-DETECTION-001-NFR-003`: Hashing work SHALL be bounded by available
   CPU parallelism, and blocking file reads SHALL run on a separately sized
-  worker pool (`ScanOptions::io_threads`, default: core count — see
-  ADR-0008), so that I/O latency and hashing CPU cost are not serialized
-  through the same thread pool (see ADR-0002).
+  worker pool (`ScanOptions::io_threads`; `None` auto-detects from the scan
+  root's device type at scan time, oversubscribed on a rotational disk or
+  core count otherwise — see ADR-0008, ADR-0013), so that I/O latency and
+  hashing CPU cost are not serialized through the same thread pool (see
+  ADR-0002).
 
 ## Architecture and interfaces
 
@@ -96,14 +98,15 @@ pub fn scan(root: impl Into<PathBuf>, options: ScanOptions) -> Result<ScanHandle
 
 pub struct ScanHandle { /* impl Iterator<Item = ScanEvent> */ }
 pub enum ScanEvent { DuplicateGroup(DuplicateGroup), Error(FileError), Finished(ScanSummary) }
-pub struct DuplicateGroup { pub size: u64, pub paths: Vec<PathBuf> }
+pub struct DuplicateGroup { pub size: u64, pub paths: Vec<Arc<Path>> }
 pub struct ScanOptions { pub follow_symlinks: bool, pub cross_filesystems: bool,
                           pub verify_matches: bool, pub small_file_threshold: u64,
-                          pub partial_hash_sample_size: u64, pub io_threads: usize }
+                          pub partial_hash_sample_size: u64, pub io_threads: Option<usize> }
 ```
 
 Internal modules: `traversal` (jwalk-based walk + file-id), `io_pool`
-(hand-rolled blocking read workers), `hash` (xxh3-128 + sampling), `pipeline`
+(hand-rolled blocking read workers), `hash` (xxh3-128 + sampling), `device`
+(Linux rotational-disk detection for `io_threads` auto-sizing), `pipeline`
 (orchestration: hardlink collapse → size-group → partial hash → full hash →
 optional verify → emit).
 
@@ -193,6 +196,22 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.1.6 (2026-08-24): `ScanOptions::io_threads` changes from `usize` to
+  `Option<usize>`: `None` (the new default) auto-detects a device-aware
+  default at scan time via the new `device` module (oversubscribed on a
+  rotational disk, Linux-only best-effort detection via
+  `/proc/self/mountinfo` + `/sys/dev/block/*/queue/rotational`; `cores`
+  otherwise, matching the prior default) instead of always using `cores`
+  regardless of storage type (ADR-0013, `DETECTION-DEVICE-AWARE-IO-SIZING`).
+  Also fused traversal and hardlink-collapse into one streaming pass —
+  `traversal::traverse` takes an `on_candidate` callback instead of
+  returning a `Vec<Candidate>` (ADR-0012, `DETECTION-TRAVERSAL-COLLAPSE-FUSION`)
+  — and switched internal/public path storage from `PathBuf` to `Arc<Path>`
+  to make cloning a path through the grouping stages a refcount bump
+  instead of a fresh allocation (ADR-0011); `DuplicateGroup::paths` and
+  `FileError::path` are now `Vec<Arc<Path>>`/`Arc<Path>`. No detection
+  algorithm change in any of the three; NFR-003 and the public API surface
+  above are updated to match.
 - 0.1.5 (2026-08-24): Closed two known gaps. Added
   `traversal::tests::follow_symlinks_terminates_on_a_cycle`, a real symlink
   cycle under `--follow-symlinks` with a bounded timeout, confirming

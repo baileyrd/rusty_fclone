@@ -9,6 +9,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use file_id::FileId;
 use rayon::prelude::*;
 
+use crate::device::default_io_threads;
 use crate::error::{FileError, ScanError};
 use crate::hash::{hash_chunks, sample_ranges};
 use crate::io_pool::IoPool;
@@ -129,7 +130,15 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         "size-grouping complete, starting staged hashing"
     );
 
-    let io_pool = IoPool::new(options.io_threads);
+    let io_threads = options.io_threads.unwrap_or_else(|| {
+        let detected = default_io_threads(&root);
+        tracing::debug!(
+            io_threads = detected,
+            "auto-detected io_threads from device type"
+        );
+        detected
+    });
+    let io_pool = IoPool::new(io_threads);
     let duplicate_groups = AtomicU64::new(0);
     let duplicate_files = AtomicU64::new(0);
 

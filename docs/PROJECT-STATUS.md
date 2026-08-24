@@ -1,7 +1,7 @@
 # Project Status
-- Last verified main commit: `9f51074` (PR #5, merged) — Arc<Path> and
-  traversal/collapse-fusion work below are on branches stacked atop each
-  other, not yet merged
+- Last verified main commit: `f6ad0d5` (PR #6, merged) — traversal/collapse-
+  fusion and device-aware io_threads work below are on branches stacked
+  atop each other, not yet merged
 - Verified at: 2026-08-24
 - Current milestone: closing out the roadmap's "Not Started" units and known
   gaps (see `docs/roadmap/ROADMAP.md`)
@@ -32,16 +32,14 @@
   per-file error path; CLI wires up `tracing-subscriber` on stderr with a
   repeated `-v`/`--verbose` flag (`RUST_LOG` always takes precedence).
   ADR-0010. Merged via PR #5.
-
-## In progress
 - Path storage: `Arc<Path>` instead of `PathBuf` for every path carried
   through the detection pipeline (`Candidate.path`, `FileGroup`,
   `FileError.path`, `DuplicateGroup.paths`), so cloning a path across the
   hardlink-collapse/size/partial-hash/full-hash grouping stages is a
-  refcount bump instead of a fresh allocation and copy. ADR-0011.
-  Implemented, tested (fmt/clippy/test/bench all green, 42/42 tests), and
-  manually smoke-tested against a real `--action delete` dry run. PR #6
-  open, awaiting CI.
+  refcount bump instead of a fresh allocation and copy. ADR-0011. Merged
+  via PR #6.
+
+## In progress
 - `DETECTION-TRAVERSAL-COLLAPSE-FUSION` (a narrower, already-done step
   toward the roadmap's `DETECTION-STREAMING-OVERLAP`): traversal and
   hardlink-collapse now run as one streaming pass — `traversal::traverse`
@@ -51,33 +49,45 @@
   Deliberately does *not* implement full hash-before-traversal-completes
   overlap — that needs `ScanEvent`'s finality contract (ADR-0004)
   redesigned first, kept open as `DETECTION-STREAMING-OVERLAP` proper.
-  Stacked on the `Arc<Path>` branch; implemented, tested (fmt/clippy/test/
-  bench all green, 42/42 tests), and manually smoke-tested. Not yet pushed
-  through the PR → CI → merge → sync loop.
+  PR #7 open, awaiting CI.
+- `DETECTION-DEVICE-AWARE-IO-SIZING` (the thread-sizing half of
+  `DETECTION-LINUX-FASTPATH`): new `device::default_io_threads` picks an
+  oversubscribed pool on a rotational disk (Linux-only, best-effort via
+  `/proc/self/mountinfo` + `/sys/dev/block/*/queue/rotational`) or plain
+  `cores` otherwise/on failure. `ScanOptions::io_threads` and the CLI's
+  `--io-threads` flag change from `usize` to `Option<usize>` (`None` =
+  auto-detect at scan time, `Some(n)` pins it explicitly). ADR-0013.
+  io_uring/`FIEMAP` extent ordering remains separately deferred, kept open
+  as `DETECTION-LINUX-FASTPATH` proper. Stacked on the traversal-collapse-
+  fusion branch; implemented, tested (fmt/clippy/test/bench all green,
+  46/46 tests), and manually smoke-tested (auto-detect vs. explicit
+  `--io-threads` override, both confirmed correct). Not yet pushed through
+  the PR → CI → merge → sync loop.
 
 ## Blocked
 - None.
 
 ## Next
-1. Get CI green and merge PR #6 (`Arc<Path>` path storage), sync main.
-2. Rebase/PR the traversal-collapse-fusion branch onto the updated main,
-   get CI green, merge, sync.
+1. Get CI green and merge PR #7 (traversal/collapse fusion), sync main.
+2. Rebase/PR the device-aware-io-sizing branch onto the updated main, get
+   CI green, merge, sync.
 3. Remaining open roadmap units, no strong ordering constraint between
    them: `DETECTION-STREAMING-OVERLAP` proper (full pipeline overlap,
    needs a finality-contract decision first), `DETECTION-LINUX-FASTPATH`
-   (scoped to rotational-vs-SSD-aware `io_threads` sizing, not
-   io_uring/FIEMAP), `ACTION-REFLINK`, `CLI-UX` (JSON output, progress
-   reporting, an interactive confirmation prompt as a second safety layer
-   beyond `--apply`).
+   proper (io_uring/FIEMAP, needs an async runtime and unsafe FFI, its own
+   ADR), `ACTION-REFLINK`, `CLI-UX` (JSON output, progress reporting, an
+   interactive confirmation prompt as a second safety layer beyond
+   `--apply`).
 
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-24)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-24)
-- `cargo test --workspace`: pass, 42/42 (2026-08-24)
+- `cargo test --workspace`: pass, 46/46 (2026-08-24)
 - `cargo bench -p rusty_fclone-core --no-run`: pass (2026-08-24)
 - Manual CLI smoke tests: verbosity flags (`-v` info, `-vv` debug),
   `RUST_LOG` override taking precedence, default output silent on success,
-  `--action delete` dry run against a real duplicate pair (2026-08-24)
+  `--action delete` dry run against a real duplicate pair, auto-detected
+  vs. explicit `--io-threads` (2026-08-24)
 
 ## Risks and decisions needed
 - The action layer is the first genuinely destructive capability in this
@@ -85,10 +95,11 @@
   documented and tested, but has not been used against a real, valuable
   directory tree outside this session's smoke tests — treat it with
   appropriate caution before pointing it at anything you care about.
-- The `io_threads = cores` default (ADR-0008) remains empirically tuned on
-  one 4-core container; unvalidated on real spinning disks or high-latency
-  network filesystems. `DETECTION-LINUX-FASTPATH` will make this
-  device-aware, but hasn't started yet.
+- `DETECTION-DEVICE-AWARE-IO-SIZING`'s rotational-disk detection logic is
+  unit-tested against synthetic `/proc/self/mountinfo` input but has not
+  been exercised against a real spinning disk (this environment's storage
+  resolves to the safe `cores` fallback) — behavior on real rotational
+  media is unverified beyond the parsing logic itself.
 - `DETECTION-STREAMING-OVERLAP` proper (full hash-before-traversal-
   completes overlap) needs a decision on how to relax or redesign
   `ScanEvent`'s "no group revision after emission" finality contract
