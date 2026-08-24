@@ -71,10 +71,41 @@ struct Cli {
     /// two-flag confirmation so a single typo can't cause data loss.
     #[arg(long)]
     apply: bool,
+
+    /// Increase log verbosity (-v info, -vv debug, -vvv trace). Ignored if
+    /// RUST_LOG is set, which always takes precedence (ADR-0010).
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
 }
 
 fn main() -> ExitCode {
-    run(Cli::parse())
+    let cli = Cli::parse();
+    init_tracing(cli.verbose);
+    run(cli)
+}
+
+/// Sets up the `tracing-subscriber` output on stderr (so it never mixes
+/// with the plain-text results on stdout). `RUST_LOG` always wins when
+/// set; otherwise verbosity is driven by repeated `-v` flags (ADR-0010).
+fn init_tracing(verbose: u8) {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        let level = match verbose {
+            0 => "warn",
+            1 => "info",
+            2 => "debug",
+            _ => "trace",
+        };
+        EnvFilter::new(format!(
+            "rusty_fclone_core={level},rusty_fclone_cli={level}"
+        ))
+    });
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 /// The CLI's actual logic, separated from `main` so tests can construct a
@@ -228,6 +259,7 @@ mod tests {
             io_threads: ScanOptions::default().io_threads,
             action: Action::Report,
             apply: false,
+            verbose: 0,
         }
     }
 

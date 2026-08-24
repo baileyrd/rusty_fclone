@@ -14,4 +14,3 @@ done on them (see `docs/roadmap/ROADMAP.md`):
   deferred by ADR-0009 (`ACTION-REFLINK`).
 - **CLI/reporting UX** — output formats beyond the plain-text v1 CLI
   (JSON, machine-readable, progress reporting, confirmation prompts).
-- **Observability** — structured logging/tracing, scan progress events.

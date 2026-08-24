@@ -70,6 +70,7 @@ pub fn scan(root: impl Into<PathBuf>, options: ScanOptions) -> Result<ScanHandle
     })
 }
 
+#[tracing::instrument(skip(options, event_tx), fields(root = %root.display()))]
 fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
     let mut summary = ScanSummary::default();
 
@@ -79,6 +80,11 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
 
     summary.files_scanned = candidates.len() as u64;
     summary.bytes_scanned = candidates.iter().map(|c| c.size).sum();
+    tracing::info!(
+        files_scanned = summary.files_scanned,
+        bytes_scanned = summary.bytes_scanned,
+        "traversal complete"
+    );
 
     // Collapse existing hardlinks: files sharing a (device, inode) / file-id
     // already share storage, so hash only one representative per id.
@@ -107,6 +113,10 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         .into_iter()
         .filter(|(_, members)| members.len() > 1)
         .collect();
+    tracing::debug!(
+        size_groups = candidate_groups.len(),
+        "size-grouping complete, starting staged hashing"
+    );
 
     let io_pool = IoPool::new(options.io_threads);
     let duplicate_groups = AtomicU64::new(0);
@@ -124,12 +134,18 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
 
     summary.duplicate_groups = duplicate_groups.load(Ordering::Relaxed);
     summary.duplicate_files = duplicate_files.load(Ordering::Relaxed);
+    tracing::info!(
+        duplicate_groups = summary.duplicate_groups,
+        duplicate_files = summary.duplicate_files,
+        "scan finished"
+    );
     let _ = event_tx.send(ScanEvent::Finished(summary));
 }
 
 /// Runs the staged-hashing pipeline (ADR-0001) for one size-group: partial
 /// hash to prune, full hash to confirm, optional byte-verify — returning
 /// every subgroup that survives as a [`DuplicateGroup`].
+#[tracing::instrument(skip(members, io_pool, options, event_tx), fields(members = members.len()))]
 fn process_size_group(
     size: u64,
     members: Vec<FileGroup>,
@@ -209,6 +225,7 @@ fn process_size_group(
 /// Sends a [`ScanEvent::Error`] for a file that failed to read during
 /// hashing or verification (FR-009: per-file errors never abort the scan).
 fn report_error(event_tx: &Sender<ScanEvent>, path: PathBuf, source: io::Error) {
+    tracing::warn!(path = %path.display(), error = %source, "file error during hashing/verification");
     let _ = event_tx.send(ScanEvent::Error(FileError { path, source }));
 }
 

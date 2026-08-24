@@ -14,6 +14,7 @@ crossbeam-channel.workspace = true
 xxhash-rust.workspace = true
 file-id.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
