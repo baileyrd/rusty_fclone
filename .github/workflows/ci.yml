@@ -37,5 +37,12 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      - name: cargo bench --no-run
+        # Compile-only: catches benchmark drift on every push without
+        # paying for a full statistical run (slow, variance-prone on
+        # shared runners) on every PR. Run `cargo bench -p rusty_fclone-core`
+        # locally for real numbers — see docs/roadmap/ROADMAP.md.
+        run: cargo bench --workspace --no-run
+
       - name: cargo doc
         run: cargo doc --workspace --all-features --no-deps

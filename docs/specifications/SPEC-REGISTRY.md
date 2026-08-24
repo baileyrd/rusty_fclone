@@ -2,7 +2,7 @@
 
 | ID | Title | Version | Design | Implementation | Verification | Depends on | Owner | Location | Evidence |
 |---|---|---:|---|---|---|---|---|---|---|
-| `FCLONE-DETECTION-001` | Duplicate File Detection Engine | 0.1.1 | Accepted | Implemented | Verified (functional requirements); performance not benchmarked | none | baileyrd | [`docs/specifications/detection/FCLONE-DETECTION-001.md`](detection/FCLONE-DETECTION-001.md) | `crates/rusty_fclone-core` test suite (25 tests) |
+| `FCLONE-DETECTION-001` | Duplicate File Detection Engine | 0.1.2 | Accepted | Implemented | Verified (functional requirements + relative/regression benchmarks); not yet compared against fclones | none | baileyrd | [`docs/specifications/detection/FCLONE-DETECTION-001.md`](detection/FCLONE-DETECTION-001.md) | `crates/rusty_fclone-core` test suite (25 tests) + `benches/detection.rs` |
 
 ## Not yet specified (roadmap, not scoped in this baseline)
 

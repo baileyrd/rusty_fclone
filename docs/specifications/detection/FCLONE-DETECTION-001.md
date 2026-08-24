@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.1.1
+- Version: 0.1.2
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -148,8 +148,14 @@ optional verify → emit).
 ## Verification plan
 
 Unit/integration tests per module (traversal, hashing, I/O pool, end-to-end
-pipeline via `pipeline::tests`). No benchmark suite yet — tracked on the
-roadmap; the naive `HashMap`-based data model (ADR-0004) is meant to be
+pipeline via `pipeline::tests`). A Criterion benchmark suite
+(`crates/rusty_fclone-core/benches/detection.rs`, run via `cargo bench -p
+rusty_fclone-core`) covers four synthetic scenarios — many small
+duplicates, many unique small files, few large duplicates, and a mixed
+realistic tree — reporting files/sec or bytes/sec. These are relative/
+regression benchmarks against this crate's own history, not yet a measured
+comparison against fclones (`DETECTION-BENCHMARK-VS-FCLONES` on the
+roadmap); the naive `HashMap`-based data model (ADR-0004) is meant to be
 revisited only once a benchmark demonstrates it's the bottleneck.
 
 ## Traceability
@@ -163,8 +169,17 @@ See `docs/traceability/TRACEABILITY.md`.
   broken-symlink error-reporting case
   (`traversal_errors_are_reported_and_do_not_abort_the_scan`), but no
   dedicated test exercises an actual symlink *cycle* yet.
-- No benchmark exists yet to validate the "fastest possible" goal against
-  fclones or a synthetic large-tree workload.
+- The benchmark suite validates relative/regression throughput on synthetic
+  trees, but does not yet compare against fclones — so "fastest possible"
+  is still an architectural intent for the *comparative* claim specifically,
+  even though it's now a measured number for this crate's own throughput.
+  See `DETECTION-BENCHMARK-VS-FCLONES` on the roadmap.
+- The `few_large_duplicates` benchmark scenario reads the same files
+  repeatedly across iterations; after the first iteration these reads are
+  served from the OS page cache, so its reported throughput reflects warm-
+  cache performance, not raw disk I/O speed. This is intentional (repeat
+  scans of an unchanged tree are a realistic use case) but worth reading
+  the numbers with that caveat in mind.
 - Streaming full-file hashing (avoiding buffering an entire large file
   before hashing it) is not implemented; see ADR-0002's implementation note.
 - `FCLONE-DETECTION-001-NFR-001`'s test verifies the streaming *contract*
@@ -174,6 +189,11 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.1.2 (2026-08-24): Added a Criterion benchmark suite
+  (`DETECTION-BENCHMARK` on the roadmap) covering four synthetic scan
+  scenarios. No behavior change; verification-plan and open-questions
+  sections updated to reflect it, and to split off the still-open
+  comparison against fclones as its own roadmap unit.
 - 0.1.1 (2026-08-24): Closed all traceability gaps flagged "needs dedicated
   unit test" with direct tests (FR-005, FR-006, FR-008, FR-009, NFR-001).
   While closing FR-009, found and fixed a real gap: read failures during the

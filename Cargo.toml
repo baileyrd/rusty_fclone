@@ -17,6 +17,7 @@ file-id = "0.2"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
+criterion = "0.5"
 
 [profile.release]
 lto = true

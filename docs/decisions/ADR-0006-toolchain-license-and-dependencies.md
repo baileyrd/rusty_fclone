@@ -46,3 +46,16 @@ which crates the detection engine depends on.
   a re-run of the full validation suite) whenever a contributor wants a
   newer compiler feature — tracked as ordinary maintenance, not exempted
   from review.
+
+## Addendum (2026-08-24): benchmark tooling
+
+Added `criterion` (default features) as a dev-dependency of
+`rusty_fclone-core`, plus a `benches/detection.rs` bench target, to satisfy
+the `DETECTION-BENCHMARK` roadmap unit. This is dev-only — it does not
+appear in either crate's `[dependencies]` and has no effect on the shipped
+binary or library — so it doesn't touch the "no C toolchain" constraint
+above; noted here rather than as a new ADR because it's tooling, not an
+architectural decision. `criterion`'s default features pull in a plotting/
+reporting dependency tree (`plotters`, `tinytemplate`, etc.); this is normal
+for any Rust project using it and is accepted as dev-only weight.
+

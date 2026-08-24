@@ -54,6 +54,23 @@ The Rust toolchain is pinned via `rust-toolchain.toml`. See
 [`AGENTS.md`](AGENTS.md) for repository conventions and
 [`WORKFLOW.md`](WORKFLOW.md) for the development process.
 
+## Benchmarks
+
+```sh
+cargo bench -p rusty_fclone-core
+```
+
+Runs the Criterion suite in
+[`crates/rusty_fclone-core/benches/detection.rs`](crates/rusty_fclone-core/benches/detection.rs)
+over four synthetic scan scenarios (many small duplicates, many unique
+small files, few large duplicates, a mixed realistic tree), reporting
+files/sec or bytes/sec. These are relative/regression benchmarks against
+this crate's own history — not yet a measured comparison against fclones
+(see `DETECTION-BENCHMARK-VS-FCLONES` in
+[`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md)). CI only compiles the
+benchmarks (`cargo bench --no-run`) on every push; run the command above
+locally for real numbers.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
