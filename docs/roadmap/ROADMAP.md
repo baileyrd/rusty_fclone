@@ -15,7 +15,6 @@
 
 ## Known gaps carried from the v1 baseline (not blocking, but tracked)
 
-- No structured logging/progress observability yet (`tracing` or similar).
 - Path storage is the naive `HashMap`-based model; prefix-compression
   deferred until benchmarked as necessary (ADR-0004).
 
@@ -23,4 +22,7 @@ Closed: cycle-detection test for `--follow-symlinks`
 (`traversal::tests::follow_symlinks_terminates_on_a_cycle`, confirms jwalk's
 loop detection actually works, with a bounded timeout so a regression fails
 loudly instead of hanging); full-file hashing and `--verify` now stream in
-fixed-size chunks instead of buffering whole files (ADR-0002 addendum).
+fixed-size chunks instead of buffering whole files (ADR-0002 addendum);
+structured logging/observability via `tracing` spans/events on the
+traversal and pipeline stages, with a CLI `-v`/`--verbose` flag and
+`RUST_LOG` support (ADR-0010).

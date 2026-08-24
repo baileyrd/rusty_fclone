@@ -18,6 +18,8 @@ thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 criterion = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
 lto = true

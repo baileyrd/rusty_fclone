@@ -1,8 +1,11 @@
 # Project Status
-- Last verified main commit: `ec36eaf` (PR #2, merged) — action-layer work below is on a new branch, not yet merged
+- Last verified main commit: `8d36c62` (PR #4, merged) — tracing/observability
+  work below is on a new branch, not yet merged
 - Verified at: 2026-08-24
-- Current milestone: `ACTION-LAYER` (see `docs/roadmap/ROADMAP.md`)
-- Health: green — workspace builds, lints, and tests clean on the pinned toolchain
+- Current milestone: closing out the roadmap's "Not Started" units and known
+  gaps (see `docs/roadmap/ROADMAP.md`)
+- Health: green — workspace builds, lints, and tests clean on the pinned
+  toolchain
 
 ## Completed
 - `DETECTION-BASELINE`, `DETECTION-BENCHMARK`, `DETECTION-BENCHMARK-VS-FCLONES`,
@@ -11,56 +14,51 @@
   four synthetic scenarios. Merged to `main` via PR #1 and #2. See
   `docs/benchmarks/FCLONES-COMPARISON.md` for the numbers.
 - `ACTION-LAYER` — delete/hardlink redundant copies, dry-run by default.
-  New `rusty_fclone_core::action` module (`plan`/`apply`, ADR-0009) plus
-  `--action <report|delete|hardlink>` and `--apply` CLI flags. Not yet
-  merged — see "In progress" below.
-
-  Key decisions (ADR-0009, `FCLONE-ACTION-001`): keeps the alphabetically-
-  first path per group (no configurable strategy in v1); skips paths
-  already sharing the kept file's inode (nothing to reclaim there);
-  hardlink is implemented as link-to-temp-name-then-rename so a target path
-  is never momentarily missing; `--action <kind>` alone only previews,
-  `--apply` is a separate required flag to actually mutate the filesystem.
-  Reflink support explicitly deferred (`ACTION-REFLINK`) — platform-specific,
-  needs a new dependency or unsafe FFI.
-
-  Evidence: 6 new unit tests in `action::tests` (core crate) covering plan
-  correctness, hardlink-alias skipping, delete/hardlink apply (including
-  verifying hardlinked files share an inode afterward), and per-file
-  failure tolerance. 5 new unit tests in `main::tests` (CLI crate — its
-  first test suite, required extracting a testable `run(cli: Cli) ->
-  ExitCode` from `main`) covering dry-run-never-mutates, apply-actually-
-  mutates (delete and hardlink), default-report-unchanged, and
-  nonexistent-root rejection. Manual CLI smoke tests confirmed real output
-  and a full delete/hardlink/re-scan cycle on disk. 36/36 tests pass
-  workspace-wide (up from 31).
+  `rusty_fclone_core::action` module (`plan`/`apply`, ADR-0009) plus
+  `--action <report|delete|hardlink>` and `--apply` CLI flags. Merged via
+  PR #3.
+- Two known gaps closed via PR #4:
+  - Symlink-cycle safety net: `traversal::tests::follow_symlinks_terminates_on_a_cycle`
+    proves jwalk's loop detection under `--follow-symlinks` actually works,
+    bounded by a 10s timeout so a regression fails the test instead of
+    hanging CI.
+  - Streaming full-file hashing: `IoPool::hash_full_file`/`files_equal`
+    stream through fixed 1 MiB chunks instead of buffering whole files;
+    `--verify`'s peak memory no longer scales with duplicate-group size
+    (ADR-0002 addendum).
 
 ## In progress
-- `ACTION-LAYER` work is implemented, tested, and locally validated
-  (fmt/clippy/test all green) but not yet through the PR → CI → merge →
-  sync loop this repo now follows for every unit of work.
+- Structured observability (`tracing`): spans on `traverse`, `run_scan`,
+  `process_size_group`; leveled events at stage boundaries and every
+  per-file error path; CLI wires up `tracing-subscriber` on stderr with a
+  repeated `-v`/`--verbose` flag (`RUST_LOG` always takes precedence).
+  ADR-0010. Implemented, tested (fmt/clippy/test/bench all green, 42/42
+  tests), and manually smoke-tested (`-v`, `-vv`, default-silent, and
+  `RUST_LOG` override all confirmed). Not yet through the PR → CI → merge →
+  sync loop.
 
 ## Blocked
 - None.
 
 ## Next
-1. Open a PR for the action-layer work, get CI green, merge, sync — same
-   loop as the detection-engine work.
-2. After that: `ACTION-REFLINK`, `CLI-UX` (JSON output, progress reporting,
-   an interactive confirmation prompt as a second safety layer beyond
-   `--apply`), `DETECTION-STREAMING-OVERLAP`, or `DETECTION-LINUX-FASTPATH`
-   are the open roadmap units — no strong ordering constraint between them.
+1. Open a PR for the tracing/observability work, get CI green, merge, sync.
+2. Remaining open roadmap units, no strong ordering constraint between
+   them: path storage (`Arc<Path>`), `DETECTION-STREAMING-OVERLAP` (scoped
+   to merging traversal/collapse/size-grouping into one streaming pass, not
+   full hash-before-traversal-completes overlap), `DETECTION-LINUX-FASTPATH`
+   (scoped to rotational-vs-SSD-aware `io_threads` sizing, not
+   io_uring/FIEMAP), `ACTION-REFLINK`, `CLI-UX` (JSON output, progress
+   reporting, an interactive confirmation prompt as a second safety layer
+   beyond `--apply`).
 
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-24)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-24)
-- `cargo test --workspace`: pass, 36/36 (2026-08-24)
-- Manual CLI smoke tests: `--action delete` dry-run (no mutation) then
-  `--apply` (redundant copies removed, kept file survives); `--action
-  hardlink --apply` (all paths survive, verified same inode via `ls -li`,
-  re-scan afterward correctly reports 0 duplicate groups since they're now
-  hardlink aliases); default (no `--action`) output confirmed unchanged
-  from pre-action-layer behavior (2026-08-24)
+- `cargo test --workspace`: pass, 42/42 (2026-08-24)
+- `cargo bench -p rusty_fclone-core --no-run`: pass (2026-08-24)
+- Manual CLI smoke tests: verbosity flags (`-v` info, `-vv` debug),
+  `RUST_LOG` override taking precedence, default output silent on success
+  (2026-08-24)
 
 ## Risks and decisions needed
 - The action layer is the first genuinely destructive capability in this
@@ -70,4 +68,5 @@
   appropriate caution before pointing it at anything you care about.
 - The `io_threads = cores` default (ADR-0008) remains empirically tuned on
   one 4-core container; unvalidated on real spinning disks or high-latency
-  network filesystems.
+  network filesystems. `DETECTION-LINUX-FASTPATH` will make this
+  device-aware, but hasn't started yet.

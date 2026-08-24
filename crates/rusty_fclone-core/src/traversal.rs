@@ -21,6 +21,7 @@ pub(crate) struct Candidate {
 /// `options.cross_filesystems` is set (ADR-0003). Per-file errors are
 /// reported through `on_error` and otherwise ignored — one bad file never
 /// aborts the whole traversal (ADR-0004).
+#[tracing::instrument(skip(options, on_error), fields(root = %root.display()))]
 pub(crate) fn traverse(
     root: &Path,
     options: &ScanOptions,
@@ -41,6 +42,7 @@ pub(crate) fn traverse(
                     .path()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| root.to_path_buf());
+                tracing::warn!(path = %path.display(), error = %err, "traversal entry error");
                 on_error(FileError {
                     path,
                     source: err.into(),
@@ -58,6 +60,7 @@ pub(crate) fn traverse(
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "failed to stat file");
                 on_error(FileError {
                     path: path.clone(),
                     source: err.into(),
@@ -69,6 +72,7 @@ pub(crate) fn traverse(
         let file_id = match get_file_id(&path) {
             Ok(id) => id,
             Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "failed to read file id");
                 on_error(FileError {
                     path: path.clone(),
                     source: err,
@@ -82,6 +86,7 @@ pub(crate) fn traverse(
             root_device,
             device_component(&file_id),
         ) {
+            tracing::trace!(path = %path.display(), "skipped -- different filesystem");
             continue;
         }
 
@@ -92,6 +97,7 @@ pub(crate) fn traverse(
         });
     }
 
+    tracing::debug!(candidates = candidates.len(), "traversal finished");
     candidates
 }
 
