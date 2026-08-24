@@ -9,6 +9,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use file_id::FileId;
 use rayon::prelude::*;
 
+use crate::cache::{self, HashCache};
 use crate::device::default_io_threads;
 use crate::error::{FileError, ScanError};
 use crate::hash::{hash_chunks, sample_ranges};
@@ -29,6 +30,15 @@ const PROGRESS_INTERVAL_FILES: u64 = 256;
 /// hash grouping stages below, instead of re-allocating a `PathBuf` at
 /// every stage (ADR-0004's "path storage" note).
 type FileGroup = (Arc<Path>, Vec<Arc<Path>>);
+
+/// One file's full-hash result, plus whether (and what) to persist to the
+/// hash cache -- `None` when caching is disabled or this was already a
+/// cache hit (nothing new to write back).
+struct FullHashResult {
+    hash: u128,
+    group: FileGroup,
+    cache_write: Option<cache::FileStat>,
+}
 
 /// A running (or finished) scan. Yields [`ScanEvent`]s as they're found —
 /// consumers don't wait for the whole tree to finish before seeing the
@@ -154,10 +164,22 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
     let duplicate_groups = AtomicU64::new(0);
     let duplicate_files = AtomicU64::new(0);
 
+    let cache = options.cache_path.as_ref().and_then(|path| {
+        match HashCache::open(path) {
+            Ok(cache) => Some(cache),
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "failed to open hash cache, continuing without it");
+                None
+            }
+        }
+    });
+
     candidate_groups
         .into_par_iter()
         .for_each(|(size, members)| {
-            for group in process_size_group(size, members, &io_pool, &options, &event_tx) {
+            for group in
+                process_size_group(size, members, &io_pool, &options, cache.as_ref(), &event_tx)
+            {
                 duplicate_groups.fetch_add(1, Ordering::Relaxed);
                 duplicate_files.fetch_add(group.paths.len() as u64, Ordering::Relaxed);
                 let _ = event_tx.send(ScanEvent::DuplicateGroup(group));
@@ -176,13 +198,16 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
 
 /// Runs the staged-hashing pipeline (ADR-0001) for one size-group: partial
 /// hash to prune, full hash to confirm, optional byte-verify — returning
-/// every subgroup that survives as a [`DuplicateGroup`].
-#[tracing::instrument(skip(members, io_pool, options, event_tx), fields(members = members.len()))]
+/// every subgroup that survives as a [`DuplicateGroup`]. `cache`, when
+/// present, lets the full-hash stage reuse a previous scan's hash for a
+/// file whose `(size, mtime)` haven't changed (ADR-0016).
+#[tracing::instrument(skip(members, io_pool, options, cache, event_tx), fields(members = members.len()))]
 fn process_size_group(
     size: u64,
     members: Vec<FileGroup>,
     io_pool: &IoPool,
     options: &ScanOptions,
+    cache: Option<&HashCache>,
     event_tx: &Sender<ScanEvent>,
 ) -> Vec<DuplicateGroup> {
     let small_file = size <= options.small_file_threshold;
@@ -216,22 +241,52 @@ fn process_size_group(
             .collect()
     };
 
-    let full_hashed: Vec<(u128, FileGroup)> = full_hash_input
+    // Cache lookups/misses are collected as plain data rather than written
+    // inside the parallel closure below: redb write transactions are
+    // exclusive, so batching every miss from this size-group into one
+    // transaction (after the parallel stage completes) avoids serializing
+    // hashing threads on a per-file write lock.
+    let full_hashed: Vec<FullHashResult> = full_hash_input
         .into_par_iter()
-        .filter_map(
-            |(representative, aliases)| match io_pool.hash_full_file(&representative) {
-                Ok(hash) => Some((hash, (representative, aliases))),
+        .filter_map(|(representative, aliases)| {
+            let stat = cache.and_then(|_| cache::stat(&representative));
+
+            if let (Some(cache), Some(stat)) = (cache, stat) {
+                if let Some(hash) = cache.get(&representative, stat) {
+                    tracing::trace!(path = %representative.display(), "full-hash cache hit");
+                    return Some(FullHashResult {
+                        hash,
+                        group: (representative, aliases),
+                        cache_write: None,
+                    });
+                }
+            }
+
+            match io_pool.hash_full_file(&representative) {
+                Ok(hash) => Some(FullHashResult {
+                    hash,
+                    group: (representative, aliases),
+                    cache_write: if cache.is_some() { stat } else { None },
+                }),
                 Err(source) => {
                     report_error(event_tx, representative, source);
                     None
                 }
-            },
-        )
+            }
+        })
         .collect();
 
+    if let Some(cache) = cache {
+        let updates: Vec<(Arc<Path>, cache::FileStat, u128)> = full_hashed
+            .iter()
+            .filter_map(|r| r.cache_write.map(|stat| (r.group.0.clone(), stat, r.hash)))
+            .collect();
+        cache.put_batch(&updates);
+    }
+
     let mut by_full: HashMap<u128, Vec<FileGroup>> = HashMap::new();
-    for (hash, file_group) in full_hashed {
-        by_full.entry(hash).or_default().push(file_group);
+    for result in full_hashed {
+        by_full.entry(result.hash).or_default().push(result.group);
     }
 
     by_full
@@ -498,7 +553,7 @@ mod tests {
             (dup2.clone().into(), vec![dup2.clone().into()]),
         ];
 
-        let groups = process_size_group(3, members, &io_pool, &options, &tx);
+        let groups = process_size_group(3, members, &io_pool, &options, None, &tx);
         drop(tx);
 
         assert_eq!(
@@ -559,5 +614,58 @@ mod tests {
             ScanEvent::Finished(summary) => assert_eq!(summary.duplicate_groups, 2),
             other => panic!("expected ScanEvent::Finished, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cached_scan_produces_identical_results_to_an_uncached_one() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.bin"), vec![7u8; 4096]).unwrap();
+        fs::write(dir.path().join("b.bin"), vec![7u8; 4096]).unwrap();
+        fs::write(dir.path().join("c.bin"), vec![9u8; 4096]).unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache_path = cache_dir.path().join("cache.redb");
+
+        let uncached = collect_groups(dir.path(), ScanOptions::default());
+
+        let cached_options = ScanOptions {
+            cache_path: Some(cache_path.clone()),
+            ..ScanOptions::default()
+        };
+        let first_cached_run = collect_groups(dir.path(), cached_options.clone());
+        // Second run actually exercises cache hits (the first run populated
+        // the cache with every file's full hash).
+        let second_cached_run = collect_groups(dir.path(), cached_options);
+
+        assert_eq!(uncached, first_cached_run);
+        assert_eq!(uncached, second_cached_run);
+    }
+
+    #[test]
+    fn a_changed_file_is_not_served_a_stale_cached_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.bin");
+        let b = dir.path().join("b.bin");
+        fs::write(&a, vec![1u8; 4096]).unwrap();
+        fs::write(&b, vec![1u8; 4096]).unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let options = ScanOptions {
+            cache_path: Some(cache_dir.path().join("cache.redb")),
+            ..ScanOptions::default()
+        };
+
+        let first = collect_groups(dir.path(), options.clone());
+        assert_eq!(first.len(), 1, "a and b start out identical");
+
+        // Change b's content (and therefore its mtime). A stale cache hit
+        // would keep reporting a and b as duplicates. The sleep is
+        // generous (some filesystems only track mtime to 1s resolution).
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(&b, vec![2u8; 4096]).unwrap();
+
+        let second = collect_groups(dir.path(), options);
+        assert!(
+            second.is_empty(),
+            "the changed file must not be served a stale cached hash: {second:?}"
+        );
     }
 }

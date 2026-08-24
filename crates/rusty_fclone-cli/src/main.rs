@@ -83,6 +83,14 @@ struct Cli {
     #[arg(long)]
     io_threads: Option<usize>,
 
+    /// Path to a full-file-hash cache (created if it doesn't exist). When
+    /// set, a file whose size and modified-time haven't changed since a
+    /// previous scan reuses that scan's hash instead of being re-read and
+    /// re-hashed (ADR-0016). Off by default -- opt in explicitly, since it
+    /// means writing a file to disk.
+    #[arg(long)]
+    cache: Option<PathBuf>,
+
     /// What to do with redundant copies once a group is confirmed.
     /// Without --apply, delete/hardlink/reflink only preview what would
     /// happen.
@@ -161,6 +169,7 @@ fn run(cli: Cli) -> ExitCode {
         small_file_threshold: cli.small_file_threshold,
         partial_hash_sample_size: cli.partial_hash_sample_size,
         io_threads: cli.io_threads,
+        cache_path: cli.cache,
     };
 
     let handle = match scan(cli.root, options) {
@@ -546,6 +555,7 @@ mod tests {
             small_file_threshold: ScanOptions::default().small_file_threshold,
             partial_hash_sample_size: ScanOptions::default().partial_hash_sample_size,
             io_threads: ScanOptions::default().io_threads,
+            cache: ScanOptions::default().cache_path,
             action: Action::Report,
             apply: false,
             yes: false,

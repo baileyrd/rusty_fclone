@@ -9,6 +9,7 @@
 //! (ADR-0001 through ADR-0009) this crate implements.
 
 pub mod action;
+mod cache;
 mod device;
 mod error;
 mod hash;

@@ -1,12 +1,14 @@
 # Project Status
-- Last verified main commit: `a77f1c4` (PR #10, merged)
+- Last verified main commit: `a77f1c4` (PR #10, merged) — the incremental
+  hash-cache work below is on its own branch, not yet merged
 - Verified at: 2026-08-24
-- Current milestone: none active — the originally scoped "build it all and
-  close all gaps" batch (roadmap's then-"Not Started" units + all known
-  gaps) is fully merged to `main` and synced. See `docs/roadmap/ROADMAP.md`
-  for what's newly tracked as follow-on work.
+- Current milestone: `DETECTION-INCREMENTAL-CACHE` (first of two new,
+  user-requested units — a `redb` incremental hash cache and, next, a
+  SQLite scan-history store for longer-term analytics; both stemmed from a
+  "what database would fit here" design discussion, not the earlier
+  "build it all" batch). See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace builds, lints, and tests clean on the pinned
-  toolchain, verified directly on synced `main`
+  toolchain
 
 ## Completed
 - `DETECTION-BASELINE`, `DETECTION-BENCHMARK`, `DETECTION-BENCHMARK-VS-FCLONES`,
@@ -33,77 +35,67 @@
   repeated `-v`/`--verbose` flag (`RUST_LOG` always takes precedence).
   ADR-0010. Merged via PR #5.
 - Path storage: `Arc<Path>` instead of `PathBuf` for every path carried
-  through the detection pipeline (`Candidate.path`, `FileGroup`,
-  `FileError.path`, `DuplicateGroup.paths`), so cloning a path across the
-  hardlink-collapse/size/partial-hash/full-hash grouping stages is a
-  refcount bump instead of a fresh allocation and copy. ADR-0011. Merged
-  via PR #6.
+  through the detection pipeline. ADR-0011. Merged via PR #6.
 - `DETECTION-TRAVERSAL-COLLAPSE-FUSION`: traversal and hardlink-collapse
-  now run as one streaming pass — `traversal::traverse` takes an
-  `on_candidate` callback instead of returning a `Vec<Candidate>`, and
-  `pipeline::run_scan` folds the collapse step directly into that
-  callback. ADR-0012. Merged via PR #7. (Deliberately not full
-  hash-before-traversal-completes overlap — that's kept open separately
-  as `DETECTION-STREAMING-OVERLAP` proper, needing `ScanEvent`'s finality
-  contract redesigned first.)
-- `DETECTION-DEVICE-AWARE-IO-SIZING` (the thread-sizing half of
-  `DETECTION-LINUX-FASTPATH`): new `device::default_io_threads` picks an
-  oversubscribed pool on a rotational disk (Linux-only, best-effort via
-  `/proc/self/mountinfo` + `/sys/dev/block/*/queue/rotational`) or plain
-  `cores` otherwise/on failure. `ScanOptions::io_threads`/CLI
-  `--io-threads` change from `usize` to `Option<usize>`. ADR-0013. Merged
-  via PR #8. (io_uring/`FIEMAP` extent ordering remains separately
-  deferred, kept open as `DETECTION-LINUX-FASTPATH` proper.)
-- `ACTION-REFLINK`: new `ActionKind::Reflink` via the `reflink-copy` crate
-  (strict `reflink`, not `reflink_or_copy` — no silent copy fallback when
-  a filesystem doesn't support cloning), same temp-then-rename safety
-  pattern as `Hardlink`, with cleanup of the temp file on a failed clone.
-  ADR-0014, `FCLONE-ACTION-001` 0.2.0. Merged via PR #9. This
-  environment's filesystem isn't CoW-capable, so testing here (unit +
-  manual smoke) only exercised the graceful-failure path; the success
-  path is delegated to `reflink-copy`'s own platform code, not
-  independently verified in this environment.
-- `CLI-UX`: `--format text|json` (NDJSON: `duplicate_group` with a nested
-  `action` object, `error`, `progress`, `finished`, `action_summary`); new
-  `rusty_fclone_core::ScanEvent::Progress(ScanProgress)`, a cumulative
-  traversal checkpoint emitted every 256 files, rendered as a live
-  in-place-updating stderr line in text mode (only when stderr is a real
-  terminal, via `std::io::IsTerminal` — confirmed silent when piped);
-  `-y`/`--yes`-bypassable confirmation prompt before `--apply` mutates
-  anything (a general warning, not exact totals — those aren't known until
-  the streaming scan finishes). ADR-0015, new `CLI-UX-001` spec. Merged
-  via PR #10 — the last unit in this batch.
+  run as one streaming pass. ADR-0012. Merged via PR #7.
+- `DETECTION-DEVICE-AWARE-IO-SIZING`: `io_threads` auto-detects an
+  oversubscribed pool on a rotational disk (Linux, best-effort) or plain
+  `cores` otherwise. ADR-0013. Merged via PR #8.
+- `ACTION-REFLINK`: new `ActionKind::Reflink` via `reflink-copy`'s strict
+  `reflink` (no silent copy fallback). ADR-0014, `FCLONE-ACTION-001` 0.2.0.
+  Merged via PR #9.
+- `CLI-UX`: `--format text|json` (NDJSON), new `ScanEvent::Progress`
+  (terminal-gated live progress line), `-y`/`--yes`-bypassable
+  confirmation prompt before `--apply` mutates anything. ADR-0015, new
+  `CLI-UX-001` spec. Merged via PR #10 — closed out the original "build it
+  all and close all gaps" batch (PRs #4–#10, plus a docs-only #11).
 
 ## In progress
-- None.
+- `DETECTION-INCREMENTAL-CACHE`: new opt-in `cache` module backed by
+  `redb` — a file whose `(size, mtime)` match a cached entry reuses its
+  full hash instead of being re-read and re-hashed, skipping both the
+  partial-hash and full-hash stages for that file. New
+  `ScanOptions::cache_path: Option<PathBuf>` / CLI `--cache <path>`, off
+  by default. ADR-0016, `FCLONE-DETECTION-001` 0.1.8 (NFR-004).
+  Implemented, tested (fmt/clippy/test/bench all green, 60/60 tests — 7
+  new `cache` unit tests plus 2 new `pipeline` integration tests: cached
+  vs. uncached scans produce identical results, and a changed file is
+  never served a stale cached hash), and manually smoke-tested via
+  `-vvv` trace output (zero cache hits on a cold run against two 5 MB
+  duplicate files, exactly two hits — one per file — on an immediately
+  following warm run, correct duplicate-group results throughout). Not
+  yet pushed through the PR → CI → merge → sync loop.
+- Next up after this merges: a SQLite-backed scan-history store
+  (`CLI-SCAN-HISTORY`, working title) for longer-term analytics —
+  per-scan summaries only (files/bytes scanned, duplicate groups/files,
+  action results), not per-file/per-group detail, and no query/report
+  subcommand yet (explicitly deferred, same scoping pattern as everything
+  else in this project). CLI-only (`rusqlite`), no core-crate change,
+  since it's just recording a completed scan's summary.
 
 ## Blocked
 - None.
 
 ## Next
-Follow-on units intentionally left open by earlier scoping decisions
-(deliberately out of this batch's scope, each needs its own design work
-before starting):
-- `DETECTION-STREAMING-OVERLAP` proper — full hash-before-traversal-
-  completes pipeline overlap. Needs a decision on how to relax or
-  redesign `ScanEvent`'s "no group revision after emission" finality
-  contract (ADR-0004) first.
-- `DETECTION-LINUX-FASTPATH` proper — io_uring/`FIEMAP` extent-ordered
-  reads. Needs an async runtime and unsafe FFI, and its own ADR; the
-  thread-sizing half of the original roadmap unit is already done
-  (`DETECTION-DEVICE-AWARE-IO-SIZING`, ADR-0013).
+1. Get CI green and merge the `DETECTION-INCREMENTAL-CACHE` PR, sync main.
+2. Implement `CLI-SCAN-HISTORY` (SQLite scan-summary persistence via
+   `--history <path>`), same validation/PR/merge/sync loop.
+3. Follow-on units intentionally left open by earlier scoping decisions
+   (each needs its own design work before starting):
+   `DETECTION-STREAMING-OVERLAP` proper (full pipeline overlap, needs a
+   `ScanEvent` finality-contract decision first), `DETECTION-LINUX-FASTPATH`
+   proper (io_uring/FIEMAP, needs an async runtime and unsafe FFI, its own
+   ADR).
 
 ## Validation
-- `cargo fmt --all --check`: pass (2026-08-24, on synced `main` @ `a77f1c4`)
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-24, on synced `main`)
-- `cargo test --workspace`: pass, 51/51 (2026-08-24, on synced `main`)
-- `cargo bench -p rusty_fclone-core --no-run`: pass (2026-08-24, on synced `main`)
-- Manual CLI smoke tests across the batch: verbosity flags, `RUST_LOG`
-  override, default output silent on success, `--action delete` dry run,
-  auto-detected vs. explicit `--io-threads`, `--action reflink --apply`
-  graceful failure, `--format json` (plain and action-annotated), progress
-  checkpoints (present in JSON mode, silent in piped text mode),
-  confirmation prompt decline and accept (2026-08-24)
+- `cargo fmt --all --check`: pass (2026-08-24)
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-24)
+- `cargo test --workspace`: pass, 60/60 (2026-08-24)
+- `cargo bench -p rusty_fclone-core --no-run`: pass (2026-08-24)
+- Manual CLI smoke tests across the project: verbosity flags, `RUST_LOG`
+  override, default output silent on success, action dry runs, JSON
+  format, progress checkpoints, confirmation prompt decline/accept, and
+  now cold/warm `--cache` behavior (2026-08-24)
 
 ## Risks and decisions needed
 - The action layer is the first genuinely destructive capability in this
@@ -113,18 +105,25 @@ before starting):
   session's smoke tests — treat it with appropriate caution before
   pointing it at anything you care about.
 - `DETECTION-DEVICE-AWARE-IO-SIZING`'s rotational-disk detection logic is
-  unit-tested against synthetic `/proc/self/mountinfo` input but has not
-  been exercised against a real spinning disk (this environment's storage
-  resolves to the safe `cores` fallback) — behavior on real rotational
-  media is unverified beyond the parsing logic itself.
-- `ACTION-REFLINK`'s success path (an actual CoW clone happening) is
-  unverified end-to-end in this environment for the same reason — no
-  CoW-capable filesystem available to test against. Trusted to the
-  `reflink-copy` dependency's own test coverage.
-- `CLI-UX-001`'s JSON schema isn't versioned or promised stable yet, and
-  no automated test asserts on its exact shape (only that `--format json`
-  runs successfully) — see the spec's open questions.
-- `DETECTION-STREAMING-OVERLAP` proper (full hash-before-traversal-
-  completes overlap) needs a decision on how to relax or redesign
-  `ScanEvent`'s "no group revision after emission" finality contract
-  (ADR-0004) before it can be implemented — not yet made.
+  unverified against a real spinning disk (this environment's storage
+  resolves to the safe `cores` fallback).
+- `ACTION-REFLINK`'s success path is unverified end-to-end in this
+  environment (no CoW-capable filesystem available to test against).
+- `CLI-UX-001`'s JSON schema isn't versioned or promised stable yet.
+- `DETECTION-INCREMENTAL-CACHE`'s benchmark verification was inconclusive:
+  `cargo bench`'s comparison against its saved baseline swung between
+  "+144% regressed" and "-6.8% improved" across consecutive runs of
+  *identical* code (no cache flag passed either time), which reflects this
+  sandboxed container's variable background load rather than a real
+  effect — the cache-off code path is structurally a no-op (a `None`
+  short-circuit), but a clean before/after number was not obtained here.
+  If real performance validation matters, re-run the benchmark suite on a
+  quieter, dedicated machine.
+- `DETECTION-INCREMENTAL-CACHE`'s only invalidation signal is `(size,
+  mtime)` — a file whose content changes without its mtime updating
+  (contrived, or an unreliable filesystem) would be served a stale hash.
+  Same trust model as `make` and most incremental build tools; not
+  treated as a gap warranting content-based invalidation for v1.
+- `DETECTION-STREAMING-OVERLAP` proper needs a decision on how to relax or
+  redesign `ScanEvent`'s "no group revision after emission" finality
+  contract (ADR-0004) before it can be implemented — not yet made.
