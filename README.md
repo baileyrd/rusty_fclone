@@ -1,17 +1,21 @@
 # rusty_fclone
 
 A duplicate-file finder — a spiritual successor to
-[fclones](https://github.com/pkolaczk/fclones), starting from the fastest
-practical detection engine and growing an action layer (delete/hardlink/
-reflink duplicates) on top of it.
+[fclones](https://github.com/pkolaczk/fclones): a fast detection engine
+plus an action layer to delete or hardlink what it finds.
 
 ## Status
 
-Early: the detection engine and a minimal CLI exist and work; there is no
-action layer yet (nothing deletes or links files — this only *reports*
-duplicates). See [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the
-current checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md)
-for what's planned.
+Detection (staged hashing, benchmarked faster than fclones on most
+workloads — see below) and an action layer (delete/hardlink, dry-run by
+default) are both implemented. Reflink support and richer CLI output (JSON,
+progress reporting, an interactive confirmation prompt) are not yet built —
+see [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
+checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
+what's planned.
+
+**By default, this tool only reports — it never deletes or links anything
+unless you pass both `--action <delete|hardlink>` and `--apply`.**
 
 ## Usage
 
@@ -41,18 +45,41 @@ Options:
       --io-threads <N>
           Number of worker threads in the I/O-bound read pool
           [default: number of CPU cores]
-  -h, --help                         Print help
-  -V, --version                      Print version
+      --action <ACTION>
+          What to do with redundant copies once a group is confirmed:
+          report (default, just print groups), delete, or hardlink.
+          Without --apply, delete/hardlink only preview what would happen.
+      --apply
+          Actually perform --action's effect (required in addition to
+          --action delete/hardlink — a two-flag confirmation so a single
+          typo can't cause data loss)
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+Examples:
+
+```sh
+# Preview what deleting redundant copies would do -- touches nothing.
+rusty-fclone --action delete /path/to/scan
+
+# Actually delete them, keeping one (alphabetically-first) copy per group.
+rusty-fclone --action delete --apply /path/to/scan
+
+# Reclaim the space without losing any path -- replace redundant copies
+# with hardlinks to the kept file instead of deleting them.
+rusty-fclone --action hardlink --apply /path/to/scan
 ```
 
 ## Architecture
 
 See [`docs/architecture/SYSTEM-ARCHITECTURE.md`](docs/architecture/SYSTEM-ARCHITECTURE.md)
 for the detection pipeline, and [`docs/decisions/`](docs/decisions/) for the
-ADRs behind it (staged hashing + xxh3-128, cross-platform I/O, the two-pool
+ADRs behind it: staged hashing + xxh3-128, cross-platform I/O, the two-pool
 concurrency model, traversal defaults, workspace shape, toolchain/license/
-dependency policy, and two benchmark-motivated tuning revisions — partial-
-hash sample size and I/O thread pool sizing).
+dependency policy, two benchmark-motivated tuning revisions (partial-hash
+sample size, I/O thread pool sizing), and the action layer (ADR-0009:
+delete/hardlink, dry-run by default, safe hardlink-via-rename).
 
 ## Development
 

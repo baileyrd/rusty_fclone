@@ -14,3 +14,6 @@ path = "src/main.rs"
 [dependencies]
 rusty_fclone-core = { path = "../rusty_fclone-core" }
 clap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
