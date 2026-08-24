@@ -67,3 +67,12 @@ failure — see `docs/roadmap/ROADMAP.md`.
   under real workloads.
 - Full-file hashing buffers the entire file in memory before hashing. Fine
   for the common case; very large files (multi-GB) are a known follow-up.
+
+## Addendum (2026-08-24): oversubscription default revised
+
+The I/O pool's oversubscription factor described above (`cores * 4`) was
+the *default* sizing when this ADR was written. Benchmark evidence against
+fclones showed that default actively hurting throughput on the environment
+tested — see ADR-0008, which changes the default to `cores` (no multiplier)
+while keeping `--io-threads` as an override. The two-pool *architecture*
+described above is unchanged; only the I/O pool's default size changed.

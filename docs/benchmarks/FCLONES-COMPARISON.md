@@ -2,7 +2,12 @@
 
 Closes the `DETECTION-BENCHMARK-VS-FCLONES` roadmap unit: the last piece
 standing between "architected to be fast" and an actual measured claim
-against the tool this project takes after.
+against the tool this project takes after. Updated after
+`DETECTION-ADAPTIVE-SAMPLE-SIZE` and a follow-on I/O-thread-sizing fix
+(ADR-0007, ADR-0008) closed the large-file gap found in the first pass —
+see "Closing the large-file gap" below for the investigation, kept rather
+than deleted because the first hypothesis tested there was wrong and that's
+worth knowing.
 
 ## Methodology
 
@@ -31,6 +36,9 @@ against the tool this project takes after.
     isolates pipeline/architecture efficiency from hash-algorithm choice,
     since this project uses xxh3-128 (ADR-0001) and fclones' default is a
     different hash function.
+- **rusty-fclone invocation**: default `ScanOptions` throughout (no
+  per-scenario tuning flags) — the point is the tool's out-of-the-box
+  behavior, same as fclones' "default" column.
 - **Environment**: single 4-core Linux container, run 2026-08-24. These are
   relative numbers on one machine, not a portability or absolute-performance
   claim — see the caveats below before generalizing them.
@@ -45,7 +53,7 @@ comparison at all. Fixed in both `benches/detection.rs` and
 `gen_bench_trees.py` by encoding the seed directly into each file's first 8
 bytes, guaranteeing distinct content per distinct seed.
 
-## Results
+## Results (current)
 
 Time is mean ± standard deviation across the runs; "Relative" is normalized
 to the fastest command in that row group (`1.00` = fastest).
@@ -54,73 +62,110 @@ to the fastest command in that row group (`1.00` = fastest).
 
 | Command | Mean | Relative |
 |---|---:|---:|
-| **rusty-fclone** | **42.6 ms ± 3.5 ms** | **1.00** |
-| fclones (default: metro hash) | 81.6 ms ± 5.3 ms | 1.91× slower |
-| fclones (xxhash, matched) | 80.2 ms ± 8.9 ms | 1.88× slower |
+| **rusty-fclone** | **32.2 ms ± 3.5 ms** | **1.00** |
+| fclones (default: metro hash) | 84.3 ms ± 7.6 ms | 2.61× slower |
+| fclones (xxhash, matched) | 85.4 ms ± 10.3 ms | 2.65× slower |
 
 ### `many_unique_small_files` (2,000 files, 1 KiB each, no duplicates)
 
 | Command | Mean | Relative |
 |---|---:|---:|
-| **rusty-fclone** | **39.5 ms ± 2.9 ms** | **1.00** |
-| fclones (default: metro hash) | 78.6 ms ± 6.3 ms | 1.99× slower |
-| fclones (xxhash, matched) | 77.5 ms ± 8.0 ms | 1.96× slower |
+| **rusty-fclone** | **31.3 ms ± 3.0 ms** | **1.00** |
+| fclones (default: metro hash) | 82.7 ms ± 9.6 ms | 2.64× slower |
+| fclones (xxhash, matched) | 84.7 ms ± 9.9 ms | 2.71× slower |
 
 ### `few_large_duplicates` (20 files, 8 MiB each, 4 duplicate groups of 5)
 
 | Command | Mean | Relative |
 |---|---:|---:|
-| fclones (xxhash, matched) | **44.2 ms ± 1.9 ms** | **1.00** |
-| fclones (default: metro hash) | 46.9 ms ± 3.4 ms | 1.06× slower |
-| rusty-fclone | 53.7 ms ± 4.9 ms | 1.21× slower |
+| fclones (xxhash, matched) | **38.6 ms ± 3.4 ms** | **1.00** |
+| rusty-fclone | 40.2 ms ± 4.8 ms | 1.04× slower |
+| fclones (default: metro hash) | 46.2 ms ± 3.2 ms | 1.20× slower |
 
-**rusty_fclone loses this one.** See "Why we lose on large files" below.
+rusty_fclone now beats fclones' own out-of-the-box default (40.2 ms vs.
+46.2 ms) and is within measurement noise of fclones' best configuration —
+1.04× with a ±0.15 confidence band that spans below 1.0. Down from 1.21×
+slower than fclones' best configuration in the original pass.
 
 ### `mixed_realistic_tree` (1,018 files, mostly unique, 3 small duplicate groups)
 
 | Command | Mean | Relative |
 |---|---:|---:|
-| **rusty-fclone** | **27.3 ms ± 6.2 ms** | **1.00** |
-| fclones (xxhash, matched) | 44.7 ms ± 4.4 ms | 1.64× slower |
-| fclones (default: metro hash) | 45.4 ms ± 4.2 ms | 1.66× slower |
+| **rusty-fclone** | **17.1 ms ± 2.4 ms** | **1.00** |
+| fclones (default: metro hash) | 44.4 ms ± 3.9 ms | 2.59× slower |
+| fclones (xxhash, matched) | 47.7 ms ± 6.2 ms | 2.78× slower |
 
 ## Reading these results honestly
 
-- **rusty_fclone wins decisively (~1.9–2.0×) on small-file-heavy trees**,
+- **rusty_fclone wins decisively (~2.6–2.7×) on small-file-heavy trees**,
   including the realistic mixed-tree scenario. This is where most real
-  filesystems' file counts live, so it's a meaningful result, not a cherry-
-  picked one.
-- **rusty_fclone loses (~1.2×) on the large-file scenario.** The likely
-  cause: ADR-0001's "one shared constant" design uses the same 128 KiB
-  value as both the small-file threshold *and* the partial-hash sample
-  size. For an 8 MiB file, that means reading 3 × 128 KiB = 384 KiB just
-  for the pruning stage, before the full 8 MiB read — measurably more
-  partial-hash I/O than fclones' much smaller default (16 KiB total for
-  HDD, 8 KiB for SSD, single prefix+suffix vs. our three samples). ADR-0002's
-  full-file buffering (reading the entire file into memory before hashing,
-  rather than streaming) may also contribute. Neither has been isolated by
-  further profiling yet — this is a documented, not yet root-caused,
-  finding.
+  filesystems' file counts live, so it's a meaningful result, not a
+  cherry-picked one.
+- **rusty_fclone matches fclones (within noise) on the large-file
+  scenario**, and beats fclones' own default configuration outright. Not an
+  unqualified win — fclones' best (hash-matched) configuration is still
+  numerically ahead by a hair, inside the confidence interval.
 - **Hash algorithm choice barely matters** in these results (fclones'
   default-vs-matched-hash runs are within noise of each other in every
-  scenario). The architecture — not the hash function — is what's driving
-  the difference in both directions.
+  scenario). The architecture — not the hash function — is what drives the
+  difference.
 - These are single-machine, container-environment numbers with real
   variance (see the ± figures) — read them as "which architecture wins on
   which shape of workload," not as a precise universal multiplier.
 
-## Follow-ups this comparison motivates
+## Closing the large-file gap: what actually worked
 
-Added to `docs/roadmap/ROADMAP.md`:
+The original pass (see git history for this file) found rusty_fclone
+losing ~1.2× on `few_large_duplicates` and hypothesized ADR-0001's shared
+"one constant for both the small-file cutoff and the partial-hash sample
+size" as the cause — 3×128 KiB of partial-hash I/O per file looked like
+wasted work compared to fclones' much smaller default samples.
 
-- `DETECTION-ADAPTIVE-SAMPLE-SIZE` — decouple the partial-hash sample size
-  from the small-file threshold (ADR-0001 flagged this as a simplicity
-  tradeoff at the time; this comparison is the first evidence it costs
-  something concrete on large files) and/or cap absolute sample size well
-  below 128 KiB regardless of file size.
-- `DETECTION-STREAMING-OVERLAP` and streaming full-file hashing (already
-  tracked) are also plausible contributors to the large-file gap and worth
-  revisiting with this result in mind.
+**That hypothesis was tested and refuted.** ADR-0007 decoupled the two
+constants (new default partial-hash sample: 16 KiB, matching fclones' own
+HDD default). Re-measuring `few_large_duplicates` alone afterward: no
+meaningful change (~1.21× slower, statistically unchanged). The reason,
+obvious in hindsight: every file in this scenario *is* a real duplicate, so
+nothing gets pruned by the partial-hash stage regardless of its sample
+size — all 20 files proceed to a mandatory full 8 MiB read either way. The
+partial-hash sample was never more than ~4% of this scenario's total I/O
+volume, nowhere near enough to explain a 20% gap.
+
+**The actual cause was I/O thread pool oversubscription** (ADR-0002's
+original `cores * 4` default). Sweeping `--io-threads` from 1 to 16 on
+`few_large_duplicates` (4-core container) found 4 threads clearly optimal
+(36.8 ms) against every oversubscribed value tested (44.6 ms at 8 threads,
+50.8 ms at 16 — the previous default) *and* every undersubscribed value (41.5
+ms at 2, 52.2 ms at 1). Checking whether this was large-file-specific: the
+same sweep on all three small-file scenarios showed the identical pattern —
+4 threads beat 8 and 16 in every one of them too. Oversubscription was
+hurting uniformly, not helping small files as ADR-0002's original
+latency-hiding rationale assumed for this environment's storage.
+
+ADR-0008 changed the default from `cores * 4` (capped 64) to `cores`,
+keeping `--io-threads` as an override for storage where the original
+oversubscription reasoning still applies (e.g. real spinning disks or
+network filesystems, neither tested here). This is the change that actually
+moved `few_large_duplicates` from 1.21× slower to parity, and — since the
+small-file scenarios were *also* being hurt by oversubscription, just not
+losing outright — pushed their already-winning margin from ~1.9–2.0× up to
+~2.6–2.7×.
+
+Both ADR-0007 and ADR-0008 are kept: the sample-size decoupling is a
+genuine improvement for realistic large-file trees where most files
+*aren't* duplicates (unlike this synthetic all-duplicates scenario), even
+though it wasn't what this specific benchmark needed.
+
+## Roadmap status
+
+- `DETECTION-ADAPTIVE-SAMPLE-SIZE`: Done (ADR-0007), though see above for
+  why it wasn't sufficient alone.
+- The I/O-thread-sizing fix (ADR-0008) that actually closed the gap wasn't
+  a pre-existing roadmap item; it's recorded as its own ADR since it
+  revises ADR-0002's default.
+- Still open: `DETECTION-LINUX-FASTPATH` (principled device-type-aware I/O
+  tuning, rather than one guessed constant either way) and
+  `DETECTION-STREAMING-OVERLAP`.
 
 ## Reproducing this
 

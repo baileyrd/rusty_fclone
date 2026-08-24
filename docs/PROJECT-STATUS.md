@@ -1,5 +1,5 @@
 # Project Status
-- Last verified main commit: none yet — `main` has no commits; this branch (`claude/custom-fclone-detection-bufv7b`) holds the baseline, gap-closure, benchmark-suite, and fclones-comparison follow-ups, not yet merged
+- Last verified main commit: none yet — `main` has no commits; this branch (`claude/custom-fclone-detection-bufv7b`) holds the baseline, gap-closure, benchmark-suite, fclones-comparison, and adaptive-tuning follow-ups, not yet merged
 - Verified at: 2026-08-24
 - Current milestone: `DETECTION-BASELINE` (see `docs/roadmap/ROADMAP.md`)
 - Health: green — workspace builds, lints, and tests clean on the pinned toolchain
@@ -13,85 +13,89 @@
   pre-existing hardlinks confirmed correct output, including with
   `--verify`.
 - Traceability gap-closure — every requirement previously flagged "needs
-  dedicated unit test" (`FCLONE-DETECTION-001-FR-005`, `FR-006`, `FR-008`,
-  `FR-009`, `NFR-001`) now has one; see
-  `docs/traceability/TRACEABILITY.md`. Closing FR-009 surfaced and fixed a
-  real gap: read failures during hashing/verification were silently
-  dropped rather than reported — see
-  `docs/specifications/detection/FCLONE-DETECTION-001.md` change history
-  (0.1.1).
+  dedicated unit test" now has one; see `docs/traceability/TRACEABILITY.md`.
+  Closing FR-009 surfaced and fixed a real gap: read failures during
+  hashing/verification were silently dropped rather than reported.
 - `DETECTION-BENCHMARK` — Criterion suite added
   (`crates/rusty_fclone-core/benches/detection.rs`, `cargo bench -p
   rusty_fclone-core`), covering four synthetic scenarios. CI compiles it
   (`cargo bench --workspace --no-run`) on every push; full statistical runs
   are a documented manual step (too slow/variance-prone for per-PR CI).
-- `DETECTION-BENCHMARK-VS-FCLONES` — documented head-to-head comparison
-  against upstream fclones 0.35.0 on identical synthetic trees; see
-  `docs/benchmarks/FCLONES-COMPARISON.md` for full methodology.
-  **rusty_fclone wins ~1.9–2.0x on small-file-heavy trees (including the
-  realistic mixed-tree scenario) but loses ~1.2x on a large-file
-  scenario** — an honest, mixed result, not an unqualified win. The
-  large-file loss is attributed (not yet root-caused by profiling) to
-  ADR-0001's shared 128 KiB constant over-sampling large files during the
-  partial-hash stage; tracked as the new `DETECTION-ADAPTIVE-SAMPLE-SIZE`
-  roadmap unit. Setting this up also caught and fixed a real bug in the
-  benchmark fixtures themselves (see spec change history 0.1.3): the
-  "unique files" scenario's content generator collided every 256 files, so
-  it was silently testing ~256 duplicate groups instead of zero.
+- `DETECTION-BENCHMARK-VS-FCLONES` + `DETECTION-ADAPTIVE-SAMPLE-SIZE` +
+  `DETECTION-IO-THREAD-SIZING` — documented head-to-head comparison against
+  upstream fclones 0.35.0, then two follow-on fixes to close the gap it
+  found. Full investigation and final numbers in
+  `docs/benchmarks/FCLONES-COMPARISON.md`; the short version:
 
-  In-process Criterion numbers (this session's 4-core container;
-  informational, not a portability claim), after the fixture fix:
+  **rusty_fclone now wins ~2.6–2.7x on small-file-heavy trees (including
+  the realistic mixed-tree scenario) and is within measurement noise of
+  fclones' best-tuned configuration on a large-file scenario, beating its
+  default configuration outright.** Getting there took an honest wrong turn:
+  the first hypothesis (ADR-0007, decoupling the partial-hash sample size
+  from the small-file threshold) was a real improvement but didn't move the
+  benchmark that motivated it, since every file in that scenario is a real
+  duplicate and nothing gets pruned by partial hashing regardless of sample
+  size. The actual fix (ADR-0008) was the I/O thread pool's default —
+  changed from an oversubscribed `cores * 4` to plain `cores`, after
+  benchmarking showed oversubscription hurting throughput on *every* tested
+  scenario, not just the large-file one. Both changes are kept; both are
+  documented, including the one that didn't work as expected.
 
-  | Scenario | Time (mean) | Throughput |
-  |---|---|---|
-  | `many_small_duplicates` (2,000 files, 1 KiB, 200 dup groups of 10) | 34.5 ms | ~58 Kelem/s |
-  | `many_unique_small_files` (2,000 files, 1 KiB, no duplicates) | 39.3 ms | ~51 Kelem/s |
-  | `few_large_duplicates` (20 files, 8 MiB, 4 dup groups of 5) | 24.1 ms | ~6.5 GiB/s (warm page cache) |
-  | `mixed_realistic_tree` (1,018 files, mostly unique, 3 small dup groups) | 20.8 ms | ~49 Kelem/s |
+  Setting up the comparison also caught a real bug in the benchmark
+  fixtures themselves: the "unique files" scenario's content generator
+  collided every 256 files, so it was silently testing ~256 duplicate
+  groups instead of zero (fixed; benchmark-only, no production code
+  affected).
 
-  CLI-to-CLI comparison against fclones (same container, same trees; full
-  table in `docs/benchmarks/FCLONES-COMPARISON.md`):
+  CLI-to-CLI comparison against fclones (this session's 4-core container,
+  same trees; full tables in `docs/benchmarks/FCLONES-COMPARISON.md`):
 
   | Scenario | rusty-fclone | fclones (default) | fclones (xxhash) |
   |---|---:|---:|---:|
-  | `many_small_duplicates` | **42.6 ms** | 81.6 ms | 80.2 ms |
-  | `many_unique_small_files` | **39.5 ms** | 78.6 ms | 77.5 ms |
-  | `few_large_duplicates` | 53.7 ms | 46.9 ms | **44.2 ms** |
-  | `mixed_realistic_tree` | **27.3 ms** | 45.4 ms | 44.7 ms |
+  | `many_small_duplicates` | **32.2 ms** | 84.3 ms | 85.4 ms |
+  | `many_unique_small_files` | **31.3 ms** | 82.7 ms | 84.7 ms |
+  | `few_large_duplicates` | 40.2 ms | 46.2 ms | **38.6 ms** |
+  | `mixed_realistic_tree` | **17.1 ms** | 44.4 ms | 47.7 ms |
 
 ## In progress
 - None. Awaiting review/merge of the baseline + gap-closure + benchmark +
-  comparison work.
+  comparison + tuning work.
 
 ## Blocked
 - None.
 
 ## Next
-1. `DETECTION-ADAPTIVE-SAMPLE-SIZE` — the fclones comparison found a real,
-   reproducible loss on large files; this is the natural next unit to close
-   it. `DETECTION-STREAMING-OVERLAP` is the alternative if that's not the
-   priority.
+1. `DETECTION-STREAMING-OVERLAP` (hashing starts before traversal finishes)
+   or `DETECTION-LINUX-FASTPATH` (principled device-type-aware I/O tuning,
+   superseding the single empirically-chosen `io_threads` default with
+   something that detects what it's running on) are the natural next units.
+   `ACTION-LAYER` (delete/hardlink/reflink) is the alternative if detection
+   performance work is done for now.
 
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-24)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-24)
 - `cargo test --workspace`: pass, 25/25 (2026-08-24)
 - `cargo bench -p rusty_fclone-core`: runs to completion, all 4 scenarios
-  produce sane throughput numbers, no panics (2026-08-24; numbers above)
+  produce sane throughput numbers, no panics (2026-08-24)
 - `scripts/bench-vs-fclones.sh` (fclones 0.35.0 via `cargo binstall`,
   hyperfine, 3 warmup + 10+ measured runs per command): completed for all 4
-  scenarios, results above and in `docs/benchmarks/FCLONES-COMPARISON.md`
-  (2026-08-24)
+  scenarios both before and after the ADR-0007/ADR-0008 fixes; results
+  above and in `docs/benchmarks/FCLONES-COMPARISON.md` (2026-08-24)
+- Manual `--io-threads` sweep (1/2/4/8/16) on all 4 scenarios: confirmed
+  `io_threads = cores` (4 on this container) beats every other value
+  tested, on every scenario (2026-08-24)
 - Manual CLI smoke tests (`rusty-fclone` against temp trees, with and
   without `--verify`): correct duplicate groups reported, hardlink aliases
-  included, unique files excluded, `--verify`/`--small-file-threshold`
-  flags wired through correctly (2026-08-24)
+  included, unique files excluded, all six `ScanOptions` flags wired
+  through correctly (2026-08-24)
 
 ## Risks and decisions needed
-- "Fastest possible" is now a measured claim, but the honest reading is
-  "faster on small-file-heavy trees, slower on large-file trees" — not an
-  unqualified win. `DETECTION-ADAPTIVE-SAMPLE-SIZE` is the proposed fix;
-  it hasn't been root-caused by profiling yet, only motivated by the
-  benchmark result.
+- The `io_threads = cores` default (ADR-0008) is empirically tuned on one
+  4-core container with presumably low-latency backing storage. It hasn't
+  been validated on real spinning disks or high-latency network
+  filesystems, where oversubscription's original rationale (ADR-0002) may
+  still hold — `--io-threads` exists as an override for that case, but no
+  such environment has actually been tested.
 - No CI workflow has run yet (the workflow file is new on this branch); its
   first real run should be treated as unverified until observed green.

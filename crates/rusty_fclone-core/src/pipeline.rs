@@ -145,7 +145,7 @@ fn process_size_group(
         let partial: Vec<(u128, FileGroup)> = members
             .into_par_iter()
             .filter_map(|(representative, aliases)| {
-                let ranges = sample_ranges(size, options.small_file_threshold);
+                let ranges = sample_ranges(size, options.partial_hash_sample_size);
                 match io_pool.read_ranges(&representative, ranges) {
                     Ok(bytes) => Some((hash_chunks(&[&bytes]), (representative, aliases))),
                     Err(source) => {
@@ -290,6 +290,7 @@ mod tests {
 
         let options = ScanOptions {
             small_file_threshold: 128,
+            partial_hash_sample_size: 128,
             ..ScanOptions::default()
         };
         let groups = collect_groups(dir.path(), options);
@@ -299,6 +300,13 @@ mod tests {
 
     #[test]
     fn no_duplicates_when_only_prefix_matches() {
+        // A small partial_hash_sample_size (128) keeps the head/mid/tail
+        // windows narrow relative to the 4096-byte file, so this actually
+        // exercises the tail sample catching a difference a prefix-only
+        // check would miss -- not just a coincidence of the sample
+        // clamping to the whole file (ADR-0007 decoupled sample size from
+        // small_file_threshold, so both must be set explicitly here to
+        // keep that true).
         let dir = tempfile::tempdir().unwrap();
         let mut a = vec![1u8; 4096];
         let mut b = vec![1u8; 4096];
@@ -309,6 +317,7 @@ mod tests {
 
         let options = ScanOptions {
             small_file_threshold: 128,
+            partial_hash_sample_size: 128,
             ..ScanOptions::default()
         };
         let groups = collect_groups(dir.path(), options);
