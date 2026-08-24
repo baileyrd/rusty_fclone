@@ -1,3 +1,5 @@
+mod history;
+
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -91,6 +93,14 @@ struct Cli {
     #[arg(long)]
     cache: Option<PathBuf>,
 
+    /// Path to a SQLite scan-history database (created if it doesn't
+    /// exist). When set, a summary of this scan (files/bytes scanned,
+    /// duplicate groups/files, and any action's result) is appended as one
+    /// row after the scan completes, for longer-term analytics across
+    /// repeated scans (ADR-0017). Off by default.
+    #[arg(long)]
+    history: Option<PathBuf>,
+
     /// What to do with redundant copies once a group is confirmed.
     /// Without --apply, delete/hardlink/reflink only preview what would
     /// happen.
@@ -162,6 +172,11 @@ fn run(cli: Cli) -> ExitCode {
         }
     }
 
+    // Captured before `cli.root` moves into `scan()` below -- needed for
+    // the history record, if `--history` is set (ADR-0017).
+    let root_display = cli.root.display().to_string();
+    let started_at = unix_timestamp_now();
+
     let options = ScanOptions {
         follow_symlinks: cli.follow_symlinks,
         cross_filesystems: cli.cross_filesystems,
@@ -184,6 +199,7 @@ fn run(cli: Cli) -> ExitCode {
     let mut total_bytes_reclaimed = 0u64;
     let mut total_files_acted_on = 0u64;
     let mut progress_line = ProgressLine::new(cli.format);
+    let mut final_summary = ScanSummary::default();
 
     for event in handle {
         match event {
@@ -209,6 +225,7 @@ fn run(cli: Cli) -> ExitCode {
             ScanEvent::Finished(summary) => {
                 progress_line.finish();
                 report_finished(cli.format, &summary);
+                final_summary = summary;
             }
         }
     }
@@ -223,11 +240,39 @@ fn run(cli: Cli) -> ExitCode {
         );
     }
 
+    if let Some(history_path) = &cli.history {
+        let record = history::ScanRecord {
+            root: root_display,
+            started_at,
+            files_scanned: final_summary.files_scanned,
+            bytes_scanned: final_summary.bytes_scanned,
+            duplicate_groups: final_summary.duplicate_groups,
+            duplicate_files: final_summary.duplicate_files,
+            action_kind: action_kind.map(action_word),
+            action_applied: action_kind.map(|_| cli.apply),
+            bytes_reclaimed: action_kind.map(|_| total_bytes_reclaimed),
+            files_acted_on: action_kind.map(|_| total_files_acted_on),
+        };
+        if let Err(err) = history::record_scan(history_path, &record) {
+            eprintln!("warning: failed to record scan history: {err}");
+        }
+    }
+
     if had_errors {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Current time as Unix seconds, for the history record's `started_at`
+/// (ADR-0017). Falls back to `0` on a pre-1970 system clock, which never
+/// happens in practice but keeps this infallible.
+fn unix_timestamp_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Prompts on stderr and reads a yes/no answer from stdin, describing what
@@ -556,6 +601,7 @@ mod tests {
             partial_hash_sample_size: ScanOptions::default().partial_hash_sample_size,
             io_threads: ScanOptions::default().io_threads,
             cache: ScanOptions::default().cache_path,
+            history: None,
             action: Action::Report,
             apply: false,
             yes: false,
@@ -714,5 +760,63 @@ mod tests {
         let exit = run(cli);
 
         assert_eq!(exit, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn history_flag_records_one_row_per_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"dup").unwrap();
+        fs::write(dir.path().join("b.txt"), b"dup").unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let history_path = history_dir.path().join("history.sqlite");
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.history = Some(history_path.clone());
+        let exit = run(cli);
+        assert_eq!(exit, ExitCode::SUCCESS);
+
+        let conn = rusqlite::Connection::open(&history_path).unwrap();
+        let (files_scanned, duplicate_groups, action_kind): (i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT files_scanned, duplicate_groups, action_kind FROM scans",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(files_scanned, 2);
+        assert_eq!(duplicate_groups, 1);
+        assert_eq!(
+            action_kind, None,
+            "no action was requested (Action::Report)"
+        );
+    }
+
+    #[test]
+    fn history_flag_records_the_action_result_when_an_action_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"dup").unwrap();
+        fs::write(dir.path().join("b.txt"), b"dup").unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let history_path = history_dir.path().join("history.sqlite");
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.history = Some(history_path.clone());
+        cli.action = Action::Delete;
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+        assert_eq!(exit, ExitCode::SUCCESS);
+
+        let conn = rusqlite::Connection::open(&history_path).unwrap();
+        let (action_kind, applied, reclaimed): (Option<String>, Option<bool>, Option<i64>) = conn
+            .query_row(
+                "SELECT action_kind, action_applied, bytes_reclaimed FROM scans",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(action_kind.as_deref(), Some("delete"));
+        assert_eq!(applied, Some(true));
+        assert_eq!(reclaimed, Some(3));
     }
 }
