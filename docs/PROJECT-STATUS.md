@@ -1,13 +1,10 @@
 # Project Status
-- Last verified main commit: `a77f1c4` (PR #10, merged) — the incremental
-  hash-cache (PR #12) and SQLite scan-history work below are on separate
-  branches, neither yet merged
+- Last verified main commit: `bff4249` (PR #13, merged) — both new,
+  user-requested units (a `redb` incremental hash cache, PR #12, and a
+  SQLite scan-history store, PR #13) are now fully merged
 - Verified at: 2026-08-24
-- Current milestone: `CLI-SCAN-HISTORY` (second of two new,
-  user-requested units — a `redb` incremental hash cache and a SQLite
-  scan-history store for longer-term analytics; both stemmed from a "what
-  database would fit here" design discussion, not the earlier "build it
-  all" batch, which is fully merged). See `docs/roadmap/ROADMAP.md`.
+- Current milestone: none in progress — both `DETECTION-INCREMENTAL-CACHE`
+  and `CLI-SCAN-HISTORY` are done. See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace builds, lints, and tests clean on the pinned
   toolchain
 
@@ -39,15 +36,13 @@
   ADR-0016, `FCLONE-DETECTION-001` 0.1.8 (NFR-004). Implemented, tested
   (60/60 tests: 7 new `cache` unit tests + 2 `pipeline` integration
   tests), manually smoke-tested via `-vvv` trace output (zero hits cold,
-  exactly one hit per file warm, correct results throughout). PR #12
-  open, awaiting CI. Benchmark verification of the cache-off path was
-  inconclusive in this environment (noisy shared-container load swung the
-  criterion comparison between "+144% regressed" and "-6.8% improved"
-  across consecutive runs of identical code) — the code path is
-  structurally unaffected (a `None` short-circuit), so not treated as a
-  real regression signal; see ADR-0016's consequences.
-
-## In progress
+  exactly one hit per file warm, correct results throughout). Merged via
+  PR #12. Benchmark verification of the cache-off path was inconclusive
+  in this environment (noisy shared-container load swung the criterion
+  comparison between "+144% regressed" and "-6.8% improved" across
+  consecutive runs of identical code) — the code path is structurally
+  unaffected (a `None` short-circuit), so not treated as a real
+  regression signal; see ADR-0016's consequences.
 - `CLI-SCAN-HISTORY`: new `history` module (`rusty_fclone-cli` only, no
   core-crate change) backed by SQLite (`rusqlite`, `bundled` feature) — a
   summary of each completed scan (files/bytes scanned, duplicate
@@ -56,28 +51,26 @@
   default. Deliberately scoped to per-scan summaries only, not per-file/
   per-group detail, and no query/report subcommand yet (both explicitly
   deferred, matching this project's established scoping pattern).
-  ADR-0017, `CLI-UX-001` 0.2.0. Stacked on the incremental-cache branch;
-  implemented, tested (fmt/clippy/test/bench all green, 66/66 tests — 4
-  new `history` unit tests + 2 new CLI-level tests), and manually
-  smoke-tested (two real scans — plain, then `--action delete --apply` —
-  produced two correctly-populated rows, confirmed via a direct SQL
-  query). Not yet pushed through the PR → CI → merge → sync loop.
+  ADR-0017, `CLI-UX-001` 0.2.0. Implemented, tested (fmt/clippy/test/bench
+  all green, 66/66 tests — 4 new `history` unit tests + 2 new CLI-level
+  tests), and manually smoke-tested (two real scans — plain, then
+  `--action delete --apply` — produced two correctly-populated rows,
+  confirmed via a direct SQL query). Merged via PR #13.
+
+## In progress
+- None.
 
 ## Blocked
 - None.
 
 ## Next
-1. Get CI green and merge PR #12 (`DETECTION-INCREMENTAL-CACHE`), sync
-   main.
-2. Rebase/PR the `CLI-SCAN-HISTORY` branch onto the updated main, get CI
-   green, merge, sync.
-3. Follow-on units intentionally left open by earlier scoping decisions
-   (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
-   proper (full pipeline overlap, needs a `ScanEvent` finality-contract
-   decision first), `DETECTION-LINUX-FASTPATH` proper (io_uring/FIEMAP,
-   needs an async runtime and unsafe FFI, its own ADR), and — if wanted —
-   a query/report surface over `--history`'s accumulated data (explicitly
-   out of scope for `CLI-SCAN-HISTORY` itself).
+- Follow-on units intentionally left open by earlier scoping decisions
+  (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
+  proper (full pipeline overlap, needs a `ScanEvent` finality-contract
+  decision first), `DETECTION-LINUX-FASTPATH` proper (io_uring/FIEMAP,
+  needs an async runtime and unsafe FFI, its own ADR), and — if wanted —
+  a query/report surface over `--history`'s accumulated data (explicitly
+  out of scope for `CLI-SCAN-HISTORY` itself).
 
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-24)
