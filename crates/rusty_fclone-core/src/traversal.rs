@@ -77,12 +77,12 @@ pub(crate) fn traverse(
             }
         };
 
-        if !options.cross_filesystems {
-            if let (Some(root_dev), Some(entry_dev)) = (root_device, device_component(&file_id)) {
-                if entry_dev != root_dev {
-                    continue;
-                }
-            }
+        if is_excluded_by_filesystem_boundary(
+            options.cross_filesystems,
+            root_device,
+            device_component(&file_id),
+        ) {
+            continue;
         }
 
         candidates.push(Candidate {
@@ -93,6 +93,24 @@ pub(crate) fn traverse(
     }
 
     candidates
+}
+
+/// Decides whether a candidate should be skipped for being on a different
+/// filesystem/volume than the scan root (ADR-0003). `cross_filesystems`
+/// disables the check entirely; if either device is unknown (lookup failed)
+/// the candidate is never excluded on this basis, since we can't tell.
+fn is_excluded_by_filesystem_boundary(
+    cross_filesystems: bool,
+    root_device: Option<u64>,
+    entry_device: Option<u64>,
+) -> bool {
+    if cross_filesystems {
+        return false;
+    }
+    match (root_device, entry_device) {
+        (Some(root), Some(entry)) => root != entry,
+        _ => false,
+    }
 }
 
 /// Extracts a comparable "which filesystem/volume is this on" value from a
@@ -145,5 +163,86 @@ mod tests {
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].path.file_name().unwrap(), "real.txt");
         }
+    }
+
+    #[test]
+    fn traversal_errors_are_reported_and_do_not_abort_the_scan() {
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("real.txt"), b"data").unwrap();
+            std::os::unix::fs::symlink(
+                dir.path().join("does-not-exist"),
+                dir.path().join("dangling.txt"),
+            )
+            .unwrap();
+
+            // Broken symlinks are only ever stat-ed (and can only fail)
+            // when we're configured to follow them.
+            let options = ScanOptions {
+                follow_symlinks: true,
+                ..ScanOptions::default()
+            };
+            let mut errors = Vec::new();
+            let candidates = traverse(dir.path(), &options, |err| errors.push(err));
+
+            assert_eq!(
+                candidates.len(),
+                1,
+                "the broken symlink must not appear as a candidate"
+            );
+            assert_eq!(candidates[0].path.file_name().unwrap(), "real.txt");
+            assert_eq!(
+                errors.len(),
+                1,
+                "the broken symlink must be reported as a per-file error, not silently dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn filesystem_boundary_is_not_enforced_when_cross_filesystems_is_set() {
+        assert!(!is_excluded_by_filesystem_boundary(true, Some(1), Some(2)));
+    }
+
+    #[test]
+    fn filesystem_boundary_excludes_a_different_device() {
+        assert!(is_excluded_by_filesystem_boundary(false, Some(1), Some(2)));
+    }
+
+    #[test]
+    fn filesystem_boundary_allows_the_same_device() {
+        assert!(!is_excluded_by_filesystem_boundary(false, Some(1), Some(1)));
+    }
+
+    #[test]
+    fn filesystem_boundary_is_not_enforced_when_a_device_is_unknown() {
+        assert!(!is_excluded_by_filesystem_boundary(false, None, Some(2)));
+        assert!(!is_excluded_by_filesystem_boundary(false, Some(1), None));
+        assert!(!is_excluded_by_filesystem_boundary(false, None, None));
+    }
+
+    #[test]
+    fn device_component_reads_the_device_id_on_unix() {
+        let id = FileId::Inode {
+            device_id: 42,
+            inode_number: 7,
+        };
+        assert_eq!(device_component(&id), Some(42));
+    }
+
+    #[test]
+    fn device_component_reads_the_volume_serial_number_on_windows() {
+        let low_res = FileId::LowRes {
+            volume_serial_number: 42,
+            file_index: 7,
+        };
+        assert_eq!(device_component(&low_res), Some(42));
+
+        let high_res = FileId::HighRes {
+            volume_serial_number: 42,
+            file_id: 7,
+        };
+        assert_eq!(device_component(&high_res), Some(42));
     }
 }

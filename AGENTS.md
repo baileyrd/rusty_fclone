@@ -31,6 +31,8 @@ project architecture.
 - Format: `cargo fmt --all --check`
 - Lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Test: `cargo test --workspace`
+- Benchmark: `cargo bench -p rusty_fclone-core` (CI only compiles benches
+  via `cargo bench --workspace --no-run`; run this locally for real numbers)
 - Docs/build: `cargo doc --workspace --all-features --no-deps`
 
 ## Change rules

@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.1.0
+- Version: 0.1.4
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -49,10 +49,12 @@ reporting, a GUI) is out of scope for this specification and depends on it.
   size before any content is read, and SHALL NOT read the content of a file
   whose size is unique within the scanned tree.
 - `FCLONE-DETECTION-001-FR-003`: For files sharing a size, the engine SHALL
-  narrow candidates with a partial hash (multi-point: head/middle/tail)
-  before computing a full hash, except for files at or below
-  `ScanOptions::small_file_threshold`, which SHALL go directly to a full
-  hash.
+  narrow candidates with a partial hash (multi-point: head/middle/tail,
+  each `ScanOptions::partial_hash_sample_size` bytes) before computing a
+  full hash, except for files at or below `ScanOptions::small_file_threshold`,
+  which SHALL go directly to a full hash. The two options are independent
+  (ADR-0007) — `small_file_threshold` alone decides whether the partial
+  stage runs at all.
 - `FCLONE-DETECTION-001-FR-004`: The engine SHALL skip symbolic links during
   traversal by default, and SHALL follow them only when
   `ScanOptions::follow_symlinks` is `true`.
@@ -80,7 +82,8 @@ reporting, a GUI) is out of scope for this specification and depends on it.
   of a file whose size or partial hash is unique within its size-group.
 - `FCLONE-DETECTION-001-NFR-003`: Hashing work SHALL be bounded by available
   CPU parallelism, and blocking file reads SHALL run on a separately sized
-  worker pool, so that I/O latency and hashing CPU cost are not serialized
+  worker pool (`ScanOptions::io_threads`, default: core count — see
+  ADR-0008), so that I/O latency and hashing CPU cost are not serialized
   through the same thread pool (see ADR-0002).
 
 ## Architecture and interfaces
@@ -96,7 +99,7 @@ pub enum ScanEvent { DuplicateGroup(DuplicateGroup), Error(FileError), Finished(
 pub struct DuplicateGroup { pub size: u64, pub paths: Vec<PathBuf> }
 pub struct ScanOptions { pub follow_symlinks: bool, pub cross_filesystems: bool,
                           pub verify_matches: bool, pub small_file_threshold: u64,
-                          pub io_threads: usize }
+                          pub partial_hash_sample_size: u64, pub io_threads: usize }
 ```
 
 Internal modules: `traversal` (jwalk-based walk + file-id), `io_pool`
@@ -112,11 +115,19 @@ optional verify → emit).
   byte-verified, for distinct inodes).
 - `ScanSummary.duplicate_files` counts every path across every emitted
   group, including hardlink aliases.
+- A set of paths that are *only* hardlink aliases of one inode, with no
+  other file matching their content, is never reported as a
+  `DuplicateGroup` — they already share storage, so there is nothing
+  actionable to report (see `pipeline::tests::standalone_hardlink_pair_is_not_reported_as_duplicate`).
 
 ## Errors, failure, recovery, and observability
 
 - Traversal errors (unreadable directory, broken entry) and per-file read
-  errors both surface as `ScanEvent::Error(FileError { path, source })`.
+  errors — during partial-hash, full-hash, *and* `--verify`'s byte-compare
+  read — all surface as `ScanEvent::Error(FileError { path, source })`. (The
+  hashing/verification-stage reporting was added in the traceability
+  gap-closure pass; earlier code silently dropped those failures instead of
+  reporting them — see change history.)
 - A non-directory or non-existent root is rejected synchronously by `scan()`
   as `ScanError::InvalidRoot`, before any background work starts.
 - No structured logging/tracing exists yet in v1 — see roadmap.
@@ -140,9 +151,20 @@ optional verify → emit).
 ## Verification plan
 
 Unit/integration tests per module (traversal, hashing, I/O pool, end-to-end
-pipeline via `pipeline::tests`). No benchmark suite yet — tracked on the
-roadmap; the naive `HashMap`-based data model (ADR-0004) is meant to be
-revisited only once a benchmark demonstrates it's the bottleneck.
+pipeline via `pipeline::tests`). A Criterion benchmark suite
+(`crates/rusty_fclone-core/benches/detection.rs`, run via `cargo bench -p
+rusty_fclone-core`) covers four synthetic scenarios — many small
+duplicates, many unique small files, few large duplicates, and a mixed
+realistic tree — reporting files/sec or bytes/sec. These are relative/
+regression benchmarks against this crate's own history. A separate,
+documented head-to-head comparison against upstream fclones exists at
+`docs/benchmarks/FCLONES-COMPARISON.md`
+(`DETECTION-BENCHMARK-VS-FCLONES` on the roadmap): after ADR-0007 and
+ADR-0008, rusty_fclone wins ~2.6–2.7x on small-file-heavy trees and is
+within measurement noise of fclones' best-tuned configuration on a
+large-file scenario (beating its default configuration outright).
+The naive `HashMap`-based data model (ADR-0004) is meant to be revisited
+only once a benchmark demonstrates it's the bottleneck.
 
 ## Traceability
 
@@ -151,13 +173,67 @@ See `docs/traceability/TRACEABILITY.md`.
 ## Open questions
 
 - Symlink-cycle handling when `follow_symlinks = true` relies entirely on
-  jwalk's own loop detection; no dedicated test exercises this path yet.
-- No benchmark exists yet to validate the "fastest possible" goal against
-  fclones or a synthetic large-tree workload.
+  jwalk's own loop detection; the gap-closure pass added a test for the
+  broken-symlink error-reporting case
+  (`traversal_errors_are_reported_and_do_not_abort_the_scan`), but no
+  dedicated test exercises an actual symlink *cycle* yet.
+- "Fastest possible" is now a measured claim across all four benchmark
+  scenarios: rusty_fclone wins ~2.6–2.7x on small-file-heavy trees and is
+  within measurement noise of (fractionally behind fclones' best-tuned
+  configuration, ahead of its default) on the large-file scenario — see
+  `docs/benchmarks/FCLONES-COMPARISON.md`. Getting there took two ADRs
+  (0007, 0008); the first hypothesis tested (partial-hash sample size) was
+  wrong for the specific benchmark scenario that motivated it, which the
+  comparison doc documents rather than quietly correcting.
+- The `few_large_duplicates` benchmark scenario reads the same files
+  repeatedly across iterations; after the first iteration these reads are
+  served from the OS page cache, so its reported throughput reflects warm-
+  cache performance, not raw disk I/O speed. This is intentional (repeat
+  scans of an unchanged tree are a realistic use case) but worth reading
+  the numbers with that caveat in mind.
 - Streaming full-file hashing (avoiding buffering an entire large file
   before hashing it) is not implemented; see ADR-0002's implementation note.
+- `FCLONE-DETECTION-001-NFR-001`'s test verifies the streaming *contract*
+  (groups always precede `Finished`) but not actual wall-clock overlap
+  between traversal and hashing — see `DETECTION-STREAMING-OVERLAP` on the
+  roadmap.
 
 ## Change history
 
+- 0.1.4 (2026-08-24): Closed the large-file benchmark gap found in 0.1.3.
+  Split `ScanOptions::small_file_threshold` from a new
+  `partial_hash_sample_size` field (ADR-0007, `DETECTION-ADAPTIVE-SAMPLE-SIZE`)
+  — a genuine improvement, but re-measuring showed it didn't move the
+  `few_large_duplicates` scenario, since every file there is a real
+  duplicate and nothing gets pruned by partial hashing regardless of sample
+  size. The actual fix was `ScanOptions::io_threads`'s default changing from
+  an oversubscribed `cores * 4` to plain `cores` (ADR-0008), after
+  benchmarking showed oversubscription hurting throughput on every tested
+  scenario, not just the large-file one. Added `--partial-hash-sample-size`
+  and `--io-threads` CLI flags. `docs/benchmarks/FCLONES-COMPARISON.md`
+  has the full investigation and final numbers.
+- 0.1.3 (2026-08-24): Added a documented head-to-head benchmark comparison
+  against upstream fclones 0.35.0 (`DETECTION-BENCHMARK-VS-FCLONES`) — see
+  `docs/benchmarks/FCLONES-COMPARISON.md`. rusty_fclone wins ~1.9–2.0x on
+  small-file-heavy trees, loses ~1.2x on a large-file scenario, motivating a
+  new `DETECTION-ADAPTIVE-SAMPLE-SIZE` roadmap unit. Also fixed a bug the
+  comparison surfaced: `benches/detection.rs`'s synthetic "unique files"
+  content generator only varied by `seed mod 256`, so the 2,000-file unique
+  scenario silently contained 256 duplicate groups instead of zero; fixed
+  by encoding the seed into each file's first 8 bytes. No production-code
+  change — the bug was in benchmark fixtures only.
+- 0.1.2 (2026-08-24): Added a Criterion benchmark suite
+  (`DETECTION-BENCHMARK` on the roadmap) covering four synthetic scan
+  scenarios. No behavior change; verification-plan and open-questions
+  sections updated to reflect it, and to split off the still-open
+  comparison against fclones as its own roadmap unit.
+- 0.1.1 (2026-08-24): Closed all traceability gaps flagged "needs dedicated
+  unit test" with direct tests (FR-005, FR-006, FR-008, FR-009, NFR-001).
+  While closing FR-009, found and fixed a real gap: read failures during the
+  partial-hash, full-hash, and `--verify` stages were silently dropped
+  instead of being reported via `ScanEvent::Error` — only traversal-stage
+  failures were reported before this fix. No architectural decision changed
+  (ADR-0004 already required this); this was a bug relative to an existing
+  requirement, not a new decision.
 - 0.1.0 (2026-08-24): Initial specification, written against the v1
   baseline implementation landed alongside ADR-0001 through ADR-0006.

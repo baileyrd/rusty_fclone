@@ -57,3 +57,13 @@ byte-verify**.
 - `--verify` trades a full extra read pass for zero collision risk; it is not
   the default because it meaningfully slows large scans for a risk that is
   already negligible with a 128-bit hash.
+
+## Addendum (2026-08-24): shared small-file-threshold constant superseded
+
+The "one shared constant" choice above (using `small_file_threshold` as
+both the skip-partial cutoff and the sample size) is superseded by
+ADR-0007, which splits it into two independent fields after benchmark
+evidence against fclones motivated revisiting it, per this ADR's own
+"revisit once a benchmark demonstrates it's the bottleneck" framing. The
+rest of this ADR — staged hashing, xxh3-128, multi-point sampling, trust
+level, hardlink pre-pass — is unchanged.

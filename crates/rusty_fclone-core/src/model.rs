@@ -15,10 +15,18 @@ pub struct ScanOptions {
     /// Default: `false` (trust the hash; see ADR-0001).
     pub verify_matches: bool,
     /// Files at or below this size (in bytes) skip the partial-hash stage
-    /// entirely and go straight to one full hash. Also used as the sample
-    /// chunk length for the partial-hash stage on larger files (ADR-0001).
+    /// entirely and go straight to one full hash (ADR-0001).
     pub small_file_threshold: u64,
-    /// Number of worker threads in the I/O-bound read pool (ADR-0002).
+    /// Chunk length (in bytes) sampled at the head, middle, and tail of a
+    /// file during the partial-hash stage, for files larger than
+    /// `small_file_threshold`. Independent of `small_file_threshold` since
+    /// ADR-0007 — see its rationale for why sharing one constant between
+    /// "should we partial-hash at all" and "how much to sample" cost real
+    /// throughput on large files.
+    pub partial_hash_sample_size: u64,
+    /// Number of worker threads in the I/O-bound read pool. Defaults to the
+    /// core count, not an oversubscribed multiple of it — see ADR-0008 for
+    /// why ADR-0002's original oversubscription default was revised.
     pub io_threads: usize,
 }
 
@@ -32,7 +40,8 @@ impl Default for ScanOptions {
             cross_filesystems: false,
             verify_matches: false,
             small_file_threshold: 128 * 1024,
-            io_threads: (cores * 4).min(64),
+            partial_hash_sample_size: 16 * 1024,
+            io_threads: cores,
         }
     }
 }
