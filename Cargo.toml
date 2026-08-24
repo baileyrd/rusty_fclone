@@ -20,6 +20,7 @@ tempfile = "3"
 criterion = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reflink-copy = { version = "0.1.30", features = ["tracing"] }
 
 [profile.release]
 lto = true

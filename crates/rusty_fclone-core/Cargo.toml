@@ -15,6 +15,7 @@ xxhash-rust.workspace = true
 file-id.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+reflink-copy.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

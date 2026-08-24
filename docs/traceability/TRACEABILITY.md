@@ -21,6 +21,7 @@
 | `FCLONE-ACTION-001-FR-005` | `ACTION-LAYER` | ADR-0004 (error-tolerance contract), ADR-0009 | `action::apply` | `action::tests::apply_reports_per_file_failure_without_aborting_the_rest` | action-layer commit | Implemented, Verified |
 | `FCLONE-ACTION-001-FR-006` | `ACTION-LAYER` | ADR-0009 | `rusty_fclone-cli::run` (`--apply` gate in `handle_group`) | `main::tests::action_without_apply_is_a_dry_run`, `main::tests::action_with_apply_actually_deletes`, `main::tests::action_with_apply_actually_hardlinks` | action-layer commit | Implemented, Verified |
 | `FCLONE-ACTION-001-FR-007` | `ACTION-LAYER` | ADR-0009 | `rusty_fclone-cli::run` (`Action::Report` → `action_kind: None`) | `main::tests::default_report_action_leaves_files_untouched` | action-layer commit | Implemented, Verified |
+| `FCLONE-ACTION-001-FR-008` | `ACTION-REFLINK` | ADR-0009, ADR-0014 | `action::reflink_over` | `action::tests::apply_reflink_succeeds_or_fails_cleanly_depending_on_filesystem_support` (tolerant of both outcomes — filesystem support varies) | reflink commit | Implemented, Verified — manual CLI smoke test additionally confirmed the failure path on this environment's non-CoW filesystem |
 
 State legend: `Implemented, Verified` = a requirement with a dedicated test
 exercising it directly. `Implemented` (no `Verified`) = code exists and

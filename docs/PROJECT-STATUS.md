@@ -1,6 +1,6 @@
 # Project Status
-- Last verified main commit: `f6ad0d5` (PR #6, merged) — traversal/collapse-
-  fusion and device-aware io_threads work below are on branches stacked
+- Last verified main commit: `4d320a6` (PR #7, merged) — device-aware
+  io_threads sizing and reflink action work below are on branches stacked
   atop each other, not yet merged
 - Verified at: 2026-08-24
 - Current milestone: closing out the roadmap's "Not Started" units and known
@@ -38,18 +38,16 @@
   hardlink-collapse/size/partial-hash/full-hash grouping stages is a
   refcount bump instead of a fresh allocation and copy. ADR-0011. Merged
   via PR #6.
+- `DETECTION-TRAVERSAL-COLLAPSE-FUSION`: traversal and hardlink-collapse
+  now run as one streaming pass — `traversal::traverse` takes an
+  `on_candidate` callback instead of returning a `Vec<Candidate>`, and
+  `pipeline::run_scan` folds the collapse step directly into that
+  callback. ADR-0012. Merged via PR #7. (Deliberately not full
+  hash-before-traversal-completes overlap — that's kept open separately
+  as `DETECTION-STREAMING-OVERLAP` proper, needing `ScanEvent`'s finality
+  contract redesigned first.)
 
 ## In progress
-- `DETECTION-TRAVERSAL-COLLAPSE-FUSION` (a narrower, already-done step
-  toward the roadmap's `DETECTION-STREAMING-OVERLAP`): traversal and
-  hardlink-collapse now run as one streaming pass — `traversal::traverse`
-  takes an `on_candidate` callback instead of returning a `Vec<Candidate>`,
-  and `pipeline::run_scan` folds the collapse step directly into that
-  callback, removing a full extra pass and the intermediate `Vec`. ADR-0012.
-  Deliberately does *not* implement full hash-before-traversal-completes
-  overlap — that needs `ScanEvent`'s finality contract (ADR-0004)
-  redesigned first, kept open as `DETECTION-STREAMING-OVERLAP` proper.
-  PR #7 open, awaiting CI.
 - `DETECTION-DEVICE-AWARE-IO-SIZING` (the thread-sizing half of
   `DETECTION-LINUX-FASTPATH`): new `device::default_io_threads` picks an
   oversubscribed pool on a rotational disk (Linux-only, best-effort via
@@ -58,36 +56,46 @@
   `--io-threads` flag change from `usize` to `Option<usize>` (`None` =
   auto-detect at scan time, `Some(n)` pins it explicitly). ADR-0013.
   io_uring/`FIEMAP` extent ordering remains separately deferred, kept open
-  as `DETECTION-LINUX-FASTPATH` proper. Stacked on the traversal-collapse-
-  fusion branch; implemented, tested (fmt/clippy/test/bench all green,
-  46/46 tests), and manually smoke-tested (auto-detect vs. explicit
-  `--io-threads` override, both confirmed correct). Not yet pushed through
-  the PR → CI → merge → sync loop.
+  as `DETECTION-LINUX-FASTPATH` proper. PR #8 open, awaiting CI.
+- `ACTION-REFLINK`: new `ActionKind::Reflink` via the `reflink-copy` crate
+  (strict `reflink`, not `reflink_or_copy` — no silent copy fallback when
+  a filesystem doesn't support cloning), same temp-then-rename safety
+  pattern as `Hardlink`, with cleanup of the temp file on a failed clone.
+  ADR-0014, `FCLONE-ACTION-001` 0.2.0. Stacked on the device-aware-io-
+  sizing branch; implemented, tested (fmt/clippy/test/bench all green,
+  47/47 tests), and manually smoke-tested — this environment's filesystem
+  isn't CoW-capable, so the smoke test (and the tolerant unit test)
+  exercised the graceful-failure path: reported per-file error, zero
+  bytes reclaimed, both files left with correct unmodified content, no
+  stray temp file. The success path is implemented and delegated to
+  `reflink-copy`'s own platform code, not independently verified on real
+  CoW storage here. Not yet pushed through the PR → CI → merge → sync loop.
 
 ## Blocked
 - None.
 
 ## Next
-1. Get CI green and merge PR #7 (traversal/collapse fusion), sync main.
-2. Rebase/PR the device-aware-io-sizing branch onto the updated main, get
-   CI green, merge, sync.
+1. Get CI green and merge PR #8 (device-aware io_threads sizing), sync
+   main.
+2. Rebase/PR the reflink-action branch onto the updated main, get CI
+   green, merge, sync.
 3. Remaining open roadmap units, no strong ordering constraint between
    them: `DETECTION-STREAMING-OVERLAP` proper (full pipeline overlap,
    needs a finality-contract decision first), `DETECTION-LINUX-FASTPATH`
    proper (io_uring/FIEMAP, needs an async runtime and unsafe FFI, its own
-   ADR), `ACTION-REFLINK`, `CLI-UX` (JSON output, progress reporting, an
-   interactive confirmation prompt as a second safety layer beyond
-   `--apply`).
+   ADR), `CLI-UX` (JSON output, progress reporting, an interactive
+   confirmation prompt as a second safety layer beyond `--apply`).
 
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-24)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-24)
-- `cargo test --workspace`: pass, 46/46 (2026-08-24)
+- `cargo test --workspace`: pass, 47/47 (2026-08-24)
 - `cargo bench -p rusty_fclone-core --no-run`: pass (2026-08-24)
 - Manual CLI smoke tests: verbosity flags (`-v` info, `-vv` debug),
   `RUST_LOG` override taking precedence, default output silent on success,
   `--action delete` dry run against a real duplicate pair, auto-detected
-  vs. explicit `--io-threads` (2026-08-24)
+  vs. explicit `--io-threads`, `--action reflink --apply` (graceful
+  per-file failure on this non-CoW filesystem, confirmed clean) (2026-08-24)
 
 ## Risks and decisions needed
 - The action layer is the first genuinely destructive capability in this
@@ -100,6 +108,10 @@
   been exercised against a real spinning disk (this environment's storage
   resolves to the safe `cores` fallback) — behavior on real rotational
   media is unverified beyond the parsing logic itself.
+- `ACTION-REFLINK`'s success path (an actual CoW clone happening) is
+  unverified end-to-end in this environment for the same reason — no
+  CoW-capable filesystem available to test against. Trusted to the
+  `reflink-copy` dependency's own test coverage.
 - `DETECTION-STREAMING-OVERLAP` proper (full hash-before-traversal-
   completes overlap) needs a decision on how to relax or redesign
   `ScanEvent`'s "no group revision after emission" finality contract

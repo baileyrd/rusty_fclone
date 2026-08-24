@@ -17,6 +17,11 @@ enum Action {
     Delete,
     /// Replace every redundant copy with a hardlink to the kept file.
     Hardlink,
+    /// Replace every redundant copy with a copy-on-write clone (reflink)
+    /// of the kept file. Only works on CoW-capable filesystems (Btrfs,
+    /// XFS with reflink, APFS, some ZFS setups) -- fails per-file,
+    /// reported as a warning, wherever it isn't.
+    Reflink,
 }
 
 impl Action {
@@ -25,6 +30,7 @@ impl Action {
             Action::Report => None,
             Action::Delete => Some(ActionKind::Delete),
             Action::Hardlink => Some(ActionKind::Hardlink),
+            Action::Reflink => Some(ActionKind::Reflink),
         }
     }
 }
@@ -242,6 +248,7 @@ fn action_word(kind: ActionKind) -> &'static str {
     match kind {
         ActionKind::Delete => "delete",
         ActionKind::Hardlink => "hardlink",
+        ActionKind::Reflink => "reflink",
     }
 }
 
