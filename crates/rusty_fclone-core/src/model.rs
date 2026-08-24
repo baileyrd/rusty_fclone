@@ -69,8 +69,23 @@ pub enum ScanEvent {
     DuplicateGroup(DuplicateGroup),
     /// A single file couldn't be read or stat-ed; the scan continued.
     Error(FileError),
+    /// A traversal progress checkpoint, emitted periodically while the
+    /// tree is still being walked (ADR-0015). Purely informational —
+    /// consumers that only care about results can ignore it. Only ever
+    /// appears before `Finished`, alongside `DuplicateGroup`/`Error`.
+    Progress(ScanProgress),
     /// The scan has finished; no further events follow.
     Finished(ScanSummary),
+}
+
+/// A traversal progress checkpoint (ADR-0015). Counts are cumulative
+/// (not deltas since the last checkpoint) and only cover traversal —
+/// there's no way to know the total file count in advance, so this is a
+/// running counter, not a percentage.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ScanProgress {
+    pub files_scanned: u64,
+    pub bytes_scanned: u64,
 }
 
 /// Aggregate counters reported once a scan completes.

@@ -13,8 +13,14 @@ use crate::device::default_io_threads;
 use crate::error::{FileError, ScanError};
 use crate::hash::{hash_chunks, sample_ranges};
 use crate::io_pool::IoPool;
-use crate::model::{DuplicateGroup, ScanEvent, ScanOptions, ScanSummary};
+use crate::model::{DuplicateGroup, ScanEvent, ScanOptions, ScanProgress, ScanSummary};
 use crate::traversal::traverse;
+
+/// How often (in files scanned) to emit a [`ScanEvent::Progress`]
+/// checkpoint during traversal (ADR-0015). A count-based threshold rather
+/// than a wall-clock timer: deterministic, no extra dependency, and cheap
+/// enough (a modulo check per file) not to matter next to the actual I/O.
+const PROGRESS_INTERVAL_FILES: u64 = 256;
 
 /// One distinct file, identified by its representative path (the first
 /// alias, alphabetically) plus every path — including hardlink aliases —
@@ -100,6 +106,12 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
                 .or_insert_with(|| (candidate.size, Vec::new()))
                 .1
                 .push(candidate.path);
+            if summary.files_scanned % PROGRESS_INTERVAL_FILES == 0 {
+                let _ = event_tx.send(ScanEvent::Progress(ScanProgress {
+                    files_scanned: summary.files_scanned,
+                    bytes_scanned: summary.bytes_scanned,
+                }));
+            }
         },
     );
 

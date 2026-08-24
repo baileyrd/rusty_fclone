@@ -16,6 +16,8 @@ rusty_fclone-core = { path = "../rusty_fclone-core" }
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

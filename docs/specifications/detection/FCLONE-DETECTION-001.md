@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.1.6
+- Version: 0.1.7
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -97,7 +97,9 @@ Public API (`crates/rusty_fclone-core/src/lib.rs`):
 pub fn scan(root: impl Into<PathBuf>, options: ScanOptions) -> Result<ScanHandle, ScanError>;
 
 pub struct ScanHandle { /* impl Iterator<Item = ScanEvent> */ }
-pub enum ScanEvent { DuplicateGroup(DuplicateGroup), Error(FileError), Finished(ScanSummary) }
+pub enum ScanEvent { DuplicateGroup(DuplicateGroup), Error(FileError),
+                      Progress(ScanProgress), Finished(ScanSummary) }
+pub struct ScanProgress { pub files_scanned: u64, pub bytes_scanned: u64 }
 pub struct DuplicateGroup { pub size: u64, pub paths: Vec<Arc<Path>> }
 pub struct ScanOptions { pub follow_symlinks: bool, pub cross_filesystems: bool,
                           pub verify_matches: bool, pub small_file_threshold: u64,
@@ -133,7 +135,9 @@ optional verify → emit).
   reporting them — see change history.)
 - A non-directory or non-existent root is rejected synchronously by `scan()`
   as `ScanError::InvalidRoot`, before any background work starts.
-- No structured logging/tracing exists yet in v1 — see roadmap.
+- `tracing` spans/events cover the traversal and pipeline stages
+  (ADR-0010); `ScanEvent::Progress` (0.1.7, ADR-0015) gives consumers a
+  progress signal independent of whatever logging level they've enabled.
 
 ## Security, privacy, and compatibility
 
@@ -196,6 +200,12 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.1.7 (2026-08-24): Added `ScanEvent::Progress(ScanProgress)`, a
+  traversal progress checkpoint emitted every 256 files scanned, always
+  before `Finished`. Consumed by the CLI's new `--format json`/live
+  progress line (`CLI-UX-001`, ADR-0015) but is a core-crate API addition,
+  not CLI-specific — any `ScanHandle` consumer sees it. No change to
+  detection behavior or the existing `Finished`-is-always-last invariant.
 - 0.1.6 (2026-08-24): `ScanOptions::io_threads` changes from `usize` to
   `Option<usize>`: `None` (the new default) auto-detects a device-aware
   default at scan time via the new `device` module (oversubscribed on a
