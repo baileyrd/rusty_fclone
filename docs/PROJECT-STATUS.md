@@ -1,14 +1,15 @@
 # Project Status
-- Last verified main commit: none yet — `main` has no commits; this branch (`claude/custom-fclone-detection-bufv7b`) holds the baseline, gap-closure, benchmark-suite, fclones-comparison, and adaptive-tuning follow-ups, not yet merged
+- Last verified main commit: `487d442` (PR #1, merged)
 - Verified at: 2026-08-24
-- Current milestone: `DETECTION-BASELINE` (see `docs/roadmap/ROADMAP.md`)
-- Health: green — workspace builds, lints, and tests clean on the pinned toolchain
+- Current milestone: `DETECTION-BASELINE` (see `docs/roadmap/ROADMAP.md`) — complete
+- Health: green — CI passed on PR #1's head (`c4b749a`) before merge; workspace builds, lints, and tests clean on the pinned toolchain
 
 ## Completed
-- `DETECTION-BASELINE` — detection engine + CLI implemented on this branch,
-  not yet merged; evidence: `cargo fmt --all --check`, `cargo clippy
-  --workspace --all-targets --all-features -- -D warnings`, and `cargo test
-  --workspace` all pass locally (25/25 tests); manual CLI smoke tests
+- `DETECTION-BASELINE` — detection engine + CLI. Merged to `main` via
+  [PR #1](https://github.com/baileyrd/rusty_fclone/pull/1); evidence:
+  `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  --all-features -- -D warnings`, and `cargo test --workspace` all pass
+  (25/25 tests), CI green on the merged head; manual CLI smoke tests
   against directory trees with exact duplicates, unique files, and
   pre-existing hardlinks confirmed correct output, including with
   `--verify`.
@@ -58,8 +59,7 @@
   | `mixed_realistic_tree` | **17.1 ms** | 44.4 ms | 47.7 ms |
 
 ## In progress
-- None. Awaiting review/merge of the baseline + gap-closure + benchmark +
-  comparison + tuning work.
+- None.
 
 ## Blocked
 - None.
@@ -97,5 +97,4 @@
   filesystems, where oversubscription's original rationale (ADR-0002) may
   still hold — `--io-threads` exists as an override for that case, but no
   such environment has actually been tested.
-- No CI workflow has run yet (the workflow file is new on this branch); its
-  first real run should be treated as unverified until observed green.
+- None currently. CI's first real run (PR #1) was observed green before merge.
