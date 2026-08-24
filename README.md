@@ -2,20 +2,21 @@
 
 A duplicate-file finder — a spiritual successor to
 [fclones](https://github.com/pkolaczk/fclones): a fast detection engine
-plus an action layer to delete or hardlink what it finds.
+plus an action layer to delete, hardlink, or reflink what it finds.
 
 ## Status
 
 Detection (staged hashing, benchmarked faster than fclones on most
-workloads — see below) and an action layer (delete/hardlink, dry-run by
-default) are both implemented. Reflink support and richer CLI output (JSON,
-progress reporting, an interactive confirmation prompt) are not yet built —
-see [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
-checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
-what's planned.
+workloads — see below), an action layer (delete/hardlink/reflink, dry-run
+by default), richer CLI output (JSON, progress reporting, an interactive
+confirmation prompt), an opt-in incremental hash cache, opt-in SQLite
+scan-history, and opt-in import of an existing fclones hash cache are all
+implemented. See [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the
+current checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md)
+for what's planned.
 
 **By default, this tool only reports — it never deletes or links anything
-unless you pass both `--action <delete|hardlink>` and `--apply`.**
+unless you pass both `--action <delete|hardlink|reflink>` and `--apply`.**
 
 ## Usage
 
@@ -43,16 +44,45 @@ Options:
           partial-hash stage, for files larger than --small-file-threshold
           [default: 16384]
       --io-threads <N>
-          Number of worker threads in the I/O-bound read pool
-          [default: number of CPU cores]
+          Number of worker threads in the I/O-bound read pool. If omitted,
+          auto-detected from the scan root's filesystem: oversubscribed on
+          a rotational disk (Linux only, best-effort), core count otherwise
+      --cache <PATH>
+          Path to a full-file-hash cache (created if it doesn't exist). When
+          set, a file whose size and modified-time haven't changed since a
+          previous scan reuses that scan's hash instead of being re-read
+          and re-hashed. Off by default
+      --import-fclones-cache <PATH>
+          Path to an existing `fclones --cache` database (e.g.
+          `~/.cache/fclones` on Linux) to import full-file hashes from, so
+          a tree fclones already scanned with `--hash-fn xxhash` doesn't
+          need re-hashing here. Independent of --cache: usable on its own,
+          or with --cache so an imported hash also persists for future
+          rusty-fclone-only re-scans. Off by default
+      --history <PATH>
+          Path to a SQLite scan-history database (created if it doesn't
+          exist). When set, a summary of this scan (files/bytes scanned,
+          duplicate groups/files, and any action's result) is appended as
+          one row after the scan completes. Off by default
       --action <ACTION>
           What to do with redundant copies once a group is confirmed:
-          report (default, just print groups), delete, or hardlink.
-          Without --apply, delete/hardlink only preview what would happen.
+          report (default, just print groups), delete, hardlink, or
+          reflink (copy-on-write clone, CoW-capable filesystems only).
+          Without --apply, delete/hardlink/reflink only preview what would
+          happen.
       --apply
           Actually perform --action's effect (required in addition to
-          --action delete/hardlink — a two-flag confirmation so a single
-          typo can't cause data loss)
+          --action delete/hardlink/reflink — a two-flag confirmation so a
+          single typo can't cause data loss)
+  -y, --yes
+          Skip the interactive confirmation prompt normally shown before
+          --apply mutates anything
+      --format <FORMAT>
+          Output format: text (default, human-readable) or json
+          (NDJSON, one object per line, machine-readable)
+  -v, --verbose...
+          Increase log verbosity (-v info, -vv debug, -vvv trace). Ignored
+          if RUST_LOG is set, which always takes precedence
   -h, --help     Print help
   -V, --version  Print version
 ```
@@ -63,12 +93,32 @@ Examples:
 # Preview what deleting redundant copies would do -- touches nothing.
 rusty-fclone --action delete /path/to/scan
 
-# Actually delete them, keeping one (alphabetically-first) copy per group.
-rusty-fclone --action delete --apply /path/to/scan
+# Actually delete them, keeping one (alphabetically-first) copy per group,
+# without the interactive confirmation prompt.
+rusty-fclone --action delete --apply --yes /path/to/scan
 
 # Reclaim the space without losing any path -- replace redundant copies
 # with hardlinks to the kept file instead of deleting them.
 rusty-fclone --action hardlink --apply /path/to/scan
+
+# Same, but as a copy-on-write clone instead of a hardlink (CoW-capable
+# filesystems only -- Btrfs, XFS with reflink, APFS, some ZFS setups).
+rusty-fclone --action reflink --apply /path/to/scan
+
+# Machine-readable NDJSON output, for piping into another tool.
+rusty-fclone --format json /path/to/scan | jq .
+
+# Speed up a repeated scan of the same tree: reuse full-file hashes from
+# the last run instead of re-reading and re-hashing unchanged files.
+rusty-fclone --cache ~/.cache/rusty-fclone/hashes.redb /path/to/scan
+
+# Already have an fclones hash cache for this tree (from `fclones group
+# --cache --hash-fn xxhash`)? Import it instead of starting from scratch.
+rusty-fclone --import-fclones-cache ~/.cache/fclones /path/to/scan
+
+# Keep a longer-term record of every scan (files/bytes scanned, duplicates
+# found, action results) in a queryable SQLite database.
+rusty-fclone --history ~/.local/share/rusty-fclone/history.sqlite /path/to/scan
 ```
 
 ## Architecture
