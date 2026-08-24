@@ -93,6 +93,18 @@ struct Cli {
     #[arg(long)]
     cache: Option<PathBuf>,
 
+    /// Path to an existing `fclones --cache` database (e.g.
+    /// `~/.cache/fclones` on Linux) to import full-file hashes from, so a
+    /// tree fclones already scanned with `--hash-fn xxhash` doesn't need
+    /// re-hashing here (ADR-0019). Independent of --cache: usable on its
+    /// own for a one-off import, or with --cache so an imported hash is
+    /// also persisted for future rusty-fclone-only re-scans. Off by
+    /// default. Every other fclones hash function (its default `metro`,
+    /// `blake3`, `sha256`, ...) computes a different digest and is never
+    /// imported.
+    #[arg(long)]
+    import_fclones_cache: Option<PathBuf>,
+
     /// Path to a SQLite scan-history database (created if it doesn't
     /// exist). When set, a summary of this scan (files/bytes scanned,
     /// duplicate groups/files, and any action's result) is appended as one
@@ -185,6 +197,7 @@ fn run(cli: Cli) -> ExitCode {
         partial_hash_sample_size: cli.partial_hash_sample_size,
         io_threads: cli.io_threads,
         cache_path: cli.cache,
+        fclones_import_path: cli.import_fclones_cache,
     };
 
     let handle = match scan(cli.root, options) {
@@ -601,6 +614,7 @@ mod tests {
             partial_hash_sample_size: ScanOptions::default().partial_hash_sample_size,
             io_threads: ScanOptions::default().io_threads,
             cache: ScanOptions::default().cache_path,
+            import_fclones_cache: ScanOptions::default().fclones_import_path,
             history: None,
             action: Action::Report,
             apply: false,

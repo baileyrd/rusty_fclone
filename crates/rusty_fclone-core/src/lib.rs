@@ -12,6 +12,7 @@ pub mod action;
 mod cache;
 mod device;
 mod error;
+mod fclones_import;
 mod hash;
 mod io_pool;
 mod model;

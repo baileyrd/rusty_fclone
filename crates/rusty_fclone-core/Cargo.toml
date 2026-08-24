@@ -17,6 +17,9 @@ thiserror.workspace = true
 tracing.workspace = true
 reflink-copy.workspace = true
 redb.workspace = true
+sled.workspace = true
+bincode.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

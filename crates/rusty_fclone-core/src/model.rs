@@ -39,6 +39,14 @@ pub struct ScanOptions {
     /// reuses that hash instead of re-reading and re-hashing it; a
     /// newly-computed hash is written back for next time (ADR-0016).
     pub cache_path: Option<PathBuf>,
+
+    /// Off by default. Path to an existing `fclones --cache` database
+    /// (e.g. `~/.cache/fclones`) to import full-file hashes from, so a
+    /// tree fclones already scanned with `--hash-fn xxhash` doesn't need
+    /// re-hashing here. Independent of `cache_path`: usable on its own for
+    /// a one-off import, or alongside it so an imported hash is also
+    /// persisted for future rusty-fclone-only re-scans (ADR-0019).
+    pub fclones_import_path: Option<PathBuf>,
 }
 
 impl Default for ScanOptions {
@@ -51,6 +59,7 @@ impl Default for ScanOptions {
             partial_hash_sample_size: 16 * 1024,
             io_threads: None,
             cache_path: None,
+            fclones_import_path: None,
         }
     }
 }

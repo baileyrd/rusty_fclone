@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.1.8
+- Version: 0.1.9
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -94,6 +94,15 @@ reporting, a GUI) is out of scope for this specification and depends on it.
   SHALL be off by default and SHALL NOT change detection results — a
   cache hit and a freshly-computed hash for the same unchanged file are
   interchangeable.
+- `FCLONE-DETECTION-001-NFR-005`: When `ScanOptions::fclones_import_path`
+  is set, a file whose full-content hash was already computed by an
+  external `fclones --cache` run (using its `xxhash3` algorithm, at a
+  size/mtime that still match) SHALL reuse that hash rather than being
+  re-read and re-hashed (ADR-0019). Import SHALL be off by default,
+  independent of `cache_path`, and SHALL NOT change detection results —
+  any import miss (wrong hash function, no matching entry, stale
+  size/mtime, non-Unix platform, unreadable database) SHALL fall through
+  to computing the hash normally rather than erroring.
 
 ## Architecture and interfaces
 
@@ -111,13 +120,15 @@ pub struct DuplicateGroup { pub size: u64, pub paths: Vec<Arc<Path>> }
 pub struct ScanOptions { pub follow_symlinks: bool, pub cross_filesystems: bool,
                           pub verify_matches: bool, pub small_file_threshold: u64,
                           pub partial_hash_sample_size: u64, pub io_threads: Option<usize>,
-                          pub cache_path: Option<PathBuf> }
+                          pub cache_path: Option<PathBuf>,
+                          pub fclones_import_path: Option<PathBuf> }
 ```
 
 Internal modules: `traversal` (jwalk-based walk + file-id), `io_pool`
 (hand-rolled blocking read workers), `hash` (xxh3-128 + sampling), `device`
 (Linux rotational-disk detection for `io_threads` auto-sizing), `cache`
-(`redb`-backed full-hash cache, ADR-0016), `pipeline`
+(`redb`-backed full-hash cache, ADR-0016), `fclones_import` (reads an
+existing fclones `sled`/`bincode` cache database, ADR-0019), `pipeline`
 (orchestration: hardlink collapse → size-group → partial hash → full hash →
 optional verify → emit).
 
@@ -209,6 +220,15 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.1.9 (2026-08-24): Added
+  `ScanOptions::fclones_import_path: Option<PathBuf>` (NFR-005) and a new
+  `fclones_import` module: reads an existing `fclones --cache` `sled`
+  database and reuses a file's already-computed full hash when fclones
+  used the same `xxhash3` algorithm and the entry isn't stale. Tried after
+  a `--cache` miss, before any real I/O; an imported hit is also written
+  to `--cache` if set. Off by default, independent of `cache_path`; no
+  change to detection results either way. ADR-0019, new CLI
+  `--import-fclones-cache <path>` flag.
 - 0.1.8 (2026-08-24): Added `ScanOptions::cache_path: Option<PathBuf>`
   (NFR-004) and a new `cache` module: an opt-in, `redb`-backed cache of
   each file's full hash, keyed by path and invalidated by `(size, mtime)`.
