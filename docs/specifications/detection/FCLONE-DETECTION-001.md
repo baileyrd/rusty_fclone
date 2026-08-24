@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.1.2
+- Version: 0.1.3
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -153,10 +153,14 @@ pipeline via `pipeline::tests`). A Criterion benchmark suite
 rusty_fclone-core`) covers four synthetic scenarios — many small
 duplicates, many unique small files, few large duplicates, and a mixed
 realistic tree — reporting files/sec or bytes/sec. These are relative/
-regression benchmarks against this crate's own history, not yet a measured
-comparison against fclones (`DETECTION-BENCHMARK-VS-FCLONES` on the
-roadmap); the naive `HashMap`-based data model (ADR-0004) is meant to be
-revisited only once a benchmark demonstrates it's the bottleneck.
+regression benchmarks against this crate's own history. A separate,
+documented head-to-head comparison against upstream fclones exists at
+`docs/benchmarks/FCLONES-COMPARISON.md`
+(`DETECTION-BENCHMARK-VS-FCLONES` on the roadmap): rusty_fclone wins
+~1.9–2.0x on small-file-heavy trees but loses ~1.2x on a large-file
+scenario, motivating the new `DETECTION-ADAPTIVE-SAMPLE-SIZE` roadmap unit.
+The naive `HashMap`-based data model (ADR-0004) is meant to be revisited
+only once a benchmark demonstrates it's the bottleneck.
 
 ## Traceability
 
@@ -169,11 +173,11 @@ See `docs/traceability/TRACEABILITY.md`.
   broken-symlink error-reporting case
   (`traversal_errors_are_reported_and_do_not_abort_the_scan`), but no
   dedicated test exercises an actual symlink *cycle* yet.
-- The benchmark suite validates relative/regression throughput on synthetic
-  trees, but does not yet compare against fclones — so "fastest possible"
-  is still an architectural intent for the *comparative* claim specifically,
-  even though it's now a measured number for this crate's own throughput.
-  See `DETECTION-BENCHMARK-VS-FCLONES` on the roadmap.
+- "Fastest possible" is now a measured, not just architectural, claim —
+  but a nuanced one: `docs/benchmarks/FCLONES-COMPARISON.md` shows
+  rusty_fclone winning on small-file-heavy trees and losing on a large-file
+  scenario. Closing that gap is `DETECTION-ADAPTIVE-SAMPLE-SIZE` on the
+  roadmap, not yet started.
 - The `few_large_duplicates` benchmark scenario reads the same files
   repeatedly across iterations; after the first iteration these reads are
   served from the OS page cache, so its reported throughput reflects warm-
@@ -189,6 +193,16 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.1.3 (2026-08-24): Added a documented head-to-head benchmark comparison
+  against upstream fclones 0.35.0 (`DETECTION-BENCHMARK-VS-FCLONES`) — see
+  `docs/benchmarks/FCLONES-COMPARISON.md`. rusty_fclone wins ~1.9–2.0x on
+  small-file-heavy trees, loses ~1.2x on a large-file scenario, motivating a
+  new `DETECTION-ADAPTIVE-SAMPLE-SIZE` roadmap unit. Also fixed a bug the
+  comparison surfaced: `benches/detection.rs`'s synthetic "unique files"
+  content generator only varied by `seed mod 256`, so the 2,000-file unique
+  scenario silently contained 256 duplicate groups instead of zero; fixed
+  by encoding the seed into each file's first 8 bytes. No production-code
+  change — the bug was in benchmark fixtures only.
 - 0.1.2 (2026-08-24): Added a Criterion benchmark suite
   (`DETECTION-BENCHMARK` on the roadmap) covering four synthetic scan
   scenarios. No behavior change; verification-plan and open-questions

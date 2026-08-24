@@ -19,10 +19,18 @@ use rusty_fclone_core::{scan, ScanEvent, ScanOptions, ScanSummary};
 use tempfile::TempDir;
 
 /// Deterministic, non-degenerate filler so xxh3 isn't hashing an all-zero
-/// (or otherwise trivially compressible) buffer.
+/// (or otherwise trivially compressible) buffer. The first 8 bytes encode
+/// `seed` directly so distinct seeds are *guaranteed* to produce distinct
+/// content for any `size >= 8` — a ramp pattern alone isn't enough, since
+/// `(seed * C + i) mod 256` only depends on `seed mod 256`, silently
+/// colliding every 256 seeds (this bit an earlier version of this file:
+/// the "unique files" scenario wasn't actually unique past 256 files).
 fn filler_content(seed: usize, size: usize) -> Vec<u8> {
     let mut content = vec![0u8; size];
-    for (i, byte) in content.iter_mut().enumerate() {
+    let seed_bytes = (seed as u64).to_le_bytes();
+    let prefix_len = seed_bytes.len().min(size);
+    content[..prefix_len].copy_from_slice(&seed_bytes[..prefix_len]);
+    for (i, byte) in content.iter_mut().enumerate().skip(prefix_len) {
         *byte = seed.wrapping_mul(2_654_435_761).wrapping_add(i) as u8;
     }
     content

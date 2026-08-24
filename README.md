@@ -65,11 +65,13 @@ Runs the Criterion suite in
 over four synthetic scan scenarios (many small duplicates, many unique
 small files, few large duplicates, a mixed realistic tree), reporting
 files/sec or bytes/sec. These are relative/regression benchmarks against
-this crate's own history — not yet a measured comparison against fclones
-(see `DETECTION-BENCHMARK-VS-FCLONES` in
-[`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md)). CI only compiles the
-benchmarks (`cargo bench --no-run`) on every push; run the command above
-locally for real numbers.
+this crate's own history. CI only compiles the benchmarks (`cargo bench
+--no-run`) on every push; run the command above locally for real numbers.
+
+For a measured comparison against upstream fclones on the same synthetic
+trees, see [`docs/benchmarks/FCLONES-COMPARISON.md`](docs/benchmarks/FCLONES-COMPARISON.md)
+(reproduce with `scripts/bench-vs-fclones.sh`, requires `fclones` and
+`hyperfine` on `PATH` — `cargo binstall fclones hyperfine`).
 
 ## License
 
