@@ -57,9 +57,11 @@ struct Cli {
     #[arg(long, default_value_t = ScanOptions::default().partial_hash_sample_size)]
     partial_hash_sample_size: u64,
 
-    /// Number of worker threads in the I/O-bound read pool.
-    #[arg(long, default_value_t = ScanOptions::default().io_threads)]
-    io_threads: usize,
+    /// Number of worker threads in the I/O-bound read pool. If omitted,
+    /// auto-detected from the scan root's filesystem: oversubscribed on a
+    /// rotational disk (Linux only, best-effort), core count otherwise.
+    #[arg(long)]
+    io_threads: Option<usize>,
 
     /// What to do with redundant copies once a group is confirmed.
     /// Without --apply, delete/hardlink only preview what would happen.
