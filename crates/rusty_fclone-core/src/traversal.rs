@@ -200,6 +200,50 @@ mod tests {
         }
     }
 
+    /// A symlink cycle (a directory containing a symlink back to one of its
+    /// own ancestors) with `follow_symlinks = true` must not hang the scan.
+    /// This relies entirely on jwalk's own loop detection (ADR-0003); this
+    /// test's real job is proving that reliance is justified, with a
+    /// bounded timeout so a regression fails the test instead of hanging
+    /// the whole suite (and CI) forever.
+    #[test]
+    fn follow_symlinks_terminates_on_a_cycle() {
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            fs::write(root.join("real.txt"), b"data").unwrap();
+            fs::create_dir(root.join("sub")).unwrap();
+            // sub/loop -> root, so descending into it forever would revisit
+            // sub/loop/sub/loop/... without jwalk's cycle detection.
+            std::os::unix::fs::symlink(&root, root.join("sub").join("loop")).unwrap();
+
+            let options = ScanOptions {
+                follow_symlinks: true,
+                ..ScanOptions::default()
+            };
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut errors = Vec::new();
+                let candidates = traverse(&root, &options, |err| errors.push(err));
+                let _ = tx.send((candidates.len(), errors.len()));
+            });
+
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok((candidate_count, _error_count)) => {
+                    // real.txt should still be found exactly once despite
+                    // the cycle -- jwalk must not revisit it repeatedly.
+                    assert_eq!(candidate_count, 1);
+                }
+                Err(_) => panic!(
+                    "traverse() did not terminate within 10s on a symlink cycle -- \
+                     jwalk's loop detection regressed or was never actually protecting us"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn filesystem_boundary_is_not_enforced_when_cross_filesystems_is_set() {
         assert!(!is_excluded_by_filesystem_boundary(true, Some(1), Some(2)));

@@ -76,3 +76,23 @@ fclones showed that default actively hurting throughput on the environment
 tested — see ADR-0008, which changes the default to `cores` (no multiplier)
 while keeping `--io-threads` as an override. The two-pool *architecture*
 described above is unchanged; only the I/O pool's default size changed.
+
+## Addendum (2026-08-24): full-file hashing and `--verify` now stream
+
+The "Consequences" section above flagged full-file hashing buffering the
+entire file in memory as a known follow-up. Closed: `IoPool::hash_full_file`
+and `IoPool::files_equal` (used by the full-hash stage and `--verify`
+respectively) now read in fixed 1 MiB chunks and hash/compare incrementally,
+never holding more than a couple of chunk-sized buffers regardless of file
+size. Unlike the partial-hash and full-hash-of-small-files cases (where the
+I/O pool still just returns bytes and the calling rayon thread hashes them,
+per the implementation note above), these two operations run entirely
+inside the I/O worker thread — the chunk-by-chunk interleaving of read and
+hash/compare doesn't have a clean seam to hand off to a separate thread
+without either buffering a chunk's worth of unnecessary synchronization or
+building a more elaborate streaming protocol for no real benefit, the same
+reasoning that already applied to the original bytes-vs-hash-there
+decision. `--verify`'s memory profile improves further still: the old
+implementation buffered *every* file in a hash-matched group simultaneously
+to compare them; `files_equal` compares one candidate against the reference
+at a time, so peak memory no longer scales with group size at all.

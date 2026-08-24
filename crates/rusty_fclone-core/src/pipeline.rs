@@ -171,8 +171,8 @@ fn process_size_group(
     let full_hashed: Vec<(u128, FileGroup)> = full_hash_input
         .into_par_iter()
         .filter_map(
-            |(representative, aliases)| match io_pool.read_full(&representative) {
-                Ok(bytes) => Some((hash_chunks(&[&bytes]), (representative, aliases))),
+            |(representative, aliases)| match io_pool.hash_full_file(&representative) {
+                Ok(hash) => Some((hash, (representative, aliases))),
                 Err(source) => {
                     report_error(event_tx, representative, source);
                     None
@@ -212,45 +212,55 @@ fn report_error(event_tx: &Sender<ScanEvent>, path: PathBuf, source: io::Error) 
     let _ = event_tx.send(ScanEvent::Error(FileError { path, source }));
 }
 
-/// `io::Error` isn't `Clone`; this preserves the kind and message when we
-/// need to both report an error and keep the original for later use.
-fn clone_io_error(err: &io::Error) -> io::Error {
-    io::Error::new(err.kind(), err.to_string())
-}
-
 /// Byte-compares every representative in `group` against the first,
 /// dropping any that don't actually match (ADR-0001's `--verify` mode).
 /// Hardlink aliases are never re-verified — they share an inode with their
 /// representative by construction, so they're trivially identical.
+///
+/// Streams each comparison through [`IoPool::files_equal`] rather than
+/// buffering every file in the group into memory at once (ADR-0002
+/// addendum). The reference file's own readability is checked exactly
+/// once up front: if every comparison independently re-opened it and it
+/// happened to be unreadable, that single failure would be reported once
+/// per candidate instead of once, total.
 fn verify_representatives(
     group: Vec<FileGroup>,
     io_pool: &IoPool,
     event_tx: &Sender<ScanEvent>,
 ) -> Vec<FileGroup> {
-    let mut with_bytes: Vec<(PathBuf, Vec<PathBuf>, io::Result<Vec<u8>>)> = group
-        .into_par_iter()
-        .map(|(representative, aliases)| {
-            let bytes = io_pool.read_full(&representative);
-            (representative, aliases, bytes)
-        })
-        .collect();
-
-    for (path, _, bytes) in &with_bytes {
-        if let Err(err) = bytes {
-            report_error(event_tx, path.clone(), clone_io_error(err));
-        }
-    }
-    with_bytes.retain(|(_, _, bytes)| bytes.is_ok());
-    if with_bytes.len() < 2 {
+    if group.len() < 2 {
         return Vec::new();
     }
 
-    let reference = with_bytes[0].2.as_ref().unwrap().clone();
-    with_bytes
-        .into_iter()
-        .filter(|(_, _, bytes)| bytes.as_ref().unwrap() == &reference)
-        .map(|(representative, aliases, _)| (representative, aliases))
-        .collect()
+    let (reference_path, reference_aliases) = group[0].clone();
+    if let Err(err) = io_pool.files_equal(&reference_path, &reference_path) {
+        report_error(event_tx, reference_path, err);
+        return Vec::new();
+    }
+
+    let mut survivors = vec![(reference_path.clone(), reference_aliases)];
+    let compared: Vec<(FileGroup, io::Result<bool>)> = group[1..]
+        .to_vec()
+        .into_par_iter()
+        .map(|(candidate, aliases)| {
+            let equal = io_pool.files_equal(&reference_path, &candidate);
+            ((candidate, aliases), equal)
+        })
+        .collect();
+
+    for ((candidate, aliases), equal) in compared {
+        match equal {
+            Ok(true) => survivors.push((candidate, aliases)),
+            Ok(false) => {} // legitimately different content -- not an error
+            Err(err) => report_error(event_tx, candidate, err),
+        }
+    }
+
+    if survivors.len() < 2 {
+        Vec::new()
+    } else {
+        survivors
+    }
 }
 
 #[cfg(test)]
