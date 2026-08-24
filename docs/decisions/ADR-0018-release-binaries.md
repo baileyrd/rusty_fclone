@@ -20,12 +20,22 @@ run `rusty-fclone` without a Rust toolchain had no way to get one.
   compile-check); building release binaries for four platforms is a
   slower, different-purpose job that should only run when a release is
   actually being cut, not on every commit.
-- **Triggers: `push: tags: v*` and `workflow_dispatch`**: the tag push is
-  the normal path for every future release. `workflow_dispatch` exists
-  specifically so `v0.1.0` (already tagged and released before this
-  workflow existed) can be built and attached retroactively by manually
-  running the workflow against the `v0.1.0` ref, without re-tagging or
-  re-creating the release.
+- **Triggers: `push: tags: v*` and `workflow_dispatch` with an optional
+  `tag` input**: the tag push is the normal path for every future
+  release. `workflow_dispatch` exists specifically so `v0.1.0` (already
+  tagged and released before this workflow existed) can be built and
+  attached retroactively — but GitHub resolves a workflow's available
+  triggers (including `workflow_dispatch`) from the workflow file *as it
+  exists on the ref being dispatched*, so `v0.1.0`'s tree (which predates
+  this file entirely) can't be dispatched from directly. The `tag` input
+  lets the run be dispatched from `main` (where `release.yml` exists)
+  while still building the `v0.1.0` source tree (via an explicit
+  `actions/checkout` `ref:`) and attaching to the `v0.1.0` release (via
+  `RELEASE_TAG = inputs.tag || github.ref_name`, used for the checkout
+  ref, archive names, and `softprops/action-gh-release`'s `tag_name`).
+  This was caught only after attempting the first real dispatch against
+  `v0.1.0` directly and hitting "Workflow does not have 'workflow_dispatch'
+  trigger" — not something a local YAML-syntax check could have caught.
 - **Four targets**: `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
   `x86_64-apple-darwin`, `x86_64-pc-windows-msvc` — one per major desktop
   platform this project already claims to be cross-platform for (per
