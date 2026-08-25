@@ -1,8 +1,8 @@
 # Repository Development Workflow
 
 ## Authority
-`main` is authoritative once this baseline is merged. Until then, this
-branch (`claude/custom-fclone-detection-bufv7b`) is the working state.
+`main` is authoritative. Every change lands through a branch, a PR against
+`main`, and a merge commit on green CI — never a direct push.
 
 ## Executor detection
 Detected fresh each session from environment capabilities, never from a
@@ -56,9 +56,9 @@ relaying instructions to a human who drives a separate Codex agent, runs in
 
 ## ADRs
 Write one per delivery cycle during active major development (the project
-is currently in that phase — six ADRs exist already for the v1 baseline);
-taper to decisions-that-matter once the baseline is stable and complete. See
-the `rust-repo-lifecycle` skill's `references/adr-cadence.md`.
+is currently in that phase — see `docs/decisions/` for the accumulated
+log); taper to decisions-that-matter once the baseline is stable and
+complete. See the `rust-repo-lifecycle` skill's `references/adr-cadence.md`.
 
 ## `next`
 Verify merge state, refresh `main`, reconcile `PROJECT-STATUS.md` against
