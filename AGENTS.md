@@ -6,7 +6,7 @@ under `crates/`) would override this file.
 ## Project shape
 - Purpose: `rusty_fclone` is a duplicate-file finder — a spiritual successor
   to [fclones](https://github.com/pkolaczk/fclones) — with a detection
-  engine and an action layer (delete/hardlink) on top of it (see
+  engine and an action layer (delete/hardlink/reflink) on top of it (see
   `docs/architecture/SYSTEM-ARCHITECTURE.md`).
 - Rust structure: a two-member Cargo workspace.
   - `crates/rusty_fclone-core` — the detection engine (`scan`) and action
@@ -25,7 +25,11 @@ under `crates/`) would override this file.
     directly on a rayon thread — see ADR-0002.
   - No dependency that requires a C toolchain (keeps the cross-platform
     build simple — see ADR-0002/ADR-0006). If a change needs one, that's an
-    ADR-worthy decision, not a routine dependency bump.
+    ADR-worthy decision, not a routine dependency bump — the escape hatch
+    has already been used once, deliberately: `rusqlite`'s `bundled`
+    feature (ADR-0017) vendors and compiles a C build of SQLite, accepted
+    because it keeps the "self-contained binary" property (no runtime
+    dependency) rather than requiring a system SQLite install.
   - Any destructive capability (the action layer, and anything added after
     it) must default to a no-op preview and require an explicit, separate
     confirmation flag to actually mutate the filesystem — see ADR-0009. This
@@ -46,10 +50,11 @@ project architecture.
 ## Change rules
 - Every architecture-level decision (algorithm, concurrency model, public
   API shape, platform scope, dependency policy, license) gets an ADR under
-  `docs/decisions/` — see `docs/decisions/adr-cadence` guidance in the
-  `rust-repo-lifecycle` skill this repo was bootstrapped with. Routine
-  implementation mechanics (internal function names, minor refactors) don't
-  need one.
+  `docs/decisions/` — see the `rust-repo-lifecycle` skill's own
+  `references/adr-cadence.md` for the cadence guidance this repo was
+  bootstrapped with (that reference lives inside the skill, not this
+  repo). Routine implementation mechanics (internal function names, minor
+  refactors) don't need one.
 - Update the relevant spec (`docs/specifications/detection/FCLONE-DETECTION-001.md`,
   `docs/specifications/action/FCLONE-ACTION-001.md`, or a future one) and
   `docs/traceability/TRACEABILITY.md` whenever a requirement's
