@@ -3,3 +3,6 @@
 .DS_Store
 __pycache__/
 *.pyc
+
+# tauri-build regenerates these (ACL/capability schemas) on every build.
+crates/rusty_fclone-gui/gen/schemas/

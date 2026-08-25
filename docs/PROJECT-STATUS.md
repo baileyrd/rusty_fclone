@@ -1,20 +1,21 @@
 # Project Status
-- Last verified main commit: `9ce0d7b` (PR #18, merged) —
-  `DETECTION-FCLONES-CACHE-IMPORT` (PR #17) and a README sync (PR #18)
-  are merged; this branch bumps the workspace version to `0.2.0` on top
+- Last verified main commit: `6ab7a5e` (PR #24, merged) — a docs-loop
+  pass (PRs #20-#24: README's CLI-scope line since superseded by the GUI
+  below, `AGENTS.md`/`WORKFLOW.md`/`SYSTEM-ARCHITECTURE.md` drift fixes,
+  and a `docs-audit.md` resolution record). This branch adds the `GUI`
+  unit (new `rusty_fclone-gui` crate) on top.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
-  `docs/decisions/ADR-0018-release-binaries.md`). `v0.2.0` pending —
-  everything merged since `v0.1.0` (`RELEASE-BINARIES`,
-  `DETECTION-FCLONES-CACHE-IMPORT`, the README sync) will be tagged once
-  this version-bump branch merges.
-- Verified at: 2026-08-24
-- Current milestone: none in progress — bumping the workspace version to
-  `0.2.0` to tag everything merged since `v0.1.0`. See
-  `docs/roadmap/ROADMAP.md`.
-- Health: green — workspace builds, lints, and tests clean on the pinned
-  toolchain
+  `docs/decisions/ADR-0018-release-binaries.md`). `v0.2.0` pending — the
+  workspace version was bumped to `0.2.0` but the tag itself hasn't been
+  pushed yet (tag pushes require a maintainer's own credentials in this
+  environment); everything merged since `v0.1.0` will be tagged once that
+  happens.
+- Verified at: 2026-08-25
+- Current milestone: none in progress. See `docs/roadmap/ROADMAP.md`.
+- Health: green — workspace (now three crates) builds, lints, and tests
+  clean on the pinned toolchain
 
 ## Completed
 - `DETECTION-BASELINE`, `DETECTION-BENCHMARK`, `DETECTION-BENCHMARK-VS-FCLONES`,
@@ -103,13 +104,37 @@
   `-y`/`--yes`, `--format`, `-v`/`--verbose` were all missing; the Status
   section and two other spots still said reflink support wasn't built).
   Merged via PR #18.
+- Workspace version bump `0.1.0` → `0.2.0` (`Cargo.toml`
+  `workspace.package.version`) to tag everything merged since `v0.1.0`.
+  No functional change.
+- A `docs-loop` pass (whole tracked doc surface, 31 docs, prompted by
+  README's missing UI/GUI mention): fixed 12 findings across four docs —
+  README's CLI-only-scope note (since superseded by the `GUI` unit
+  below), `AGENTS.md` (action-layer list, C-toolchain-rule precedent
+  note, an internal skill-reference reword), `WORKFLOW.md` (a stale
+  bootstrap-phase Authority section, a hardcoded ADR count), and
+  `SYSTEM-ARCHITECTURE.md` (reflink shipped, not deferred; a stale
+  `traversal::traverse` return-type claim; a broken ADR path/range). Step
+  5 re-verification confirmed `scripts/check_references.py` went from 2
+  `broken` references to 0. `docs-audit.md` (committed, with a resolution
+  record added afterward) has the full findings table. Merged via PRs
+  #20-#24.
 
 ## In progress
-- Workspace version bump `0.1.0` → `0.2.0` (`Cargo.toml`
-  `workspace.package.version`), to tag everything merged since `v0.1.0`
-  (`RELEASE-BINARIES`, `DETECTION-FCLONES-CACHE-IMPORT`, README sync) as
-  `v0.2.0`. No functional change — `Cargo.lock` updated to match, no
-  other code touched.
+- `GUI` (this branch): new `rusty_fclone-gui` crate — a Tauri (v2) desktop
+  GUI covering the same scan-and-act workflow as the CLI, reversing the
+  v1 "no GUI" non-goal. ADR-0020, `GUI-UX-001` 0.1.0. Implemented, tested
+  (85/85 workspace tests — 9 new `rusty_fclone-gui` tests: 5 `payload`
+  unit tests, 4 `commands` IPC-level tests via `tauri::test`'s mock
+  runtime, asserting on real filesystem state). Also manually verified
+  end-to-end in this environment via Xvfb (no real display available): the
+  compiled binary launched, rendered the real frontend, and a full scan →
+  duplicate-group display → preview action → apply action cycle was
+  driven through the actual UI with `xdotool`, confirmed against real
+  filesystem state before/after. `.github/workflows/ci.yml` now installs
+  Tauri's Linux system-webview dev packages before building — see
+  ADR-0020's C-toolchain-exception note. `release.yml` is unchanged
+  (still CLI-only); see `GUI-RELEASE-BUNDLES` in the roadmap.
 
 ## Blocked
 - None.
@@ -122,18 +147,33 @@
   needs an async runtime and unsafe FFI, its own ADR), and — if wanted —
   a query/report surface over `--history`'s accumulated data (explicitly
   out of scope for `CLI-SCAN-HISTORY` itself).
+- `GUI-RELEASE-BUNDLES`: packaged, installable GUI distribution via
+  `tauri build`'s bundler, needing per-platform prerequisites beyond
+  CI's current build-and-test install step, plus real (non-placeholder)
+  application icons.
+- A native file/directory picker for the GUI's root-path field (currently
+  a plain text input) — deferred pending a look at Tauri's `dialog`
+  plugin's own permission/capability shape (`GUI-UX-001`'s open
+  questions).
 
 ## Validation
-- `cargo fmt --all --check`: pass (2026-08-24)
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-24)
-- `cargo test --workspace`: pass, 76/76 (2026-08-24)
-- `cargo bench -p rusty_fclone-core --no-run`: pass (2026-08-24)
+- `cargo fmt --all --check`: pass (2026-08-25)
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-25)
+- `cargo test --workspace`: pass, 85/85 (2026-08-25)
+- `cargo bench --workspace --no-run`: pass (2026-08-25)
+- `cargo doc --workspace --all-features --no-deps`: pass (2026-08-25)
 - Manual CLI smoke tests across the project: verbosity flags, `RUST_LOG`
   override, default output silent on success, action dry runs, JSON
   format, progress checkpoints, confirmation prompt decline/accept,
   cold/warm `--cache` behavior, `--history` across two real scans, and
-  now `--import-fclones-cache` against a real `fclones` binary and its
-  real cache database (2026-08-24)
+  `--import-fclones-cache` against a real `fclones` binary and its real
+  cache database (2026-08-24)
+- Manual GUI smoke test (2026-08-25): compiled binary launched under
+  Xvfb, real frontend rendered (caught and fixed one stale-embedded-
+  asset build during this pass), a full scan → duplicate-group render →
+  preview → apply cycle driven via `xdotool` against a real tempdir with
+  a known duplicate pair, filesystem state confirmed via `ls` before and
+  after the apply step.
 
 ## Risks and decisions needed
 - The action layer is the first genuinely destructive capability in this
@@ -168,3 +208,12 @@
   cached with an explicit non-default `--max-prefix-size` won't be found.
   Both are deliberate, documented scope cuts (ADR-0019): a missed
   optimization, never a wrong result.
+- `GUI`'s icon assets are placeholder solid-color squares, not real
+  application art — fine for `cargo build`/`clippy`/`test`, not for a
+  real release (ADR-0020's consequences).
+- `GUI` was only verified on Linux (this environment's only available
+  platform) — macOS/Windows rendering is unverified. No automated
+  frontend/DOM test exists (`app.js` is covered by the manual Xvfb pass
+  only); `GUI-UX-001`'s open questions track this.
+- `GUI-RELEASE-BUNDLES` (packaged, installable GUI distribution) is not
+  started — `release.yml` still only builds the CLI binary.

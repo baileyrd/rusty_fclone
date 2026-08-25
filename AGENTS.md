@@ -6,17 +6,23 @@ under `crates/`) would override this file.
 ## Project shape
 - Purpose: `rusty_fclone` is a duplicate-file finder — a spiritual successor
   to [fclones](https://github.com/pkolaczk/fclones) — with a detection
-  engine and an action layer (delete/hardlink/reflink) on top of it (see
+  engine and an action layer (delete/hardlink/reflink) on top of it,
+  consumed by both a CLI and a desktop GUI (see
   `docs/architecture/SYSTEM-ARCHITECTURE.md`).
-- Rust structure: a two-member Cargo workspace.
+- Rust structure: a three-member Cargo workspace.
   - `crates/rusty_fclone-core` — the detection engine (`scan`) and action
-    layer (`action::plan`/`action::apply`) library. No CLI concerns
-    (argument parsing, stdout formatting, exit codes) belong here.
+    layer (`action::plan`/`action::apply`) library. No CLI or GUI
+    concerns (argument parsing, stdout formatting, exit codes, `serde`)
+    belong here.
   - `crates/rusty_fclone-cli` — the `rusty-fclone` binary; a thin
     `clap`-based consumer of `rusty_fclone-core`. `main` is a two-line
     wrapper around a testable `run(cli: Cli) -> ExitCode` — keep it that
     way so CLI-level behavior stays unit-testable without spawning a
     subprocess.
+  - `crates/rusty_fclone-gui` — a Tauri (v2) desktop app consuming
+    `rusty_fclone-core` (ADR-0020). Rust backend commands in
+    `src/commands.rs`, `serde` wire DTOs in `src/payload.rs` (kept out of
+    `rusty_fclone-core` itself), plain HTML/CSS/JS frontend in `ui/`.
 - Architectural boundaries:
   - The engine's public API is streaming (`ScanHandle: Iterator<Item =
     ScanEvent>`), not a collected `Vec`. Don't change `scan()` to return a
@@ -26,10 +32,15 @@ under `crates/`) would override this file.
   - No dependency that requires a C toolchain (keeps the cross-platform
     build simple — see ADR-0002/ADR-0006). If a change needs one, that's an
     ADR-worthy decision, not a routine dependency bump — the escape hatch
-    has already been used once, deliberately: `rusqlite`'s `bundled`
-    feature (ADR-0017) vendors and compiles a C build of SQLite, accepted
-    because it keeps the "self-contained binary" property (no runtime
-    dependency) rather than requiring a system SQLite install.
+    has been used twice, deliberately: `rusqlite`'s `bundled` feature
+    (ADR-0017) vendors and compiles a C build of SQLite, accepted because
+    it keeps the "self-contained binary" property (no runtime dependency)
+    rather than requiring a system SQLite install; `rusty_fclone-gui`'s
+    Tauri backend (ADR-0020) links against the system webview
+    (`libwebkit2gtk-4.1`/`libgtk-3`/`libsoup-3.0` on Linux, real
+    build-time system-library dependencies, not vendored) — CI installs
+    them explicitly (`.github/workflows/ci.yml`) rather than the rule
+    being silently exempted for that one crate.
   - Any destructive capability (the action layer, and anything added after
     it) must default to a no-op preview and require an explicit, separate
     confirmation flag to actually mutate the filesystem — see ADR-0009. This

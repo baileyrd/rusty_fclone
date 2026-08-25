@@ -2,21 +2,20 @@
 
 A duplicate-file finder — a spiritual successor to
 [fclones](https://github.com/pkolaczk/fclones): a fast detection engine
-plus an action layer to delete, hardlink, or reflink what it finds.
-
-**CLI-only, by design** — there's no GUI or TUI, and none is planned; see
-[`CLI-UX-001`](docs/specifications/cli-ux/CLI-UX-001.md)'s Non-goals.
+plus an action layer to delete, hardlink, or reflink what it finds,
+usable from either a CLI or a desktop GUI.
 
 ## Status
 
 Detection (staged hashing, benchmarked faster than fclones on most
 workloads — see below), an action layer (delete/hardlink/reflink, dry-run
 by default), richer CLI output (JSON, progress reporting, an interactive
-confirmation prompt), an opt-in incremental hash cache, opt-in SQLite
-scan-history, and opt-in import of an existing fclones hash cache are all
-implemented. See [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the
-current checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md)
-for what's planned.
+confirmation prompt), a desktop GUI, an opt-in incremental hash cache,
+opt-in SQLite scan-history, and opt-in import of an existing fclones hash
+cache are all implemented. See
+[`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
+checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
+what's planned.
 
 **By default, this tool only reports — it never deletes or links anything
 unless you pass both `--action <delete|hardlink|reflink>` and `--apply`.**
@@ -124,6 +123,29 @@ rusty-fclone --import-fclones-cache ~/.cache/fclones /path/to/scan
 rusty-fclone --history ~/.local/share/rusty-fclone/history.sqlite /path/to/scan
 ```
 
+## GUI
+
+A desktop GUI (`rusty_fclone-gui`, [`GUI-UX-001`](docs/specifications/gui-ux/GUI-UX-001.md))
+covers the same scan-and-act workflow as the CLI above, through a window
+instead of a terminal: enter a directory, scan, review duplicate groups as
+they're found, and preview or apply an action per group.
+
+```sh
+cargo run -p rusty_fclone-gui
+```
+
+On Linux, building it needs the system webview development packages
+first (Tauri's backend links against them — see
+[ADR-0020](docs/decisions/ADR-0020-gui-via-tauri.md)):
+
+```sh
+sudo apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+  libayatana-appindicator3-dev libssl-dev libsoup-3.0-dev
+```
+
+No installer/bundle is published yet (`.deb`/`.AppImage`/`.dmg`/`.msi`) —
+run it from source via `cargo run` above.
+
 ## Architecture
 
 See [`docs/architecture/SYSTEM-ARCHITECTURE.md`](docs/architecture/SYSTEM-ARCHITECTURE.md)
@@ -131,8 +153,9 @@ for the detection pipeline, and [`docs/decisions/`](docs/decisions/) for the
 ADRs behind it: staged hashing + xxh3-128, cross-platform I/O, the two-pool
 concurrency model, traversal defaults, workspace shape, toolchain/license/
 dependency policy, two benchmark-motivated tuning revisions (partial-hash
-sample size, I/O thread pool sizing), and the action layer (ADR-0009:
-delete/hardlink, dry-run by default, safe hardlink-via-rename).
+sample size, I/O thread pool sizing), the action layer (ADR-0009:
+delete/hardlink, dry-run by default, safe hardlink-via-rename), and the
+Tauri-based GUI (ADR-0020).
 
 ## Development
 
@@ -141,6 +164,10 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
+
+On Linux, `--workspace` now includes `rusty_fclone-gui`, so the system
+webview packages listed under [GUI](#gui) above need to be installed
+first.
 
 The Rust toolchain is pinned via `rust-toolchain.toml`. See
 [`AGENTS.md`](AGENTS.md) for repository conventions and
