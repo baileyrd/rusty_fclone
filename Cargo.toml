@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/rusty_fclone-core", "crates/rusty_fclone-cli"]
+members = [
+    "crates/rusty_fclone-core",
+    "crates/rusty_fclone-cli",
+    "crates/rusty_fclone-gui",
+]
 
 [workspace.package]
 version = "0.2.0"

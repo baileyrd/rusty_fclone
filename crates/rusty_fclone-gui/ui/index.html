@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>rusty-fclone</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<h1>rusty-fclone</h1>
+
+<div class="row">
+  <input id="root-path" type="text" placeholder="Directory to scan (e.g. /home/me/Pictures)" />
+  <button id="scan-btn">Scan</button>
+</div>
+
+<fieldset>
+  <legend>Options</legend>
+  <label><input type="checkbox" id="opt-follow-symlinks" /> Follow symlinks</label>
+  <label><input type="checkbox" id="opt-cross-filesystems" /> Cross filesystems</label>
+  <label><input type="checkbox" id="opt-verify-matches" /> Byte-compare matches</label>
+  <label>Small-file threshold (bytes) <input type="number" id="opt-small-file-threshold" placeholder="131072" /></label>
+  <label>Partial-hash sample (bytes) <input type="number" id="opt-partial-hash-sample-size" placeholder="16384" /></label>
+  <label>I/O threads <input type="number" id="opt-io-threads" placeholder="auto" /></label>
+  <label>Cache path <input type="text" id="opt-cache-path" placeholder="(none)" /></label>
+  <label>Import fclones cache <input type="text" id="opt-fclones-import-path" placeholder="(none)" /></label>
+</fieldset>
+
+<div id="status">Idle.</div>
+<div id="groups"></div>
+<div id="errors"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

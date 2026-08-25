@@ -5,8 +5,9 @@
 `rusty_fclone` is a spiritual successor to [fclones](https://github.com/pkolaczk/fclones)
 (not "fclone" — a naming correction made early in this project's history):
 a duplicate-file finder with a detection engine and an action layer
-(delete/hardlink/reflink, see ADR-0009 and ADR-0014) on top of it. This
-document covers both.
+(delete/hardlink/reflink, see ADR-0009 and ADR-0014) on top of it,
+consumed by both a CLI and a desktop GUI (see ADR-0020). This document
+covers all three.
 
 ## Product boundary
 
@@ -15,8 +16,9 @@ document covers both.
   jdupes.
 - **Platforms**: cross-platform from v1 (Linux, macOS, Windows) via a
   portable blocking-I/O model — see ADR-0002.
-- **Non-goals for v1**: near-duplicate/fuzzy matching, a GUI, network-
-  filesystem-specific handling.
+- **Non-goals for v1**: near-duplicate/fuzzy matching, network-filesystem-
+  specific handling. (A GUI was a v1 non-goal too, until ADR-0020
+  reversed it — see the Crate boundaries section below.)
 
 ## Detection pipeline
 
@@ -117,18 +119,26 @@ DuplicateGroup ──action::plan(kind)──► ActionPlan (no filesystem mutat
   run" — `plan`/`apply` are simply two separate calls, and the CLI only
   calls `apply` when both flags are present.
 
-## Crate boundaries (ADR-0005)
+## Crate boundaries (ADR-0005, extended by ADR-0020)
 
 - `rusty_fclone-core` — detection (`scan`) and action (`action::plan`/
-  `action::apply`). No CLI concerns.
+  `action::apply`). No CLI or GUI concerns — no `serde`, no awareness that
+  either consumer exists.
 - `rusty_fclone-cli` — thin `clap`-based binary (`rusty-fclone`) consuming
   `rusty_fclone-core`. `main` is a two-line wrapper around a testable
   `run(cli: Cli) -> ExitCode`.
+- `rusty_fclone-gui` — Tauri (v2) desktop app consuming
+  `rusty_fclone-core` (ADR-0020). Rust backend (`src/commands.rs`'s
+  `start_scan`/`run_action`, `src/payload.rs`'s wire DTOs) plus a plain
+  HTML/CSS/JS frontend (`ui/`, no bundler). The one dependency in this
+  workspace needing a C toolchain and system webview libraries at build
+  time — see ADR-0020 and the C-toolchain note in `AGENTS.md`.
 
 ## Where to look next
 
 - Decisions: `docs/decisions/` (ADR-0001 onward).
 - Specs: `docs/specifications/detection/FCLONE-DETECTION-001.md`,
-  `docs/specifications/action/FCLONE-ACTION-001.md`.
+  `docs/specifications/action/FCLONE-ACTION-001.md`,
+  `docs/specifications/gui-ux/GUI-UX-001.md`.
 - What's built vs. planned: `docs/roadmap/ROADMAP.md`,
   `docs/PROJECT-STATUS.md`.

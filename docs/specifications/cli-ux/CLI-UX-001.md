@@ -1,5 +1,5 @@
 # CLI-UX-001 — CLI Output, Progress, and Confirmation
-- Version: 0.2.0
+- Version: 0.2.1
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -20,7 +20,10 @@ confirmation prompt as a second safety layer on top of `--apply`.
 - A live progress *percentage* or ETA — the engine doesn't know the total
   file count until traversal finishes, so progress is a running counter,
   not a fraction.
-- A GUI, TUI, or anything beyond a plain terminal/pipe-friendly CLI.
+- A GUI or TUI — out of *this spec's* scope, which is the plain
+  terminal/pipe-friendly CLI only. A GUI now exists as a separate
+  consumer of `rusty_fclone-core` with its own spec (`GUI-UX-001`,
+  ADR-0020); this document's requirements are unaffected by it.
 - Configurable JSON schema versioning/stability guarantees — the schema
   below is what v1 emits; not yet promised stable across releases.
 - Querying or reporting against `--history`'s recorded data — this unit
@@ -212,6 +215,11 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.2.1 (2026-08-25): Reworded the GUI/TUI Non-goal — a GUI now exists as
+  a separate spec/crate (`GUI-UX-001`, ADR-0020), so the prior wording
+  ("anything beyond a plain terminal/pipe-friendly CLI") read as a
+  whole-project claim rather than this document's own scope boundary. No
+  functional requirement changed.
 - 0.2.0 (2026-08-24): Added `--history <path>` (FR-010/FR-011,
   `DETECTION-INCREMENTAL-CACHE`'s companion unit) — a SQLite-backed
   per-scan summary record for longer-term analytics, off by default. New
