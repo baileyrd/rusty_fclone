@@ -23,3 +23,23 @@ pub struct FileError {
     #[source]
     pub source: io::Error,
 }
+
+/// A failure that prevents a [`crate::folder_action::plan_folder`] call
+/// from producing a plan at all (ADR-0023). Fails closed: any of these
+/// means no plan is returned, not a partial one.
+#[derive(Debug, Error)]
+pub enum FolderActionError {
+    #[error("{0} is not a directory")]
+    NotADirectory(PathBuf),
+    /// `path` (inside the folder being acted on) has no confirmed
+    /// duplicate at `expected_partner` (inside the folder being kept) in
+    /// the `DuplicateGroup`s supplied to `plan_folder` — either the scan
+    /// that produced them is stale (something on disk changed since), or
+    /// the caller passed a `removed`/`kept` pair that doesn't actually
+    /// hold the folder-match relationship it claims to.
+    #[error("{path} has no confirmed duplicate at {expected_partner}")]
+    NoConfirmedDuplicate {
+        path: PathBuf,
+        expected_partner: PathBuf,
+    },
+}
