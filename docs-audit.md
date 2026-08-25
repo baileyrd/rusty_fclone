@@ -75,3 +75,33 @@ it would pause for sign-off in auto mode too.
 
 Everything above is a doc lagging real, intentional, already-ADR'd changes.
 Nothing here suggests the code is behaving wrong.
+
+## Resolution (step 5 verify) — 2026-08-25
+
+All 12 actionable rows approved by the user ("All 12 findings") were fixed
+and merged, one PR per doc file:
+
+| Doc | PR | Rows fixed |
+| --- | --- | --- |
+| README.md | [#20](https://github.com/baileyrd/rusty_fclone/pull/20) | the `missing` UI/GUI row |
+| AGENTS.md | [#21](https://github.com/baileyrd/rusty_fclone/pull/21) | the `adr-cadence` path, reflink-in-action-layer, C-toolchain-precedent rows |
+| WORKFLOW.md | [#22](https://github.com/baileyrd/rusty_fclone/pull/22) | the `orphaned` Authority section, the ADR-count row |
+| SYSTEM-ARCHITECTURE.md | [#23](https://github.com/baileyrd/rusty_fclone/pull/23) | reflink Purpose/Non-goals, the pipeline-diagram cache note, the `traverse` callback rewrite, the `ADR-0001`–`ADR-0009` path+range |
+
+`scripts/check_references.py --all` re-run against the merged result: **0
+`broken` references** (down from 2 — both the `AGENTS.md` `adr-cadence` path
+and the `SYSTEM-ARCHITECTURE.md` `ADR-0001` path resolve or are now
+unambiguous). The same 19 `unresolved` hits from "Reviewed, not findings"
+above are still present and still non-issues (unchanged code, re-confirmed
+by spot check, not re-litigated row by row).
+
+Counts after: `missing` 0, `stale` 0, `orphaned` 0 — every row above that
+carried one of those three classifications is now `accurate`. `accurate` and
+the reviewed-non-issue rows are left as-is per the Persistence rule, so a
+future run starts from these verdicts instead of re-checking them.
+
+No new documented commands were introduced by any of the four fixes (all
+were prose/path/diagram-caption edits), so step 5's "execute the read-only
+commands" check doesn't apply to this batch's new content;
+`cargo test --workspace` was already re-confirmed passing (76/76) as part of
+step 1's ground truth and nothing in this batch touches code.
