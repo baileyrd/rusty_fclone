@@ -11,8 +11,8 @@ Detection (staged hashing, benchmarked faster than fclones on most
 workloads — see below), an action layer (delete/hardlink/reflink, dry-run
 by default), richer CLI output (JSON, progress reporting, an interactive
 confirmation prompt), a desktop GUI, an opt-in incremental hash cache,
-opt-in SQLite scan-history, and opt-in import of an existing fclones hash
-cache are all implemented. See
+opt-in SQLite scan-history, opt-in import of an existing fclones hash
+cache, and opt-in folder-level duplicate detection are all implemented. See
 [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
 checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
 what's planned.
@@ -66,6 +66,10 @@ Options:
           exist). When set, a summary of this scan (files/bytes scanned,
           duplicate groups/files, and any action's result) is appended as
           one row after the scan completes. Off by default
+      --find-duplicate-folders
+          After the scan completes, also look for folders whose entire
+          recursive file content duplicates -- or is a subset of --
+          another folder's. Off by default
       --action <ACTION>
           What to do with redundant copies once a group is confirmed:
           report (default, just print groups), delete, hardlink, or
@@ -121,6 +125,10 @@ rusty-fclone --import-fclones-cache ~/.cache/fclones /path/to/scan
 # Keep a longer-term record of every scan (files/bytes scanned, duplicates
 # found, action results) in a queryable SQLite database.
 rusty-fclone --history ~/.local/share/rusty-fclone/history.sqlite /path/to/scan
+
+# Also report whole folders that are duplicates (or subsets) of each other
+# -- e.g. a Photos/2024/vacation folder copied wholesale into a backup tree.
+rusty-fclone --find-duplicate-folders /path/to/scan
 ```
 
 ## GUI
@@ -176,8 +184,9 @@ ADRs behind it: staged hashing + xxh3-128, cross-platform I/O, the two-pool
 concurrency model, traversal defaults, workspace shape, toolchain/license/
 dependency policy, two benchmark-motivated tuning revisions (partial-hash
 sample size, I/O thread pool sizing), the action layer (ADR-0009:
-delete/hardlink, dry-run by default, safe hardlink-via-rename), and the
-Tauri-based GUI (ADR-0020).
+delete/hardlink, dry-run by default, safe hardlink-via-rename), the
+Tauri-based GUI (ADR-0020), and folder-level duplicate detection
+(ADR-0021: a post-scan pass, not a streaming extension).
 
 ## Development
 

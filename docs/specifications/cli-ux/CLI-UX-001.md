@@ -1,5 +1,5 @@
 # CLI-UX-001 — CLI Output, Progress, and Confirmation
-- Version: 0.2.1
+- Version: 0.2.2
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -87,6 +87,20 @@ confirmation prompt as a second safety layer on top of `--apply`.
 - `CLI-UX-001-FR-011`: A failure to open or write the `--history` database
   SHALL be reported as a warning and SHALL NOT change the scan's own exit
   code.
+- `CLI-UX-001-FR-012`: When `--find-duplicate-folders` is set, the CLI
+  SHALL run `rusty_fclone_core::find_folder_duplicates` after the scan
+  completes, using every `DuplicateGroup` the scan produced, and report
+  each resulting `FolderMatch`. In `--format text`, an `Exact` match SHALL
+  print as `--- duplicate folders: <bytes> bytes, <file_count> files ---`
+  followed by one line per folder path; a `Contained` match SHALL print as
+  `--- folder contained in another: <bytes> bytes, <file_count> files ---`
+  followed by `subset:`/`superset:` lines. In `--format json`, they SHALL
+  be emitted as
+  `{"type":"folder_exact","folders":[<string>,...],"file_count":<u64>,"bytes":<u64>}`
+  and
+  `{"type":"folder_contained","subset":<string>,"superset":<string>,"file_count":<u64>,"bytes":<u64>}`
+  respectively. Off by default (ADR-0021) — collecting every group in
+  memory and re-traversing the tree is extra work most scans don't need.
 
 ## Architecture and interfaces
 
@@ -99,9 +113,12 @@ pub struct ScanProgress { pub files_scanned: u64, pub bytes_scanned: u64 }
 ```
 
 `rusty_fclone-cli` (`src/main.rs`): `--format <text|json>` (default
-`text`), `-y`/`--yes` (bool). JSON serialization types (`JsonEvent`,
-`JsonAction`) and progress-line rendering (`ProgressLine`) are CLI-only,
-not part of the core crate's public surface.
+`text`), `-y`/`--yes` (bool), `--find-duplicate-folders` (bool). JSON
+serialization types (`JsonEvent`, `JsonAction`) and progress-line
+rendering (`ProgressLine`) are CLI-only, not part of the core crate's
+public surface. `--find-duplicate-folders` calls
+`rusty_fclone_core::find_folder_duplicates` (`FCLONE-DETECTION-001`
+FR-010) after the scan's event stream is fully drained.
 
 `rusty_fclone-cli` `history` module (ADR-0017): `--history <path>`
 (`Option<PathBuf>`). `history::ScanRecord` (one completed scan's summary)
@@ -168,6 +185,14 @@ action totals `run()` already tracks.
   existing database preserves prior rows). Manual smoke test additionally
   confirmed two real scans (a plain scan, then `--action delete --apply`)
   produced the expected two rows via a direct SQL query.
+- FR-012 (`--find-duplicate-folders`) is exercised by
+  `main::tests::find_duplicate_folders_flag_succeeds_on_an_exact_folder_match`
+  and `find_duplicate_folders_flag_succeeds_with_json_format`, plus the
+  underlying `rusty_fclone_core::folder_dedup` unit tests (`FCLONE-DETECTION-001`
+  FR-010 through FR-013). Manual smoke test against a real three-directory
+  tree (`photos/vacation`, `backup/vacation` with an extra file) confirmed
+  the exact text and NDJSON output shapes, including the `Contained`
+  subset/superset direction.
 
 ## Verification plan
 
@@ -215,6 +240,11 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.2.2 (2026-08-25): Added `--find-duplicate-folders` (FR-012), which
+  runs the new `rusty_fclone_core::find_folder_duplicates` after the scan
+  completes and reports `FolderMatch::Exact`/`Contained` results in both
+  text and `--format json` (new `folder_exact`/`folder_contained` NDJSON
+  event types). Off by default. `FCLONE-DETECTION-001` 0.2.0, ADR-0021.
 - 0.2.1 (2026-08-25): Reworded the GUI/TUI Non-goal — a GUI now exists as
   a separate spec/crate (`GUI-UX-001`, ADR-0020), so the prior wording
   ("anything beyond a plain terminal/pipe-friendly CLI") read as a

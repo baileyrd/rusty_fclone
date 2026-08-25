@@ -3,10 +3,12 @@
   (new `rusty_fclone-gui` crate, PR #25) plus three real-usage follow-up
   fixes surfaced by an actual Windows build/run (PRs #26–#28: the MSVC
   C++ toolchain prerequisite, a missing `icons/icon.ico`, and a GNU
-  linker export-ordinal overflow from an unused `cdylib` output). This
-  branch adds a fourth follow-up fix on top — a real Windows *usage* gap
-  (quoted paths pasted from Explorer's "Copy as path"), the first found
-  by actually running the app rather than just building it.
+  linker export-ordinal overflow from an unused `cdylib` output), and a
+  fourth follow-up fix (PR #29) for a real Windows *usage* gap (quoted
+  paths pasted from Explorer's "Copy as path"). This branch adds
+  `DETECTION-FOLDER-DEDUP` on top — folder-level duplicate detection
+  (`Exact`/`Contained`), asked for directly after the user tried a real
+  scan through the newly-working Windows GUI.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -145,6 +147,33 @@
   note. `release.yml` is unchanged (still CLI-only); see
   `GUI-RELEASE-BUNDLES` in the roadmap.
 
+- `DETECTION-FOLDER-DEDUP`: new `rusty_fclone_core::folder_dedup` module
+  and public `find_folder_duplicates(root, groups, options) ->
+  Result<Vec<FolderMatch>, ScanError>` — a post-scan pass (not a
+  `scan()`/`ScanEvent` streaming extension, since a folder verdict needs
+  the whole tree's picture) that runs its own lightweight second,
+  stat-only traversal to learn every directory's complete file set
+  (including files with no duplicate anywhere, which a normal scan never
+  surfaces), then reports `FolderMatch::Exact` clusters and
+  `FolderMatch::Contained` subset/superset pairs. A directory is only
+  eligible as an `Exact`/subset side once every file in its subtree has a
+  duplicate somewhere in the tree; a directory with extra files of its
+  own can still be a `Contained` superset. Shallowest-first
+  claim-and-skip-descendants suppression keeps a top-level folder match
+  from flooding the output with every implied nested subdirectory match.
+  No new destructive action — detection and reporting only. ADR-0021,
+  `FCLONE-DETECTION-001` 0.2.0 (FR-010–FR-013, NFR-006). New CLI
+  `--find-duplicate-folders` flag (`CLI-UX-001` 0.2.2, FR-012), off by
+  default, with `--format text` and `--format json`
+  (`folder_exact`/`folder_contained` NDJSON events) output. Implemented,
+  tested (101/101 workspace tests — 7 new `folder_dedup` unit tests + 2
+  new CLI-level tests), and manually smoke-tested against a real
+  three-directory tree (`photos/vacation` fully duplicated inside
+  `backup`, which also has an unrelated extra file elsewhere) confirming
+  the exact text and NDJSON output, including the `Contained`
+  subset/superset direction. GUI surfacing is explicitly scoped as a
+  separate follow-up, not bundled into this change.
+
 ## In progress
 - None.
 
@@ -167,19 +196,24 @@
   a plain text input) — deferred pending a look at Tauri's `dialog`
   plugin's own permission/capability shape (`GUI-UX-001`'s open
   questions).
+- GUI surfacing of folder-level duplicate detection — `DETECTION-FOLDER-DEDUP`
+  above is CLI-only by design (ADR-0021); a GUI toggle/view for the same
+  `find_folder_duplicates` results is a natural next step, not yet started.
 
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-25)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-25)
-- `cargo test --workspace`: pass, 92/92 (2026-08-25)
+- `cargo test --workspace`: pass, 101/101 (2026-08-25)
 - `cargo bench --workspace --no-run`: pass (2026-08-25)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-25)
 - Manual CLI smoke tests across the project: verbosity flags, `RUST_LOG`
   override, default output silent on success, action dry runs, JSON
   format, progress checkpoints, confirmation prompt decline/accept,
-  cold/warm `--cache` behavior, `--history` across two real scans, and
+  cold/warm `--cache` behavior, `--history` across two real scans,
   `--import-fclones-cache` against a real `fclones` binary and its real
-  cache database (2026-08-24)
+  cache database (2026-08-24), and `--find-duplicate-folders` against a
+  real three-directory tree in both `--format text` and `--format json`
+  (2026-08-25)
 - Manual GUI smoke test (2026-08-25): compiled binary launched under
   Xvfb, real frontend rendered (caught and fixed one stale-embedded-
   asset build during this pass), a full scan → duplicate-group render →

@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.1.9
+- Version: 0.2.0
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -16,7 +16,11 @@ reporting, a GUI) is out of scope for this specification and depends on it.
 ## Non-goals
 
 - Deciding what to *do* about duplicates (delete, hardlink, reflink, move).
-  That's a future capability area consuming this engine's output.
+  That's a future capability area consuming this engine's output. This
+  extends to folder-level matches (FR-010 onward) too: no new "delete/
+  replace this whole folder" action exists or is planned here — a folder
+  match is acted on today via the existing per-file actions on the
+  `DuplicateGroup`s it's built from (ADR-0021).
 - Near-duplicate / fuzzy / perceptual matching (e.g. similar images, similar
   text). This engine only detects byte-identical content.
 - Distributed or network-filesystem-aware scanning beyond what a portable
@@ -103,6 +107,36 @@ reporting, a GUI) is out of scope for this specification and depends on it.
   any import miss (wrong hash function, no matching entry, stale
   size/mtime, non-Unix platform, unreadable database) SHALL fall through
   to computing the hash normally rather than erroring.
+- `FCLONE-DETECTION-001-FR-010`: Given a completed scan's `DuplicateGroup`s,
+  `find_folder_duplicates` SHALL identify directories whose entire
+  recursive file content is pairwise identical to another directory's
+  (`FolderMatch::Exact`, two or more directories) or a strict subset of
+  another directory's (`FolderMatch::Contained`, `subset`/`superset`),
+  using each directory's complete recursive file listing — including
+  files with no duplicate anywhere, which `scan()` never surfaces —
+  obtained via its own second, stat-only, no-hashing traversal (ADR-0021).
+- `FCLONE-DETECTION-001-FR-011`: A directory SHALL only be eligible as an
+  `Exact` participant or a `Contained` subset when every file in its
+  recursive subtree has at least one duplicate elsewhere in the tree; a
+  single unmatched file anywhere in its subtree SHALL disqualify it. A
+  directory with unmatched files of its own MAY still be eligible as a
+  `Contained` match's superset — a superset is only required to contain
+  the subset's files, not to consist entirely of them.
+- `FCLONE-DETECTION-001-FR-012`: Once a directory is claimed by a
+  reported `Exact` cluster or as a `Contained` subset, none of its
+  descendants SHALL be separately reported as their own match — a match
+  among them is already fully implied by the claimed ancestor's match.
+  Superset directories SHALL NOT be claimed this way, since the same
+  directory can legitimately be the superset for several unrelated
+  subset matches.
+- `FCLONE-DETECTION-001-FR-013`: `find_folder_duplicates` SHALL reject a
+  nonexistent or non-directory root with `ScanError::InvalidRoot`,
+  matching `scan()`'s existing root-validation contract.
+- `FCLONE-DETECTION-001-NFR-006`: Candidate superset discovery for a
+  subset directory SHALL be bounded by the total membership of the
+  `DuplicateGroup`s its files belong to (path-suffix matching against
+  each group's other paths), not by comparing every pair of directories
+  in the tree.
 
 ## Architecture and interfaces
 
@@ -122,6 +156,12 @@ pub struct ScanOptions { pub follow_symlinks: bool, pub cross_filesystems: bool,
                           pub partial_hash_sample_size: u64, pub io_threads: Option<usize>,
                           pub cache_path: Option<PathBuf>,
                           pub fclones_import_path: Option<PathBuf> }
+
+pub fn find_folder_duplicates(root: &Path, groups: &[DuplicateGroup], options: &ScanOptions)
+    -> Result<Vec<FolderMatch>, ScanError>;
+pub enum FolderMatch { Exact { folders: Vec<PathBuf>, file_count: u64, bytes: u64 },
+                        Contained { subset: PathBuf, superset: PathBuf,
+                                    file_count: u64, bytes: u64 } }
 ```
 
 Internal modules: `traversal` (jwalk-based walk + file-id), `io_pool`
@@ -130,7 +170,8 @@ Internal modules: `traversal` (jwalk-based walk + file-id), `io_pool`
 (`redb`-backed full-hash cache, ADR-0016), `fclones_import` (reads an
 existing fclones `sled`/`bincode` cache database, ADR-0019), `pipeline`
 (orchestration: hardlink collapse → size-group → partial hash → full hash →
-optional verify → emit).
+optional verify → emit), `folder_dedup` (post-scan folder-level duplicate
+detection consuming a completed scan's `DuplicateGroup`s, ADR-0021).
 
 ## Data/state and invariants
 
@@ -220,6 +261,22 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.2.0 (2026-08-25): Added folder-level duplicate detection (FR-010
+  through FR-013, NFR-006) — asked for directly ("is it possible to
+  identify if folders of files are duplicates?", both exact and
+  partial/subset matching wanted). New `folder_dedup` module and public
+  `find_folder_duplicates(root, groups, options) -> Result<Vec<FolderMatch>,
+  ScanError>` function: a post-scan analysis (not a `scan()`/`ScanEvent`
+  streaming extension, since a folder verdict needs the whole tree's
+  picture) that runs its own lightweight second, stat-only traversal to
+  learn the complete file set per directory, then reports `Exact` clusters
+  and `Contained` subset/superset pairs, with a "fully duplicated subtree"
+  eligibility gate and shallowest-first redundancy suppression so a
+  top-level folder match doesn't flood the output with every implied
+  nested subdirectory match. No new destructive action — detection and
+  reporting only (ADR-0021). New CLI `--find-duplicate-folders` flag
+  (`CLI-UX-001`); GUI surfacing scoped as a separate follow-up, not
+  bundled into this change.
 - 0.1.9 (2026-08-24): Added
   `ScanOptions::fclones_import_path: Option<PathBuf>` (NFR-005) and a new
   `fclones_import` module: reads an existing `fclones --cache` `sled`
