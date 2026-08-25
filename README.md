@@ -134,9 +134,12 @@ rusty-fclone --find-duplicate-folders /path/to/scan
 ## GUI
 
 A desktop GUI (`rusty_fclone-gui`, [`GUI-UX-001`](docs/specifications/gui-ux/GUI-UX-001.md))
-covers the same scan-and-act workflow as the CLI above, through a window
-instead of a terminal: enter a directory, scan, review duplicate groups as
-they're found, and preview or apply an action per group.
+covers the same scan-and-act workflow as the CLI above, through four
+screens instead of a terminal: a Dashboard summarizing duplicates found
+and space reclaimed this session, Scan Setup for picking a directory and
+tuning options, Duplicate Review for stepping through file- and
+folder-level duplicate matches and previewing or applying an action on
+each, and a Rules & Automation preview. Light and dark themes.
 
 ```sh
 cargo run -p rusty_fclone-gui
@@ -185,8 +188,9 @@ concurrency model, traversal defaults, workspace shape, toolchain/license/
 dependency policy, two benchmark-motivated tuning revisions (partial-hash
 sample size, I/O thread pool sizing), the action layer (ADR-0009:
 delete/hardlink, dry-run by default, safe hardlink-via-rename), the
-Tauri-based GUI (ADR-0020), and folder-level duplicate detection
-(ADR-0021: a post-scan pass, not a streaming extension).
+Tauri-based GUI (ADR-0020), folder-level duplicate detection
+(ADR-0021: a post-scan pass, not a streaming extension), and the GUI's
+4-screen redesign against a design handoff (ADR-0022).
 
 ## Development
 
