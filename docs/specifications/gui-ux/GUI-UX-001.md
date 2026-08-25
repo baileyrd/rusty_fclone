@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.1.0
+- Version: 0.1.1
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -223,9 +223,21 @@ See `docs/traceability/TRACEABILITY.md`.
 - `release.yml` doesn't build or bundle the GUI (Non-goals) — a real
   release needs per-platform bundler prerequisites and real (non-
   placeholder) icon assets in every format `tauri build`'s bundler wants.
+- Only verified on Linux (this development environment's only available
+  platform, see `PROJECT-STATUS.md`) — macOS and Windows are unverified
+  end-to-end. A real Windows build attempt did surface one real gap
+  (fixed): the MSVC C++ toolchain requirement for `embed-resource`
+  wasn't documented anywhere (ADR-0020's Consequences, README's GUI
+  section).
 
 ## Change history
 
+- 0.1.1 (2026-08-25): Documented the Windows build prerequisite (MSVC
+  C++ toolchain, `embed-resource`'s `vswhom-sys` dependency) in ADR-0020
+  and README — surfaced by a real Windows build attempt failing with
+  `C1083: Cannot open include file: 'windows.h'` (built from a plain
+  terminal, not an "x64 Native Tools Command Prompt for VS"). No
+  functional/requirement change.
 - 0.1.0 (2026-08-25): Initial implementation and specification.
   `rusty_fclone-gui` crate, `start_scan`/`run_action` commands, vanilla-JS
   frontend. ADR-0020.

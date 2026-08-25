@@ -143,6 +143,14 @@ sudo apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
   libayatana-appindicator3-dev libssl-dev libsoup-3.0-dev
 ```
 
+On Windows, building it needs the MSVC C++ toolchain (a transitive
+dependency, `embed-resource`, uses it to embed the app icon/manifest into
+the `.exe`) — install the **"Desktop development with C++"** workload via
+the Visual Studio Installer, and build from an **"x64 Native Tools
+Command Prompt for VS"**, not a plain terminal (`cargo build` invoked
+outside that environment fails with `cl.exe`/`windows.h` errors, since
+`vcvars64.bat` hasn't run to set `INCLUDE`/`LIB`).
+
 No installer/bundle is published yet (`.deb`/`.AppImage`/`.dmg`/`.msi`) —
 run it from source via `cargo run` above.
 

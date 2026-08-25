@@ -106,7 +106,15 @@ safety/streaming contracts.
   since no other crate needs them), plus their transitive system-library
   requirements on Linux (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
   `librsvg2-dev`, `libayatana-appindicator3-dev`, `libssl-dev`,
-  `libsoup-3.0-dev`).
+  `libsoup-3.0-dev`) — and, on Windows, the MSVC C++ toolchain
+  (`embed-resource`'s `vswhom-sys` dependency needs `cl.exe` and
+  `windows.h` to embed the `.exe`'s icon/manifest, confirmed the hard way
+  when a Windows build hit `C1083: Cannot open include file: 'windows.h'`
+  from a plain terminal — the fix is building from an "x64 Native Tools
+  Command Prompt for VS" so `vcvars64.bat` has set `INCLUDE`/`LIB` first,
+  not a code change here). CI only validates the Linux path (its only
+  runner); this environment has no Windows machine to validate the
+  Windows path against, so it's documented, not CI-verified.
 - `AGENTS.md`'s "no C toolchain" rule now carries two precedent
   exceptions (ADR-0017, this one) instead of one — both documented at the
   rule itself, not just in ADR history, so a reader doesn't take the rule
