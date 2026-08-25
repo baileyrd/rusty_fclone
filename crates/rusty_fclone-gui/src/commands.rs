@@ -8,7 +8,8 @@ use tauri::{AppHandle, Emitter, Runtime};
 use rusty_fclone_core::action;
 
 use crate::payload::{
-    parse_action_kind, ActionResultPayload, GroupPayload, ScanEventPayload, ScanOptionsPayload,
+    normalize_path_input, parse_action_kind, ActionResultPayload, GroupPayload, ScanEventPayload,
+    ScanOptionsPayload,
 };
 
 /// Starts a scan on a background thread and streams results back to the
@@ -23,6 +24,7 @@ pub fn start_scan<R: Runtime>(
     root: String,
     options: ScanOptionsPayload,
 ) -> Result<(), String> {
+    let root = normalize_path_input(&root);
     let options = options.into();
     std::thread::spawn(move || {
         let handle = match rusty_fclone_core::scan(root, options) {
@@ -205,5 +207,73 @@ mod tests {
             response.is_ok(),
             "start_scan should accept a valid directory root"
         );
+    }
+
+    #[test]
+    fn start_scan_treats_a_windows_copy_as_path_quoted_root_as_the_real_directory() {
+        // Reproduces a real Windows GUI session: Explorer's "Copy as path"
+        // wraps the path in double quotes, and pasting that verbatim into
+        // the root-path field used to make the background scan thread
+        // emit a "root path does not exist" error event -- the quotes
+        // were literal characters in the string, invisible until the
+        // actual scan-event stream is inspected (start_scan's own IPC
+        // response is always Ok(()) regardless of root validity, since
+        // it just spawns the scan thread and returns immediately).
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        use tauri::Listener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let quoted_root = format!("\"{}\"", dir.path().display());
+
+        let app = mock_builder()
+            .invoke_handler(tauri::generate_handler![
+                super::start_scan,
+                super::run_action
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+        let webview = WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("failed to build mock webview");
+
+        let (tx, rx) = mpsc::channel::<String>();
+        app.listen("scan-event", move |event| {
+            let _ = tx.send(event.payload().to_string());
+        });
+
+        let response = get_ipc_response(
+            &webview,
+            InvokeRequest {
+                cmd: "start_scan".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: InvokeBody::Json(json!({"root": quoted_root, "options": {}})),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_string(),
+            },
+        );
+        assert!(response.is_ok(), "start_scan's own IPC call should succeed");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut finished = false;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(payload) => {
+                    assert!(
+                        !payload.contains("does not exist"),
+                        "the quoted root should resolve to a real directory, not error: {payload}"
+                    );
+                    if payload.contains("\"type\":\"finished\"") {
+                        finished = true;
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(finished, "expected a finished scan-event within 5s");
     }
 }

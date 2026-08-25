@@ -1,9 +1,12 @@
 # Project Status
-- Last verified main commit: `6ab7a5e` (PR #24, merged) — a docs-loop
-  pass (PRs #20-#24: README's CLI-scope line since superseded by the GUI
-  below, `AGENTS.md`/`WORKFLOW.md`/`SYSTEM-ARCHITECTURE.md` drift fixes,
-  and a `docs-audit.md` resolution record). This branch adds the `GUI`
-  unit (new `rusty_fclone-gui` crate) on top.
+- Last verified main commit: `935b848` (PR #28, merged) — the `GUI` unit
+  (new `rusty_fclone-gui` crate, PR #25) plus three real-usage follow-up
+  fixes surfaced by an actual Windows build/run (PRs #26–#28: the MSVC
+  C++ toolchain prerequisite, a missing `icons/icon.ico`, and a GNU
+  linker export-ordinal overflow from an unused `cdylib` output). This
+  branch adds a fourth follow-up fix on top — a real Windows *usage* gap
+  (quoted paths pasted from Explorer's "Copy as path"), the first found
+  by actually running the app rather than just building it.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -120,21 +123,30 @@
   record added afterward) has the full findings table. Merged via PRs
   #20-#24.
 
+- `GUI`: new `rusty_fclone-gui` crate — a Tauri (v2) desktop GUI covering
+  the same scan-and-act workflow as the CLI, reversing the v1 "no GUI"
+  non-goal. ADR-0020, `GUI-UX-001` (0.1.0 → 0.1.4 across four follow-up
+  fixes, all from real usage — see Risks and decisions needed below for
+  what each one was). Implemented, tested (92/92 workspace tests — 16
+  `rusty_fclone-gui` tests: `payload` unit tests plus `commands`
+  IPC-level tests via `tauri::test`'s mock runtime, asserting on real
+  filesystem state). Manually verified end-to-end in this environment via
+  Xvfb (no real display available): the compiled binary launched,
+  rendered the real frontend, and a full scan → duplicate-group display →
+  preview action → apply action cycle was driven through the actual UI
+  with `xdotool`, confirmed against real filesystem state before/after.
+  **Also independently confirmed on a real Windows desktop** by an actual
+  user, after working through the build-time gaps above: correct window
+  rendering, and a real scan/duplicate-group/action cycle. Merged via
+  PR #25, with four small follow-up fixes (PRs #26–#28 plus the FR-012
+  quote-stripping fix) as real usage surfaced real gaps.
+  `.github/workflows/ci.yml` now installs Tauri's Linux system-webview
+  dev packages before building — see ADR-0020's C-toolchain-exception
+  note. `release.yml` is unchanged (still CLI-only); see
+  `GUI-RELEASE-BUNDLES` in the roadmap.
+
 ## In progress
-- `GUI` (this branch): new `rusty_fclone-gui` crate — a Tauri (v2) desktop
-  GUI covering the same scan-and-act workflow as the CLI, reversing the
-  v1 "no GUI" non-goal. ADR-0020, `GUI-UX-001` 0.1.0. Implemented, tested
-  (85/85 workspace tests — 9 new `rusty_fclone-gui` tests: 5 `payload`
-  unit tests, 4 `commands` IPC-level tests via `tauri::test`'s mock
-  runtime, asserting on real filesystem state). Also manually verified
-  end-to-end in this environment via Xvfb (no real display available): the
-  compiled binary launched, rendered the real frontend, and a full scan →
-  duplicate-group display → preview action → apply action cycle was
-  driven through the actual UI with `xdotool`, confirmed against real
-  filesystem state before/after. `.github/workflows/ci.yml` now installs
-  Tauri's Linux system-webview dev packages before building — see
-  ADR-0020's C-toolchain-exception note. `release.yml` is unchanged
-  (still CLI-only); see `GUI-RELEASE-BUNDLES` in the roadmap.
+- None.
 
 ## Blocked
 - None.
@@ -159,7 +171,7 @@
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-25)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-25)
-- `cargo test --workspace`: pass, 85/85 (2026-08-25)
+- `cargo test --workspace`: pass, 92/92 (2026-08-25)
 - `cargo bench --workspace --no-run`: pass (2026-08-25)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-25)
 - Manual CLI smoke tests across the project: verbosity flags, `RUST_LOG`
@@ -211,23 +223,34 @@
 - `GUI`'s icon assets are placeholder solid-color squares, not real
   application art — fine for `cargo build`/`clippy`/`test`, not for a
   real release (ADR-0020's consequences).
-- `GUI` was only verified on Linux (this environment's only available
-  platform) — macOS rendering is unverified; Windows rendering is
-  unverified too (only `cargo build` has been attempted on Windows so
-  far, via a real user's build, not a running/rendered window). No
-  automated frontend/DOM test exists (`app.js` is covered by the manual
-  Xvfb pass only); `GUI-UX-001`'s open questions track this. Three real
-  gaps surfaced by that Windows build attempt, all since fixed: the MSVC
-  C++ toolchain prerequisite for `embed-resource` wasn't documented
-  (README, ADR-0020; `GUI-UX-001` 0.1.1); a missing `icons/icon.ico`
-  blocked the build outright, not just release bundling as originally
-  assumed (`GUI-UX-001` 0.1.2); and, after switching to the GNU toolchain
-  (no admin rights available to install MSVC), the crate's unused
-  `cdylib` output overflowed MinGW's classic linker's export-ordinal
-  field on Tauri's large dependency tree — trimmed `[lib] crate-type`
-  down to just what's needed (`GUI-UX-001` 0.1.3). `.icns` (macOS) is
-  still missing and could carry the same "blocks debug builds too" risk
-  as `icon.ico` did; genuinely unverified, since no macOS build attempt
-  has happened yet.
+- `GUI` was originally only verified on Linux (this environment's only
+  available platform) — **now also confirmed rendering correctly on a
+  real Windows desktop**, via an actual user building and launching it
+  (window chrome, layout, and controls all correct; a real scan against
+  a real directory produced the expected duplicate-group listing). macOS
+  is still entirely unverified. No automated frontend/DOM test exists
+  (`app.js` is covered by the manual Xvfb pass and this real Windows use
+  only); `GUI-UX-001`'s open questions track this. Four real gaps
+  surfaced by real usage so far, all since fixed:
+  - Building: the MSVC C++ toolchain prerequisite for `embed-resource`
+    wasn't documented (README, ADR-0020; `GUI-UX-001` 0.1.1).
+  - Building: a missing `icons/icon.ico` blocked the build outright, not
+    just release bundling as originally assumed (`GUI-UX-001` 0.1.2).
+  - Building: after switching to the GNU toolchain (no admin rights
+    available to install MSVC), the crate's unused `cdylib` output
+    overflowed MinGW's classic linker's export-ordinal field on Tauri's
+    large dependency tree — trimmed `[lib] crate-type` down to just
+    what's needed (`GUI-UX-001` 0.1.3).
+  - **Using** (the first gap found by actually running the app, not just
+    building it): pasting a path copied via Windows Explorer's "Copy as
+    path" (which wraps it in double quotes) into the root-path field
+    failed with "root path does not exist" — the quotes were literal
+    characters in the string. Fixed by stripping surrounding whitespace
+    and one layer of matching quotes from every user-typed path field
+    (`GUI-UX-001` 0.1.4, FR-012).
+
+  `.icns` (macOS) is still missing and could carry the same "blocks
+  debug builds too" risk `icon.ico` did; genuinely unverified, since no
+  macOS build attempt has happened yet.
 - `GUI-RELEASE-BUNDLES` (packaged, installable GUI distribution) is not
   started — `release.yml` still only builds the CLI binary.

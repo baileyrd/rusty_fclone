@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.1.3
+- Version: 0.1.4
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -94,6 +94,14 @@ semantics, which are unchanged.
 - `GUI-UX-001-FR-011`: The frontend's apply control SHALL default to
   unchecked (preview) on every newly rendered duplicate group — never
   pre-checked, and never remembered from a previous group's choice.
+- `GUI-UX-001-FR-012`: `start_scan`'s root path and `ScanOptionsPayload`'s
+  `cachePath`/`fclonesImportPath` SHALL each be trimmed of surrounding
+  whitespace and, if present, one layer of surrounding matching quote
+  characters (`"..."` or `'...'`) before use — so a path copied via
+  Windows Explorer's "Copy as path" (which wraps it in double quotes)
+  works when pasted directly into any of these fields. A path with only
+  one matching side quoted (e.g. a genuine leading `"` with no trailing
+  one) SHALL be left unchanged rather than guessed at.
 
 ## Architecture and interfaces
 
@@ -189,6 +197,19 @@ field, options `fieldset`, status line, group list), `app.js` (`invoke`/
   pass (the Apply checkbox was unchecked by default in the rendered DOM
   before being explicitly checked for the apply test above); no automated
   DOM-level test exists (see Open questions).
+- FR-012 (quote/whitespace normalization) is exercised by
+  `payload::tests::normalize_path_input_*` (5 tests: double quotes,
+  single quotes, whitespace inside and outside the quotes, an unquoted
+  path left alone, a mismatched single quote left alone) and
+  `payload::tests::scan_options_payload_normalizes_pasted_quoted_paths_too`
+  (the same normalization applied through `ScanOptionsPayload`'s
+  `cachePath`/`fclonesImportPath`), plus
+  `commands::tests::start_scan_treats_a_windows_copy_as_path_quoted_root_as_the_real_directory`
+  — an IPC-level test that invokes `start_scan` with a real quoted
+  tempdir path and listens for the resulting `scan-event` stream,
+  confirmed to fail with the exact "does not exist" error a real Windows
+  user hit before this fix, and to pass with it applied (verified both
+  ways during development, not just written and trusted).
 
 ## Verification plan
 
@@ -232,6 +253,16 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.1.4 (2026-08-25): Added FR-012 — `start_scan`'s root and
+  `ScanOptionsPayload`'s `cachePath`/`fclonesImportPath` now strip
+  surrounding whitespace and one layer of matching quote characters
+  before use (`payload::normalize_path_input`). Surfaced by a real
+  Windows user pasting a path copied via Explorer's "Copy as path" (which
+  wraps it in double quotes) into the root-path field: the scan failed
+  with `root path does not exist or is not a directory:
+  "C:\Users\...\Downloads"` — the quotes were literal characters in the
+  string, invisible in the error until read closely. A real GUI-usage
+  gap, not a build/toolchain one like 0.1.1–0.1.3.
 - 0.1.3 (2026-08-25): Trimmed `rusty_fclone-gui`'s `[lib]` `crate-type`
   from `["staticlib", "cdylib", "rlib"]` (Tauri's default scaffold, aimed
   at mobile targets this project doesn't build) down to the default
