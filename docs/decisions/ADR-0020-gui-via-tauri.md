@@ -129,13 +129,23 @@ safety/streaming contracts.
   step installs, plus real application icons in every format the bundler
   targets) is a real follow-up, not attempted here — see
   `docs/roadmap/ROADMAP.md`'s new `GUI-RELEASE-BUNDLES` entry.
-- Icon assets (`crates/rusty_fclone-gui/icons/*.png`) are placeholder
-  solid-color squares generated for this change, not real application art
-  — sufficient for `tauri::generate_context!`'s compile-time icon
-  embedding (which only requires a valid PNG to exist on Linux targets)
-  and for `cargo build`/`clippy`/`test`, insufficient for a real release.
-  No `.ico`/`.icns` were generated at all (Windows/macOS-specific bundle
-  icon formats, unused by any check this environment can run).
+- Icon assets (`crates/rusty_fclone-gui/icons/*.png`, `icon.ico`) are
+  placeholder solid-color squares, not real application art — sufficient
+  to compile and run, insufficient for a real release. `icon.ico` is a
+  PNG embedded directly in a minimal ICO container (a format Windows has
+  accepted since Vista), generated the same placeholder way as the PNGs.
+  **`icon.ico`'s absence was originally scoped as a release-bundling-only
+  gap** ("insufficient for a real release, unused by any check this
+  environment can run") — wrong: a real Windows `cargo build` (not just
+  `tauri build`'s bundler) failed outright with `icons/icon.ico not
+  found; required for generating a Windows Resource file during
+  tauri-build`, since `tauri-build` needs an `.ico` to embed as the
+  `.exe`'s resource icon on *every* Windows build, debug included, not
+  only a release bundle. Caught by an actual Windows build attempt, not
+  by anything checkable from this Linux-only environment — no `.icns`
+  exists yet for the same reason (macOS is equally unverified here), and
+  may turn out to have the same "blocks debug builds too" property should
+  someone hit it.
 - Verified end-to-end in this environment via Xvfb (a virtual X display,
   since this container has no real display): the compiled binary launches,
   renders the real frontend (not a stale cached build — caught and fixed

@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.1.1
+- Version: 0.1.2
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -232,6 +232,16 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.1.2 (2026-08-25): Added `icons/icon.ico` (a placeholder PNG-in-ICO,
+  same treatment as the existing placeholder PNGs) and registered it in
+  `tauri.conf.json`'s bundle icon list. A real Windows `cargo build`
+  attempt failed outright — `icons/icon.ico not found; required for
+  generating a Windows Resource file during tauri-build` — since
+  `tauri-build` needs an `.ico` for *every* Windows build (debug
+  included), not only `tauri build`'s release bundler as ADR-0020
+  originally assumed. `.icns` (macOS) is still missing for the same
+  reason and unverified for the same "might block debug builds too" risk
+  — no macOS build attempt has surfaced it yet.
 - 0.1.1 (2026-08-25): Documented the Windows build prerequisite (MSVC
   C++ toolchain, `embed-resource`'s `vswhom-sys` dependency) in ADR-0020
   and README — surfaced by a real Windows build attempt failing with
