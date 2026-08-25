@@ -7,11 +7,11 @@ use std::path::PathBuf;
 
 use tauri::{AppHandle, Emitter, Runtime};
 
-use rusty_fclone_core::{action, find_folder_duplicates};
+use rusty_fclone_core::{action, find_folder_duplicates, folder_action};
 
 use crate::payload::{
-    normalize_path_input, parse_action_kind, ActionResultPayload, FolderMatchPayload, GroupPayload,
-    ScanEventPayload, ScanOptionsPayload,
+    normalize_path_input, parse_action_kind, ActionResultPayload, FolderActionResultPayload,
+    FolderMatchPayload, GroupPayload, ScanEventPayload, ScanOptionsPayload,
 };
 
 /// Starts a scan on a background thread and streams results back to the
@@ -105,6 +105,43 @@ pub fn find_duplicate_folders(
         .map_err(|err| err.to_string())
 }
 
+/// Plans (and, if `apply` is set, actually runs) `kind` over every file in
+/// `removed` against its confirmed partner in `kept` — the folder-level
+/// counterpart of [`run_action`], closing the gap the "Delete Duplicate
+/// Folder" button was shipped disabled for (ADR-0023). `groups` and
+/// `options` must match the scan that originally produced the `FolderMatch`
+/// this is acting on; the frontend already holds both, the same way it
+/// already does for `find_duplicate_folders`. `rusty_fclone_core::
+/// folder_action::plan_folder` re-verifies every file's confirmed partner
+/// and current on-disk size before planning, failing closed (an `Err`, not
+/// a partial plan) if the scan has gone stale since.
+#[tauri::command]
+pub fn run_folder_action(
+    removed: String,
+    kept: String,
+    groups: Vec<GroupPayload>,
+    options: ScanOptionsPayload,
+    kind: String,
+    apply: bool,
+) -> Result<FolderActionResultPayload, String> {
+    let kind = parse_action_kind(&kind)?;
+    let removed = PathBuf::from(normalize_path_input(&removed));
+    let kept = PathBuf::from(normalize_path_input(&kept));
+    let groups: Vec<_> = groups.into_iter().map(Into::into).collect();
+    let options = options.into();
+    let plan = folder_action::plan_folder(&removed, &kept, &groups, &options, kind)
+        .map_err(|err| err.to_string())?;
+    let applied = if apply {
+        Some((&folder_action::apply_folder(&plan)).into())
+    } else {
+        None
+    };
+    Ok(FolderActionResultPayload {
+        plan: (&plan).into(),
+        applied,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -120,7 +157,8 @@ mod tests {
             .invoke_handler(tauri::generate_handler![
                 super::start_scan,
                 super::run_action,
-                super::find_duplicate_folders
+                super::find_duplicate_folders,
+                super::run_folder_action
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");
@@ -235,6 +273,106 @@ mod tests {
     }
 
     #[test]
+    fn run_folder_action_delete_preview_does_not_touch_the_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+
+        let response = invoke(
+            "run_folder_action",
+            json!({
+                "removed": small.display().to_string(),
+                "kept": big.display().to_string(),
+                "groups": [
+                    {"size": 3, "paths": [small.join("1.txt").display().to_string(), big.join("1.txt").display().to_string()]},
+                ],
+                "options": {},
+                "kind": "delete",
+                "apply": false,
+            }),
+        )
+        .expect("run_folder_action should succeed");
+
+        assert_eq!(response["plan"]["kept"], big.display().to_string());
+        assert_eq!(response["plan"]["removed"], small.display().to_string());
+        assert_eq!(response["plan"]["fileCount"], 1);
+        assert!(response["applied"].is_null());
+        assert!(
+            small.join("1.txt").exists(),
+            "preview must not delete anything"
+        );
+    }
+
+    #[test]
+    fn run_folder_action_delete_apply_removes_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+
+        let response = invoke(
+            "run_folder_action",
+            json!({
+                "removed": small.display().to_string(),
+                "kept": big.display().to_string(),
+                "groups": [
+                    {"size": 3, "paths": [small.join("1.txt").display().to_string(), big.join("1.txt").display().to_string()]},
+                ],
+                "options": {},
+                "kind": "delete",
+                "apply": true,
+            }),
+        )
+        .expect("run_folder_action should succeed");
+
+        assert_eq!(response["applied"]["directoryRemoved"], true);
+        assert!(!small.exists(), "apply: true must prune the emptied folder");
+        assert!(
+            big.join("1.txt").exists(),
+            "the kept side must be untouched"
+        );
+    }
+
+    #[test]
+    fn run_folder_action_rejects_a_stale_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        // A file exists on disk that `groups` never mentions -- as if it
+        // were added after the scan that produced `groups` ran.
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+
+        let err = invoke(
+            "run_folder_action",
+            json!({
+                "removed": small.display().to_string(),
+                "kept": big.display().to_string(),
+                "groups": [],
+                "options": {},
+                "kind": "delete",
+                "apply": false,
+            }),
+        )
+        .expect_err("a folder with no confirmed duplicate in `groups` must be rejected");
+
+        assert!(err.as_str().unwrap().contains("no confirmed duplicate"));
+        assert!(
+            small.join("1.txt").exists(),
+            "a rejected plan must not touch the filesystem"
+        );
+    }
+
+    #[test]
     fn find_duplicate_folders_rejects_a_nonexistent_root() {
         let err = invoke(
             "find_duplicate_folders",
@@ -301,7 +439,8 @@ mod tests {
             .invoke_handler(tauri::generate_handler![
                 super::start_scan,
                 super::run_action,
-                super::find_duplicate_folders
+                super::find_duplicate_folders,
+                super::run_folder_action
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");
