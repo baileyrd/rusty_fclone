@@ -214,6 +214,9 @@
 - `GUI` was only verified on Linux (this environment's only available
   platform) — macOS/Windows rendering is unverified. No automated
   frontend/DOM test exists (`app.js` is covered by the manual Xvfb pass
-  only); `GUI-UX-001`'s open questions track this.
+  only); `GUI-UX-001`'s open questions track this. A real Windows build
+  attempt did surface one real gap, since fixed: the MSVC C++ toolchain
+  prerequisite for `embed-resource` wasn't documented (README, ADR-0020;
+  `GUI-UX-001` 0.1.1).
 - `GUI-RELEASE-BUNDLES` (packaged, installable GUI distribution) is not
   started — `release.yml` still only builds the CLI binary.
