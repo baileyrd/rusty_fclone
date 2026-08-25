@@ -654,7 +654,7 @@ function colorTint(cssVar) {
 }
 
 function reviewMain(item) {
-  if (item.kind === "folder") return folderReviewMain(item.match);
+  if (item.kind === "folder") return folderReviewMain(item);
   return fileReviewMain(item);
 }
 
@@ -728,15 +728,37 @@ function fileReviewMain(item) {
   );
 }
 
-function folderReviewMain(match) {
+// Mirrors the CLI's `folder_match_pairs` (ADR-0023, `CLI-UX-001` FR-013):
+// a `Contained` match always removes `subset` against `superset`; an
+// `Exact` cluster of 2+ folders keeps one folder (the alphabetically-first
+// one by default, matching `action::plan`'s "first path is kept"
+// convention, or whichever one the user picked via the keep-choice badge)
+// and removes every other folder against it.
+function folderMatchPairs(item) {
+  const match = item.match;
+  if (match.type === "contained") {
+    return [{ removed: match.subset, kept: match.superset }];
+  }
+  const sorted = [...match.folders].sort();
+  const keptPath = state.keepChoice[item.key] || sorted[0];
+  return match.folders
+    .filter((f) => f !== keptPath)
+    .map((f) => ({ removed: f, kept: keptPath }));
+}
+
+function folderReviewMain(item) {
+  const match = item.match;
   const isExact = match.type === "exact";
   const paths = isExact ? match.folders : [match.subset, match.superset];
   const labels = isExact ? paths.map((_, i) => `Folder ${i + 1}`) : ["Subset", "Superset"];
+  const pairs = folderMatchPairs(item);
+  const keptPath = isExact ? pairs[0]?.kept ?? paths[0] : match.superset;
 
-  const cards = paths.map((path, i) =>
-    el(
+  const cards = paths.map((path, i) => {
+    const keep = path === keptPath;
+    return el(
       "div",
-      { className: "compare-card", style: "border:1px solid var(--border-strong)" },
+      { className: "compare-card " + (keep ? "keep" : "remove") },
       el("div", { className: "compare-thumb" }, icon("folder", 26)),
       el("div", { className: "compare-label" }, labels[i]),
       el("div", { className: "compare-path" }, path),
@@ -746,8 +768,21 @@ function folderReviewMain(match) {
         el("div", { className: "compare-meta-row" }, el("span", { className: "k" }, "Size"), el("span", null, bytesHuman(match.bytes))),
         el("div", { className: "compare-meta-row" }, el("span", { className: "k" }, "Items"), el("span", null, `${match.fileCount} files`)),
       ),
-    ),
-  );
+      isExact
+        ? el(
+            "button",
+            { className: "compare-badge " + (keep ? "keep" : "remove"), onClick: () => setState({ keepChoice: { ...state.keepChoice, [item.key]: path } }) },
+            keep ? "Keeping this folder" : "Marked for removal",
+          )
+        : el("div", { className: "compare-badge " + (keep ? "keep" : "remove"), style: "cursor:default" }, keep ? "Superset (kept)" : "Subset (marked for removal)"),
+    );
+  });
+
+  const removedCount = pairs.length;
+  const totalFiles = removedCount * match.fileCount;
+  const totalBytes = removedCount * match.bytes;
+  const actionVerb = { delete: "removed", hardlink: "hardlinked", reflink: "reflinked" }[state.actionKind];
+  const actionLabel = ACTION_KINDS.find((k) => k.id === state.actionKind).label;
 
   return el(
     "div",
@@ -759,13 +794,23 @@ function folderReviewMain(match) {
       el(
         "div",
         { className: "review-action-left" },
+        el(
+          "div",
+          { className: "seg", style: "width:260px" },
+          ...ACTION_KINDS.map((k) =>
+            el(
+              "button",
+              { className: "seg-option" + (state.actionKind === k.id ? " active" : ""), onClick: () => setState({ actionKind: k.id }) },
+              k.label,
+            ),
+          ),
+        ),
         el("span", { className: "badge match-badge" }, isExact ? "Exact folder match" : "Contained folder match"),
         el(
           "div",
           { className: "reclaim-note" },
-          `${match.fileCount} files, `,
-          el("span", { className: "reclaim-amount" }, bytesHuman(match.bytes)),
-          " involved",
+          `${removedCount} folder${removedCount === 1 ? "" : "s"}, ${totalFiles} file${totalFiles === 1 ? "" : "s"} will be ${actionVerb} · reclaims `,
+          el("span", { className: "reclaim-amount" }, bytesHuman(totalBytes)),
         ),
       ),
       el(
@@ -774,12 +819,8 @@ function folderReviewMain(match) {
         el("button", { className: "btn btn-ghost", onClick: nextGroup }, "Skip"),
         el(
           "button",
-          {
-            className: "btn btn-danger",
-            disabled: true,
-            title: "Folder-level delete isn't available yet -- remove the underlying duplicate files individually from the Review list instead.",
-          },
-          "Delete Duplicate Folder",
+          { className: "btn btn-danger", disabled: removedCount === 0, onClick: () => applyFolderAction(item) },
+          `${actionLabel} Duplicate Folder${removedCount === 1 ? "" : "s"}`,
         ),
       ),
     ),
@@ -815,6 +856,45 @@ async function applyAction(item, keepPath) {
   } catch (err) {
     setState({ actionMessage: `Error: ${err}` });
   }
+  nextGroup();
+}
+
+async function applyFolderAction(item) {
+  const pairs = folderMatchPairs(item);
+  const totalFiles = pairs.length * item.match.fileCount;
+  const totalBytes = pairs.length * item.match.bytes;
+  const message = `This will ${state.actionKind} ${totalFiles} file(s) across ${pairs.length} folder${pairs.length === 1 ? "" : "s"}, reclaiming ${bytesHuman(totalBytes)}. Continue?`;
+  if (!window.confirm(message)) return;
+
+  let reclaimed = 0;
+  let failed = 0;
+  let error = null;
+  for (const { removed, kept } of pairs) {
+    try {
+      const result = await invoke("run_folder_action", {
+        removed,
+        kept,
+        groups: state.groups.map((g) => ({ size: g.size, paths: g.paths })),
+        options: scanOptionsPayload(),
+        kind: state.actionKind,
+        apply: true,
+      });
+      reclaimed += result.applied ? result.applied.bytesReclaimed : 0;
+      failed += result.applied ? result.applied.failed.length : 0;
+    } catch (err) {
+      error = String(err);
+      break;
+    }
+  }
+
+  setState({
+    sessionBytesReclaimed: state.sessionBytesReclaimed + reclaimed,
+    actionMessage: error
+      ? `Reclaimed ${bytesHuman(reclaimed)} before an error: ${error}`
+      : failed > 0
+        ? `Reclaimed ${bytesHuman(reclaimed)}, ${failed} file(s) failed.`
+        : `Reclaimed ${bytesHuman(reclaimed)}.`,
+  });
   nextGroup();
 }
 

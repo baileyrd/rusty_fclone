@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.2.0
+- Version: 0.3.0
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -38,10 +38,11 @@ semantics, which are unchanged.
 - Near-duplicate/fuzzy matching ("Similar content" in the UI) — an
   explicit `FCLONE-DETECTION-001` non-goal; the control is shown but
   disabled, not silently ignored (ADR-0022).
-- A real folder-level delete action — ADR-0021 deliberately has none;
-  the Duplicate Review screen's folder-match action button is disabled
-  with an explanation rather than wired to a guessed behavior
-  (ADR-0022).
+- Batch actions across multiple folder matches at once, or across every
+  pair within one `Exact` cluster in a single `invoke` call — the
+  frontend loops `run_folder_action` once per `removed`/`kept` pair
+  (FR-018), same one-call-per-unit-of-work model FR-008 already uses for
+  file groups.
 - Rules & Automation actually applying to a scan — the screen is a
   local, unpersisted preview only; no rule engine exists in
   `rusty_fclone_core` (ADR-0022).
@@ -162,6 +163,30 @@ semantics, which are unchanged.
   affect which already-found duplicate groups the Duplicate Review
   screen displays (client-side, by file extension) and SHALL NOT be sent
   to `start_scan` or otherwise change what the engine scans or reports.
+- `GUI-UX-001-FR-018`: The frontend SHALL be able to invoke a
+  `run_folder_action` command with a `removed`/`kept` folder path pair,
+  the full set of `DuplicateGroup`s the originating scan produced, the
+  scan options, an action kind (`"delete"|"hardlink"|"reflink"`), and
+  `apply: bool`; the backend SHALL call
+  `rusty_fclone_core::folder_action::plan_folder` unconditionally and
+  SHALL call `apply_folder` if and only if `apply` is `true` — the
+  folder-level counterpart of FR-008/FR-009/FR-010 (ADR-0023). A stale or
+  unconfirmed pair (`plan_folder`'s `Err`) SHALL be surfaced as a
+  rejected `invoke` promise without calling `apply_folder`.
+- `GUI-UX-001-FR-019`: For a `FolderMatch::Contained` match, the Duplicate
+  Review screen's action button SHALL be enabled and, when confirmed,
+  SHALL call `run_folder_action` with `subset` as `removed` and
+  `superset` as `kept` — no keep-choice control, matching the CLI's
+  `folder_match_pairs` convention (`CLI-UX-001` FR-013). For a
+  `FolderMatch::Exact` cluster, the screen SHALL let the user choose
+  which folder is kept (defaulting to the alphabetically-first one, same
+  convention as the CLI) via a per-folder badge, mirroring FR-016's
+  file-level keep-choice mechanism, and SHALL call `run_folder_action`
+  once per non-kept folder in the cluster when confirmed. Confirming
+  SHALL require the same explicit confirmation-dialog step FR-011
+  requires for file groups (naming the action, folder and file counts,
+  and bytes to be reclaimed) before any `run_folder_action` call with
+  `apply: true`.
 
 ## Architecture and interfaces
 
@@ -175,6 +200,8 @@ fn start_scan<R: Runtime>(app: AppHandle<R>, root: String, options: ScanOptionsP
 fn run_action(group: GroupPayload, kind: String, apply: bool) -> Result<ActionResultPayload, String>;
 #[tauri::command]
 fn find_duplicate_folders(root: String, groups: Vec<GroupPayload>, options: ScanOptionsPayload) -> Result<Vec<FolderMatchPayload>, String>;
+#[tauri::command]
+fn run_folder_action(removed: String, kept: String, groups: Vec<GroupPayload>, options: ScanOptionsPayload, kind: String, apply: bool) -> Result<FolderActionResultPayload, String>;
 
 // src/payload.rs — serde DTOs, kept out of rusty_fclone-core (ADR-0020)
 struct ScanOptionsPayload { /* mirrors ScanOptions, all fields optional */ }
@@ -183,7 +210,19 @@ struct GroupPayload { size: u64, paths: Vec<String> }
 struct ActionResultPayload { plan: ActionPlanPayload, applied: Option<ApplyReportPayload> }
 enum FolderMatchPayload { Exact { folders: Vec<String>, fileCount: u64, bytes: u64 },
                           Contained { subset: String, superset: String, fileCount: u64, bytes: u64 } }
+struct FolderActionResultPayload { plan: FolderActionPlanPayload, applied: Option<FolderApplyReportPayload> }
 ```
+
+Frontend (`ui/app.js`): `folderMatchPairs(item)` mirrors the CLI's
+`folder_match_pairs` — a `Contained` match always yields the single
+`[{removed: subset, kept: superset}]` pair; an `Exact` cluster yields one
+pair per non-kept folder, the kept folder read from `state.keepChoice`
+(defaulting to the alphabetically-first folder, matching the CLI's
+`folders.iter().min()`) — the same `state.keepChoice` map FR-016 already
+uses for file groups, keyed the same way (`item.key`). `applyFolderAction`
+loops one `run_folder_action` call per pair sequentially, summing
+`bytesReclaimed`/`failed` across calls for the single post-action message
+(FR-018's one-call-per-pair contract).
 
 Frontend (`ui/`, plain HTML/CSS/JS, no bundler, no framework —
 `tauri.conf.json`'s `app.withGlobalTauri: true`; rebuilt in 0.2.0 against
@@ -222,6 +261,12 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   button is disabled while a scan is in flight as its only guard against
   this, matching the CLI's single-scan-per-process model in practice but
   not as a backend-enforced invariant.
+- A successful `run_action`/`run_folder_action` does not remove the
+  acted-on group/match from `state.groups`/`state.folderMatches` — the
+  Duplicate Review list reflects what the scan found, not live
+  post-action filesystem state, same precedent FR-008's `run_action`
+  already established (`sessionBytesReclaimed` and the per-item status
+  badges are what reflect the action's outcome instead).
 
 ## Errors, failure, recovery, and observability
 
@@ -237,6 +282,13 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   as a rejected `invoke` promise; the frontend displays it inline on that
   group's card rather than a global error banner, so one group's failure
   doesn't interrupt review of the others.
+- `run_folder_action` returning `Err` (a stale/unconfirmed pair, per
+  `plan_folder`'s fail-closed re-verification, ADR-0023) stops
+  `applyFolderAction`'s pair loop at that point rather than continuing to
+  the remaining pairs — any pairs already applied earlier in the loop
+  keep their effect (per-pair actions, once applied, aren't rolled back);
+  the partial result (bytes reclaimed so far, plus the error) is shown in
+  the same inline status message FR-011's confirmation flow already uses.
 
 ## Security, privacy, and compatibility
 
@@ -315,10 +367,22 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   default copy to keep and applying `delete` removed the correct file
   and kept the chosen one, confirmed against the filesystem directly. No
   automated DOM-level test exists for any of these (see Open questions).
+- FR-018 (`run_folder_action`) is exercised by
+  `commands::tests::run_folder_action_delete_preview_does_not_touch_the_filesystem`,
+  `commands::tests::run_folder_action_delete_apply_removes_the_folder`,
+  and `commands::tests::run_folder_action_rejects_a_stale_scan` — all
+  IPC-level, asserting on real filesystem state (a previously-shipped
+  disabled button, this closes the gap ADR-0023 deliberately left open),
+  plus `payload::tests::folder_action_plan_converts_with_camel_case_fields`
+  (payload shape) and the manual end-to-end pass below.
+- FR-019 (folder-match action button, keep-choice) is exercised entirely
+  by the manual end-to-end pass below — no IPC-level test drives the
+  frontend's pair-selection logic (`folderMatchPairs`), since that logic
+  runs in `app.js`, not behind an `invoke` boundary; see Open questions.
 
 ## Verification plan
 
-Unit/IPC tests in `rusty_fclone-gui` (20 tests: 13 in `payload::tests`, 7
+Unit/IPC tests in `rusty_fclone-gui` (24 tests: 14 in `payload::tests`, 10
 in `commands::tests`), run as part of `cargo test --workspace`. Manual
 end-to-end verification of the redesigned frontend (this environment has
 no display, so via Xvfb): a built binary was launched, screenshotted at
@@ -333,6 +397,22 @@ before/after) → Dashboard again (real updated stats: duplicate count,
 reclaim estimate, storage breakdown by category, a session-scoped Recent
 Scans row) → Rules screen → light-theme toggle. Every screen rendered
 correctly in both themes.
+
+FR-018/FR-019 (folder action) were additionally verified against two
+fresh real trees in a separate manual pass: (1) a `Contained` match
+(`small` fully duplicated inside `big`, which also had an extra file) —
+the review card showed the enabled "Delete Duplicate Folder" button, the
+confirmation dialog read "This will delete 1 file(s) across 1 folder,
+reclaiming 4 B. Continue?", and accepting it pruned `small` entirely from
+the real filesystem while `big`'s files (including the extra one) stayed
+untouched; (2) an `Exact` match (`alpha`/`beta`, byte-identical) —
+confirmed the default keep-choice picked `alpha` (alphabetically first,
+matching the CLI), clicked the "Marked for removal" badge on `beta` to
+switch the keep-choice, and confirmed the resulting delete removed
+`alpha` and kept `beta` — proving the keep-choice selection actually
+drives which folder is passed to `run_folder_action`, not just its
+displayed label. Both cases confirmed via `find`/`ls` before and after,
+not just the UI's own success message.
 
 No automated frontend/DOM test suite exists (no JS test runner is part of
 this project's dependency set) — frontend logic (`app.js`) is covered by
@@ -370,10 +450,15 @@ See `docs/traceability/TRACEABILITY.md`.
   sidebar figure) is accurate and live-updating since it's summed from
   real `run_action` results; only the Dashboard estimate has this
   staleness.
-- A real "Delete Duplicate Folder" action needs a product decision
-  before it can be wired up — either a new `rusty_fclone_core` action
-  (would need ADR-0021 revisited) or a defined mapping onto the existing
-  per-file action pipeline (ADR-0022).
+- The Duplicate Review screen's cards (`compare-card`/`review-action-bar`
+  and their contents) don't visually pick up the light theme the way
+  Dashboard and Scan Setup do — noticed during FR-018/FR-019's manual
+  verification pass on both the pre-existing file-level card and the new
+  folder-level one equally, so it predates this change and isn't specific
+  to folder actions; not investigated or fixed here since it's outside
+  this change's scope (no CSS was touched to add FR-018/FR-019). Worth a
+  dedicated look, since `GUI-REDESIGN`'s own manual pass (`PROJECT-
+  STATUS.md`) reported "every screen rendered correctly in both themes."
 - Reading `CLI-SCAN-HISTORY`'s persisted history, and exporting a real
   file (Dashboard's "Import history"/"Export (JSON)"), both need new
   backend work that doesn't exist yet — a GUI-side SQLite reader for the
@@ -382,6 +467,17 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.0 (2026-08-25): Enabled the Duplicate Review screen's "Delete
+  Duplicate Folder" button, shipped disabled in 0.2.0 pending ADR-0023's
+  decision. New `run_folder_action` command (FR-018) wraps
+  `rusty_fclone_core::folder_action::plan_folder`/`apply_folder`, mirroring
+  `run_action`'s preview/apply split. `Contained` matches act directly
+  (subset removed against superset); `Exact` clusters gained a per-folder
+  keep-choice badge (FR-019), mirroring FR-016's file-level mechanism and
+  defaulting to the alphabetically-first folder, matching the CLI's
+  `folder_match_pairs` convention (`CLI-UX-001` FR-013) so the two
+  surfaces make the same default choice on the same match. The prior
+  Non-goal ("a real folder-level delete action") is resolved and removed.
 - 0.2.0 (2026-08-25): Rebuilt the frontend against a design handoff
   (`Deduplication app UI design.zip`) — four real-data screens
   (Dashboard, Scan Setup, Duplicate Review, Rules & Automation) replacing

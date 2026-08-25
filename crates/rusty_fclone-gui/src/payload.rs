@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use rusty_fclone_core::action::{ActionKind, ActionPlan, ApplyReport, FileAction};
+use rusty_fclone_core::folder_action::{FolderActionPlan, FolderApplyReport};
 use rusty_fclone_core::{
     DuplicateGroup, FileError, FolderMatch, ScanOptions, ScanProgress, ScanSummary,
 };
@@ -292,6 +293,63 @@ pub struct ActionResultPayload {
     pub applied: Option<ApplyReportPayload>,
 }
 
+/// A [`FolderActionPlan`] (ADR-0023), shaped for `run_folder_action`'s
+/// response — the folder-level counterpart of [`ActionPlanPayload`].
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderActionPlanPayload {
+    pub kept: String,
+    pub removed: String,
+    pub file_count: u64,
+    pub bytes_reclaimed: u64,
+}
+
+impl From<&FolderActionPlan> for FolderActionPlanPayload {
+    fn from(plan: &FolderActionPlan) -> Self {
+        FolderActionPlanPayload {
+            kept: plan.kept.display().to_string(),
+            removed: plan.removed.display().to_string(),
+            file_count: plan.pairs.len() as u64,
+            bytes_reclaimed: plan.bytes_reclaimed,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderApplyReportPayload {
+    pub succeeded: Vec<String>,
+    pub failed: Vec<String>,
+    pub bytes_reclaimed: u64,
+    pub directory_removed: bool,
+}
+
+impl From<&FolderApplyReport> for FolderApplyReportPayload {
+    fn from(report: &FolderApplyReport) -> Self {
+        FolderApplyReportPayload {
+            succeeded: report
+                .succeeded
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            failed: report
+                .failed
+                .iter()
+                .map(|e| e.path.display().to_string())
+                .collect(),
+            bytes_reclaimed: report.bytes_reclaimed,
+            directory_removed: report.directory_removed,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderActionResultPayload {
+    pub plan: FolderActionPlanPayload,
+    pub applied: Option<FolderApplyReportPayload>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +512,23 @@ mod tests {
         assert_eq!(json["superset"], "/big");
         assert_eq!(json["fileCount"], 1);
         assert_eq!(json["bytes"], 7);
+    }
+
+    #[test]
+    fn folder_action_plan_converts_with_camel_case_fields() {
+        let plan = FolderActionPlan {
+            kind: ActionKind::Delete,
+            kept: PathBuf::from("/big"),
+            removed: PathBuf::from("/small"),
+            pairs: vec![],
+            bytes_reclaimed: 42,
+        };
+        let payload = FolderActionPlanPayload::from(&plan);
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["kept"], "/big");
+        assert_eq!(json["removed"], "/small");
+        assert_eq!(json["fileCount"], 0);
+        assert_eq!(json["bytesReclaimed"], 42);
     }
 
     #[test]
