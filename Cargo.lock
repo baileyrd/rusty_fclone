@@ -840,7 +840,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty_fclone-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "rusqlite",
@@ -854,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_fclone-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "criterion",
