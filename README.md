@@ -151,6 +151,20 @@ Command Prompt for VS"**, not a plain terminal (`cargo build` invoked
 outside that environment fails with `cl.exe`/`windows.h` errors, since
 `vcvars64.bat` hasn't run to set `INCLUDE`/`LIB`).
 
+If installing Visual Studio isn't an option (e.g. no admin rights), the
+GNU target works too: install a MinGW-w64 GCC (e.g. via
+[MSYS2](https://www.msys2.org/), which can be installed to a user-owned
+directory without admin), then:
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+rustup toolchain install stable-x86_64-pc-windows-gnu
+```
+
+That sidesteps the MSVC-only `vswhom-sys` dependency entirely — see
+[ADR-0020](docs/decisions/ADR-0020-gui-via-tauri.md)'s consequences for
+both paths.
+
 No installer/bundle is published yet (`.deb`/`.AppImage`/`.dmg`/`.msi`) —
 run it from source via `cargo run` above.
 

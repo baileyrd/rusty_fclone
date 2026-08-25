@@ -213,16 +213,21 @@
   real release (ADR-0020's consequences).
 - `GUI` was only verified on Linux (this environment's only available
   platform) — macOS rendering is unverified; Windows rendering is
-  unverified too (only `cargo build` has been confirmed on Windows so
-  far, via a real user's build attempt, not a running/rendered window).
-  No automated frontend/DOM test exists (`app.js` is covered by the
-  manual Xvfb pass only); `GUI-UX-001`'s open questions track this. Two
-  real gaps surfaced by that Windows build attempt, both since fixed:
-  the MSVC C++ toolchain prerequisite for `embed-resource` wasn't
-  documented (README, ADR-0020; `GUI-UX-001` 0.1.1), and a missing
-  `icons/icon.ico` blocked the build outright — not just release
-  bundling as originally assumed (`GUI-UX-001` 0.1.2). `.icns` (macOS)
-  is still missing for the same reason and could carry the same
-  "blocks debug builds too" risk, unverified.
+  unverified too (only `cargo build` has been attempted on Windows so
+  far, via a real user's build, not a running/rendered window). No
+  automated frontend/DOM test exists (`app.js` is covered by the manual
+  Xvfb pass only); `GUI-UX-001`'s open questions track this. Three real
+  gaps surfaced by that Windows build attempt, all since fixed: the MSVC
+  C++ toolchain prerequisite for `embed-resource` wasn't documented
+  (README, ADR-0020; `GUI-UX-001` 0.1.1); a missing `icons/icon.ico`
+  blocked the build outright, not just release bundling as originally
+  assumed (`GUI-UX-001` 0.1.2); and, after switching to the GNU toolchain
+  (no admin rights available to install MSVC), the crate's unused
+  `cdylib` output overflowed MinGW's classic linker's export-ordinal
+  field on Tauri's large dependency tree — trimmed `[lib] crate-type`
+  down to just what's needed (`GUI-UX-001` 0.1.3). `.icns` (macOS) is
+  still missing and could carry the same "blocks debug builds too" risk
+  as `icon.ico` did; genuinely unverified, since no macOS build attempt
+  has happened yet.
 - `GUI-RELEASE-BUNDLES` (packaged, installable GUI distribution) is not
   started — `release.yml` still only builds the CLI binary.

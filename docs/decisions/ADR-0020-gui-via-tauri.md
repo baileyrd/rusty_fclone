@@ -115,6 +115,23 @@ safety/streaming contracts.
   not a code change here). CI only validates the Linux path (its only
   runner); this environment has no Windows machine to validate the
   Windows path against, so it's documented, not CI-verified.
+- **A GNU-toolchain Windows build is a real, exercised alternative to
+  MSVC** — useful when installing Visual Studio Build Tools needs admin
+  rights the developer doesn't have. `rustup target add
+  x86_64-pc-windows-gnu` plus a MinGW-w64 GCC (via MSYS2, installed to a
+  user-writable directory, no admin needed) sidesteps `vswhom-sys`
+  entirely (it's `cfg`-gated to the MSVC target only). This path surfaced
+  its own real bug, since fixed: `rusty_fclone-gui`'s `[lib] crate-type`
+  carried Tauri's default `["staticlib", "cdylib", "rlib"]` (aimed at
+  mobile targets this project doesn't build) unnecessarily — the unused
+  `cdylib` output made MinGW's classic linker (`ld.exe`/BFD) fail
+  building the DLL's export table (`export ordinal too large: 109277`,
+  Tauri's dependency tree exceeding the 16-bit ordinal field the classic
+  linker uses) on a project this size. Trimmed to just the default
+  (`rlib`-equivalent) crate-type — `GUI-UX-001` 0.1.3. Neither GNU-target
+  build path (nor the MSVC one) is CI-verified; both are documented from
+  real reported build attempts, on request when they diverged from what
+  this Linux-only environment could validate.
 - `AGENTS.md`'s "no C toolchain" rule now carries two precedent
   exceptions (ADR-0017, this one) instead of one — both documented at the
   rule itself, not just in ADR history, so a reader doesn't take the rule

@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.1.2
+- Version: 0.1.3
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -232,6 +232,20 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.1.3 (2026-08-25): Trimmed `rusty_fclone-gui`'s `[lib]` `crate-type`
+  from `["staticlib", "cdylib", "rlib"]` (Tauri's default scaffold, aimed
+  at mobile targets this project doesn't build) down to the default
+  (`rlib`-equivalent) — `main.rs` only ever needs to link the lib as a
+  normal Rust dependency. Surfaced by a real Windows GNU-toolchain build:
+  the unused `cdylib` output made the linker (`ld.exe`/BFD, MinGW's
+  classic linker) build a giant standalone DLL with far more exported
+  symbols than its 16-bit ordinal field can address, failing with `export
+  ordinal too large: 109277`. The MSVC toolchain doesn't hit this (its
+  linker handles large export tables differently), which is presumably
+  why it went unnoticed until a real GNU-target Windows build happened.
+  No behavior change — `cargo run -p rusty_fclone-gui` still starts the
+  same app the same way; only the (unused) DLL/static-lib artifacts stop
+  being built.
 - 0.1.2 (2026-08-25): Added `icons/icon.ico` (a placeholder PNG-in-ICO,
   same treatment as the existing placeholder PNGs) and registered it in
   `tauri.conf.json`'s bundle icon list. A real Windows `cargo build`
