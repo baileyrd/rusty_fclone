@@ -46,8 +46,16 @@ impl From<ScanOptionsPayload> for ScanOptions {
                 .partial_hash_sample_size
                 .unwrap_or(defaults.partial_hash_sample_size),
             io_threads: p.io_threads,
-            cache_path: p.cache_path.map(PathBuf::from),
-            fclones_import_path: p.fclones_import_path.map(PathBuf::from),
+            cache_path: p
+                .cache_path
+                .as_deref()
+                .map(normalize_path_input)
+                .map(PathBuf::from),
+            fclones_import_path: p
+                .fclones_import_path
+                .as_deref()
+                .map(normalize_path_input)
+                .map(PathBuf::from),
         }
     }
 }
@@ -147,6 +155,28 @@ impl From<GroupPayload> for DuplicateGroup {
     }
 }
 
+/// Strips whitespace and one layer of surrounding matching quotes from a
+/// user-typed path field. Windows Explorer's "Copy as path" wraps the
+/// copied path in double quotes (so it pastes cleanly into `cmd.exe`,
+/// which needs quoting for paths containing spaces) — pasted verbatim
+/// into a plain text input, those quotes become literal characters in
+/// the string, and `Path::new("\"C:\\...\"").is_dir()` is false even
+/// though the path itself is real. Confirmed against a real Windows GUI
+/// session hitting exactly this.
+pub fn normalize_path_input(s: &str) -> String {
+    let trimmed = s.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed);
+    unquoted.trim().to_string()
+}
+
 pub fn parse_action_kind(kind: &str) -> Result<ActionKind, String> {
     match kind {
         "delete" => Ok(ActionKind::Delete),
@@ -217,6 +247,49 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn normalize_path_input_strips_windows_copy_as_path_quoting() {
+        assert_eq!(
+            normalize_path_input("\"C:\\Users\\me\\Downloads\""),
+            "C:\\Users\\me\\Downloads"
+        );
+    }
+
+    #[test]
+    fn normalize_path_input_strips_surrounding_single_quotes_too() {
+        assert_eq!(normalize_path_input("'/home/me/photos'"), "/home/me/photos");
+    }
+
+    #[test]
+    fn normalize_path_input_trims_whitespace_around_and_inside_the_quotes() {
+        assert_eq!(
+            normalize_path_input("  \"  /home/me/photos  \"  "),
+            "/home/me/photos"
+        );
+    }
+
+    #[test]
+    fn normalize_path_input_leaves_an_unquoted_path_unchanged() {
+        assert_eq!(normalize_path_input("/home/me/photos"), "/home/me/photos");
+    }
+
+    #[test]
+    fn normalize_path_input_does_not_strip_a_lone_leading_or_trailing_quote() {
+        // Mismatched quotes are left alone rather than guessed at -- a
+        // path that genuinely starts or ends with a quote character is
+        // vanishingly unlikely, but silently mangling one that does would
+        // be worse than leaving it (and failing the same "not found"
+        // error as before this fix, not a new failure mode).
+        assert_eq!(
+            normalize_path_input("\"/home/me/photos"),
+            "\"/home/me/photos"
+        );
+        assert_eq!(
+            normalize_path_input("/home/me/photos\""),
+            "/home/me/photos\""
+        );
+    }
+
+    #[test]
     fn scan_options_payload_applies_defaults_for_omitted_fields() {
         let payload = ScanOptionsPayload {
             follow_symlinks: true,
@@ -240,6 +313,30 @@ mod tests {
         assert_eq!(options.io_threads, Some(4));
         assert_eq!(options.cache_path, Some(PathBuf::from("cache.redb")));
         assert_eq!(options.fclones_import_path, None);
+    }
+
+    #[test]
+    fn scan_options_payload_normalizes_pasted_quoted_paths_too() {
+        let payload = ScanOptionsPayload {
+            follow_symlinks: false,
+            cross_filesystems: false,
+            verify_matches: false,
+            small_file_threshold: None,
+            partial_hash_sample_size: None,
+            io_threads: None,
+            cache_path: Some("\"C:\\cache\\hashes.redb\"".into()),
+            fclones_import_path: Some("\"C:\\Users\\me\\.cache\\fclones\"".into()),
+        };
+        let options: ScanOptions = payload.into();
+
+        assert_eq!(
+            options.cache_path,
+            Some(PathBuf::from("C:\\cache\\hashes.redb"))
+        );
+        assert_eq!(
+            options.fclones_import_path,
+            Some(PathBuf::from("C:\\Users\\me\\.cache\\fclones"))
+        );
     }
 
     #[test]
