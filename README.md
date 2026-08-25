@@ -4,6 +4,9 @@ A duplicate-file finder — a spiritual successor to
 [fclones](https://github.com/pkolaczk/fclones): a fast detection engine
 plus an action layer to delete, hardlink, or reflink what it finds.
 
+**CLI-only, by design** — there's no GUI or TUI, and none is planned; see
+[`CLI-UX-001`](docs/specifications/cli-ux/CLI-UX-001.md)'s Non-goals.
+
 ## Status
 
 Detection (staged hashing, benchmarked faster than fclones on most
