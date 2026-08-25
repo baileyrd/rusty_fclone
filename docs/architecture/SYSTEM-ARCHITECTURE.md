@@ -5,7 +5,7 @@
 `rusty_fclone` is a spiritual successor to [fclones](https://github.com/pkolaczk/fclones)
 (not "fclone" — a naming correction made early in this project's history):
 a duplicate-file finder with a detection engine and an action layer
-(delete/hardlink; reflink deferred, see ADR-0009) on top of it. This
+(delete/hardlink/reflink, see ADR-0009 and ADR-0014) on top of it. This
 document covers both.
 
 ## Product boundary
@@ -15,8 +15,8 @@ document covers both.
   jdupes.
 - **Platforms**: cross-platform from v1 (Linux, macOS, Windows) via a
   portable blocking-I/O model — see ADR-0002.
-- **Non-goals for v1**: reflink support, near-duplicate/fuzzy matching, a
-  GUI, network-filesystem-specific handling.
+- **Non-goals for v1**: near-duplicate/fuzzy matching, a GUI, network-
+  filesystem-specific handling.
 
 ## Detection pipeline
 
@@ -56,6 +56,13 @@ root path
      emit DuplicateGroup (streamed via ScanEvent, ADR-0004)
 ```
 
+Not shown above: when `--cache` (ADR-0016) and/or `--import-fclones-cache`
+(ADR-0019) are set, the full-hash box is preceded by a cache lookup keyed
+on `(path, size, mtime)` — a hit reuses the stored hash and skips the real
+read entirely; a miss falls through to hashing as drawn. Both are off by
+default and never change what gets reported, only whether a file gets
+re-read.
+
 ## Concurrency model (ADR-0002)
 
 Two separate thread pools, connected by `crossbeam-channel`:
@@ -72,8 +79,12 @@ Directory traversal parallelizes itself via jwalk's own rayon-backed walker
 
 ## Data flow / ownership
 
-- `traversal::traverse` produces `Vec<Candidate>` (path, size, file-id) —
-  the only stage that walks the filesystem tree structure itself.
+- `traversal::traverse` is the only stage that walks the filesystem tree
+  structure itself. It doesn't collect a `Vec<Candidate>` — each
+  `Candidate` (path, size, file-id) is handed to an `on_candidate` callback
+  as soon as jwalk produces it, so `pipeline::run_scan` can fold hardlink
+  collapse into that same streaming pass instead of looping over a
+  materialized list afterward (ADR-0012).
 - `pipeline::run_scan` owns all grouping (hardlink collapse → size-group →
   hash-subgroup) using plain `HashMap`s (ADR-0004; not yet optimized for
   memory at extreme scale).
@@ -116,7 +127,7 @@ DuplicateGroup ──action::plan(kind)──► ActionPlan (no filesystem mutat
 
 ## Where to look next
 
-- Decisions: `docs/decisions/ADR-0001` through `ADR-0009`.
+- Decisions: `docs/decisions/` (ADR-0001 onward).
 - Specs: `docs/specifications/detection/FCLONE-DETECTION-001.md`,
   `docs/specifications/action/FCLONE-ACTION-001.md`.
 - What's built vs. planned: `docs/roadmap/ROADMAP.md`,
