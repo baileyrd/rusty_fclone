@@ -8,7 +8,8 @@ use std::sync::Arc;
 use clap::{Parser, ValueEnum};
 use rusty_fclone_core::action::{self, ActionKind, ActionPlan, ApplyReport};
 use rusty_fclone_core::{
-    scan, DuplicateGroup, FileError, ScanEvent, ScanOptions, ScanProgress, ScanSummary,
+    find_folder_duplicates, scan, DuplicateGroup, FileError, FolderMatch, ScanEvent, ScanOptions,
+    ScanProgress, ScanSummary,
 };
 use serde::Serialize;
 
@@ -131,6 +132,15 @@ struct Cli {
     #[arg(short = 'y', long)]
     yes: bool,
 
+    /// After the scan completes, also look for folders whose entire
+    /// recursive file content duplicates -- or is a subset of -- another
+    /// folder's (ADR-0021). Requires collecting every duplicate group in
+    /// memory (normally streamed and discarded once printed) and a second,
+    /// stat-only traversal of the root -- off by default since it's extra
+    /// work most scans don't need.
+    #[arg(long)]
+    find_duplicate_folders: bool,
+
     /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Text)]
     format: Format,
@@ -185,9 +195,12 @@ fn run(cli: Cli) -> ExitCode {
     }
 
     // Captured before `cli.root` moves into `scan()` below -- needed for
-    // the history record, if `--history` is set (ADR-0017).
+    // the history record, if `--history` is set (ADR-0017), and for the
+    // folder-duplicate pass, if `--find-duplicate-folders` is set
+    // (ADR-0021).
     let root_display = cli.root.display().to_string();
     let started_at = unix_timestamp_now();
+    let folder_dedup_root = cli.find_duplicate_folders.then(|| cli.root.clone());
 
     let options = ScanOptions {
         follow_symlinks: cli.follow_symlinks,
@@ -199,6 +212,7 @@ fn run(cli: Cli) -> ExitCode {
         cache_path: cli.cache,
         fclones_import_path: cli.import_fclones_cache,
     };
+    let folder_dedup_options = folder_dedup_root.is_some().then(|| options.clone());
 
     let handle = match scan(cli.root, options) {
         Ok(handle) => handle,
@@ -213,6 +227,7 @@ fn run(cli: Cli) -> ExitCode {
     let mut total_files_acted_on = 0u64;
     let mut progress_line = ProgressLine::new(cli.format);
     let mut final_summary = ScanSummary::default();
+    let mut collected_groups: Vec<DuplicateGroup> = Vec::new();
 
     for event in handle {
         match event {
@@ -226,6 +241,9 @@ fn run(cli: Cli) -> ExitCode {
                     &mut total_bytes_reclaimed,
                     &mut total_files_acted_on,
                 );
+                if folder_dedup_root.is_some() {
+                    collected_groups.push(group);
+                }
             }
             ScanEvent::Error(err) => {
                 progress_line.finish();
@@ -251,6 +269,16 @@ fn run(cli: Cli) -> ExitCode {
             total_bytes_reclaimed,
             total_files_acted_on,
         );
+    }
+
+    if let (Some(root), Some(options)) = (folder_dedup_root, folder_dedup_options) {
+        match find_folder_duplicates(&root, &collected_groups, &options) {
+            Ok(folder_matches) => report_folder_matches(cli.format, &folder_matches),
+            Err(err) => {
+                had_errors = true;
+                eprintln!("error: {err}");
+            }
+        }
     }
 
     if let Some(history_path) = &cli.history {
@@ -534,6 +562,65 @@ fn print_group_json(
     });
 }
 
+fn report_folder_matches(format: Format, matches: &[FolderMatch]) {
+    for m in matches {
+        match format {
+            Format::Text => print_folder_match_text(m),
+            Format::Json => print_folder_match_json(m),
+        }
+    }
+}
+
+fn print_folder_match_text(m: &FolderMatch) {
+    match m {
+        FolderMatch::Exact {
+            folders,
+            file_count,
+            bytes,
+        } => {
+            println!("--- duplicate folders: {bytes} bytes, {file_count} files ---");
+            for f in folders {
+                println!("{}", f.display());
+            }
+        }
+        FolderMatch::Contained {
+            subset,
+            superset,
+            file_count,
+            bytes,
+        } => {
+            println!("--- folder contained in another: {bytes} bytes, {file_count} files ---");
+            println!("  subset:   {}", subset.display());
+            println!("  superset: {}", superset.display());
+        }
+    }
+}
+
+fn print_folder_match_json(m: &FolderMatch) {
+    match m {
+        FolderMatch::Exact {
+            folders,
+            file_count,
+            bytes,
+        } => print_json(&JsonEvent::FolderExact {
+            folders: paths_to_strings(folders),
+            file_count: *file_count,
+            bytes: *bytes,
+        }),
+        FolderMatch::Contained {
+            subset,
+            superset,
+            file_count,
+            bytes,
+        } => print_json(&JsonEvent::FolderContained {
+            subset: subset.display().to_string(),
+            superset: superset.display().to_string(),
+            file_count: *file_count,
+            bytes: *bytes,
+        }),
+    }
+}
+
 fn paths_to_strings(paths: &[PathBuf]) -> Vec<String> {
     paths.iter().map(|p| p.display().to_string()).collect()
 }
@@ -578,6 +665,17 @@ enum JsonEvent {
         bytes_reclaimed: u64,
         files: u64,
     },
+    FolderExact {
+        folders: Vec<String>,
+        file_count: u64,
+        bytes: u64,
+    },
+    FolderContained {
+        subset: String,
+        superset: String,
+        file_count: u64,
+        bytes: u64,
+    },
 }
 
 #[derive(Serialize)]
@@ -619,6 +717,7 @@ mod tests {
             action: Action::Report,
             apply: false,
             yes: false,
+            find_duplicate_folders: false,
             format: Format::Text,
             verbose: 0,
         }
@@ -770,6 +869,47 @@ mod tests {
         fs::write(&b, b"dup").unwrap();
 
         let mut cli = base_cli(dir.path().to_path_buf());
+        cli.format = Format::Json;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+    }
+
+    /// ADR-0021, FR-010: `--find-duplicate-folders` runs the folder-level
+    /// pass after the scan and doesn't error on a tree containing an exact
+    /// folder duplicate.
+    #[test]
+    fn find_duplicate_folders_flag_succeeds_on_an_exact_folder_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        fs::write(a.join("1.txt"), b"dup").unwrap();
+        fs::write(b.join("1.txt"), b"dup").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.find_duplicate_folders = true;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+    }
+
+    /// Same as above, but for `--format json` -- exercises the
+    /// `FolderExact`/`FolderContained` JSON event variants.
+    #[test]
+    fn find_duplicate_folders_flag_succeeds_with_json_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("extra.txt"), b"only in big").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.find_duplicate_folders = true;
         cli.format = Format::Json;
         let exit = run(cli);
 
