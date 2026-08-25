@@ -1,11 +1,14 @@
 # Project Status
-- Last verified main commit: `3667618` — `find_duplicate_folders` Tauri
-  command (PR #31, merged): exposes `DETECTION-FOLDER-DEDUP`'s engine
-  (ADR-0021) to the GUI backend, first step of implementing the
-  `Deduplication app UI design.zip` design handoff. This branch adds the
-  second step, `GUI-REDESIGN`: the actual frontend rebuild — four
-  real-data screens (Dashboard, Scan Setup, Duplicate Review, Rules &
-  Automation), replacing the single-page root-path-and-options form.
+- Last verified main commit: `35c79c4` — `GUI-REDESIGN` (PR #32, merged):
+  the four-screen frontend rebuild against the `Deduplication app UI
+  design.zip` handoff, shipped with the "Delete Duplicate Folder" button
+  disabled (no backend existed for it — ADR-0021 deliberately left
+  folder-level *action* out of scope). This branch adds `FOLDER-ACTION`'s
+  core capability: a real `plan_folder`/`apply_folder` in
+  `rusty_fclone_core`, closing that gap at the engine level — asked for
+  directly ("Enable the folder-level delete action for real"). CLI/GUI
+  wiring (turning the disabled button into a working one) is a follow-up,
+  not bundled into this change.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -212,6 +215,28 @@
   and applying delete removed the correct file (confirmed via `ls`
   before/after), and the Dashboard reflected real post-scan numbers.
 
+- `FOLDER-ACTION` (core capability): new `rusty_fclone_core::folder_action`
+  module — `plan_folder`/`apply_folder`, the same plan/apply split as the
+  existing per-file `action` module, acting on every file in one folder
+  ("removed") against its confirmed partner in another ("kept") for a
+  `FolderMatch`. Deliberately reuses `action::apply` per file pair
+  (a single-action `ActionPlan` per pair) rather than any new
+  delete/hardlink/reflink code. `plan_folder` re-verifies every file's
+  partner and current on-disk size against the supplied
+  `DuplicateGroup`s before producing a plan — fails closed (no plan at
+  all, not a partial one) if anything doesn't match, guarding against a
+  stale scan or a caller-passed folder pair that doesn't actually hold
+  the claimed relationship. `Delete` prunes the emptied folder tree only
+  after every file succeeds; `Hardlink`/`Reflink` never touch the
+  directory. ADR-0023, `FCLONE-ACTION-001` 0.3.0 (FR-009 through
+  FR-011). Implemented, tested (112/112 workspace tests — 7 new
+  `folder_action` unit tests: pairing, missing-partner rejection,
+  stale-size rejection, nonexistent-folder rejection, delete-with-prune,
+  hardlink-without-prune, per-file-failure-without-prune). Core only —
+  no CLI/GUI caller yet, a deliberate follow-up (same "capability lands
+  before the UI that surfaces it" pattern as `DETECTION-FOLDER-DEDUP` →
+  its CLI flag → `GUI-REDESIGN`).
+
 ## In progress
 - None.
 
@@ -234,10 +259,12 @@
   a plain text input) — deferred pending a look at Tauri's `dialog`
   plugin's own permission/capability shape (`GUI-UX-001`'s open
   questions).
-- A real "Delete Duplicate Folder" action — needs a product decision
-  (new core action vs. mapping onto the existing per-file pipeline)
-  before it can be wired up; the button ships disabled in `GUI-REDESIGN`
-  (ADR-0022).
+- `FOLDER-ACTION`'s CLI/GUI wiring: a `--find-duplicate-folders`
+  action-layer CLI flag, and enabling the GUI's "Delete Duplicate
+  Folder" button (with the same Delete/Hardlink/Reflink choice and
+  confirmation-dialog safety gate the file-level Review screen already
+  has) — the core capability (`plan_folder`/`apply_folder`) exists and
+  is tested; only the consumers are left.
 - A GUI-side reader for `CLI-SCAN-HISTORY`'s persisted SQLite history,
   and a real file-export path for the Dashboard's "Import history"/
   "Export (JSON)" buttons — both need new backend work; they ship
@@ -246,7 +273,7 @@
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-25)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-25)
-- `cargo test --workspace`: pass, 105/105 (2026-08-25)
+- `cargo test --workspace`: pass, 112/112 (2026-08-25)
 - `cargo bench --workspace --no-run`: pass (2026-08-25)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-25)
 - Manual CLI smoke tests across the project: verbosity flags, `RUST_LOG`
@@ -277,6 +304,17 @@
   not been used against a real, valuable directory tree outside this
   session's smoke tests — treat it with appropriate caution before
   pointing it at anything you care about.
+- `FOLDER-ACTION`'s blast radius is strictly larger than a single-group
+  action (every file under a folder, plus the directory itself on a
+  successful delete) — untested against a real, valuable directory tree
+  for the same reason as above, and with no CLI/GUI caller yet to have
+  exercised it end-to-end at all (core-level tests only). Its
+  directory-prune race (something else creates a file under `removed`
+  between the last successful per-file delete and the
+  `fs::remove_dir_all` prune) is a defined, handled outcome
+  (`directory_removed: false`) but isn't covered by a test — narrow
+  enough that reproducing it deterministically would need real
+  concurrency (ADR-0023's consequences).
 - `DETECTION-DEVICE-AWARE-IO-SIZING`'s rotational-disk detection logic is
   unverified against a real spinning disk (this environment's storage
   resolves to the safe `cores` fallback).

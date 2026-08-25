@@ -13,6 +13,7 @@ mod cache;
 mod device;
 mod error;
 mod fclones_import;
+pub mod folder_action;
 mod folder_dedup;
 mod hash;
 mod io_pool;
@@ -20,7 +21,7 @@ mod model;
 mod pipeline;
 mod traversal;
 
-pub use error::{FileError, ScanError};
+pub use error::{FileError, FolderActionError, ScanError};
 pub use folder_dedup::{find_folder_duplicates, FolderMatch};
 pub use model::{DuplicateGroup, ScanEvent, ScanOptions, ScanProgress, ScanSummary};
 pub use pipeline::{scan, ScanHandle};

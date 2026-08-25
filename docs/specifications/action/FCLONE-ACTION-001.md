@@ -1,5 +1,5 @@
 # FCLONE-ACTION-001 — Duplicate Action Layer
-- Version: 0.2.0
+- Version: 0.3.0
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`
@@ -20,6 +20,11 @@ nature.
   (`--action` + `--apply`) CLI requirement instead (ADR-0009).
 - Moving files (as opposed to deleting or hardlinking) — not requested,
   not implemented.
+- Choosing which folder to keep in a `FolderMatch::Exact` cluster of 3+
+  mutually-identical folders beyond the alphabetically-first convention
+  `plan`/`FR-001` already establish for files — `folder_action::plan_folder`
+  acts on exactly one `removed`/`kept` folder pair; a caller decides which
+  folder to keep and calls it once per remaining folder (ADR-0023).
 
 ## Context and terminology
 
@@ -32,6 +37,11 @@ nature.
   do (`action::plan`), safe to compute and print without touching the
   filesystem.
 - **Apply**: actually executing a plan (`action::apply`).
+- **Folder action**: the same plan/apply split, one level up — acting on
+  every file inside one folder ("removed") against its confirmed partner
+  file in another ("kept"), for a `FolderMatch` (`FCLONE-DETECTION-001`
+  FR-010) rather than one `DuplicateGroup` (`folder_action::plan_folder`/
+  `apply_folder`, ADR-0023).
 
 ## Requirements
 
@@ -65,6 +75,28 @@ nature.
   omitted, equivalently `--action report`) SHALL be identical to the
   detection-only CLI behavior that existed before this capability was
   added.
+- `FCLONE-ACTION-001-FR-009`: Given a `removed` folder, a `kept` folder,
+  the `DuplicateGroup`s a scan produced, and an `ActionKind`,
+  `folder_action::plan_folder` SHALL re-derive, for every file currently
+  under `removed`, whether it has a confirmed partner at the matching
+  relative path under `kept` — present in the same `DuplicateGroup` and
+  matching that group's recorded size. A nonexistent/non-directory
+  `removed`, or any file lacking a confirmed live partner, SHALL cause
+  `plan_folder` to return an error instead of a plan — never a plan
+  silently missing that file.
+- `FCLONE-ACTION-001-FR-010`: `folder_action::apply_folder` SHALL execute
+  `kind` for every planned file pair by constructing a single-action
+  `action::ActionPlan` per pair and running it through the existing
+  `action::apply` (FR-001 through FR-005, FR-008) — no separate
+  delete/hardlink/reflink implementation. A per-file failure SHALL be
+  recorded in `FolderApplyReport::failed` and SHALL NOT prevent the
+  remaining planned pairs from being attempted.
+- `FCLONE-ACTION-001-FR-011`: After an `ActionKind::Delete` folder action
+  completes with zero per-file failures, `apply_folder` SHALL prune the
+  now file-less `removed` directory tree and record the outcome in
+  `FolderApplyReport::directory_removed`. `ActionKind::Hardlink`/
+  `Reflink` SHALL NOT attempt any directory removal — every file stays in
+  place under `removed`.
 
 ## Architecture and interfaces
 
@@ -85,6 +117,21 @@ pub fn apply(plan: &ActionPlan) -> ApplyReport;
 `Reflink` uses the `reflink-copy` crate's strict `reflink` function (not
 `reflink_or_copy`) — see ADR-0014.
 
+Folder-level public API (`crates/rusty_fclone-core/src/folder_action.rs`,
+ADR-0023), reusing `action::apply` internally rather than duplicating it:
+
+```rust
+pub struct FolderFilePair { pub remove: PathBuf, pub keep: PathBuf, pub size: u64 }
+pub struct FolderActionPlan { pub kind: ActionKind, pub kept: PathBuf, pub removed: PathBuf,
+                               pub pairs: Vec<FolderFilePair>, pub bytes_reclaimed: u64 }
+pub struct FolderApplyReport { pub succeeded: Vec<PathBuf>, pub failed: Vec<FileError>,
+                                pub bytes_reclaimed: u64, pub directory_removed: bool }
+
+pub fn plan_folder(removed: &Path, kept: &Path, groups: &[DuplicateGroup],
+                    options: &ScanOptions, kind: ActionKind) -> Result<FolderActionPlan, FolderActionError>;
+pub fn apply_folder(plan: &FolderActionPlan) -> FolderApplyReport;
+```
+
 CLI (`rusty_fclone-cli`): `--action <report|delete|hardlink|reflink>`
 (default `report`) and `--apply` (bool). The CLI's `Action` enum is a thin
 wrapper adding `Report` — kept CLI-side rather than in core, since core
@@ -98,6 +145,11 @@ stays CLI-agnostic (ADR-0005).
   distinct from `ActionPlan::bytes_reclaimed`, which is what a plan would
   reclaim if every action succeeded. A caller comparing the two after
   `apply` can tell whether anything failed without inspecting `failed`.
+- `FolderActionPlan::pairs` uses the *current* on-disk size for each file
+  (re-derived by `plan_folder`'s own traversal), not whatever size the
+  originating `DuplicateGroup` recorded — the two are required to match
+  as part of confirming the pairing (FR-009), but `bytes_reclaimed` and
+  each pair's `size` reflect what's on disk right now.
 
 ## Errors, failure, recovery, and observability
 
@@ -119,6 +171,12 @@ stays CLI-agnostic (ADR-0005).
   enabled, APFS, some ZFS setups); anywhere else it fails per-file (FR-005,
   FR-008) rather than silently degrading to a full copy — a copy wouldn't
   free any space, defeating the point of choosing reflink over hardlink.
+- A folder action is a strictly larger blast radius than a single-group
+  action — every file under `removed` in one call, plus (on a successful
+  `Delete`) the directory tree itself. `plan_folder`'s fail-closed
+  re-verification (FR-009) is the primary safeguard against acting on a
+  folder whose contents changed, or were never actually confirmed
+  duplicates, since whatever computed the `FolderMatch` this plan is for.
 
 ## Acceptance criteria
 
@@ -133,6 +191,16 @@ stays CLI-agnostic (ADR-0005).
   per-file-failure path (FR-008): a reported warning, zero bytes
   reclaimed, both files left with correct, unmodified content, no stray
   temp file.
+- FR-009 through FR-011 (folder actions) are exercised by
+  `folder_action::tests::*` (7 tests, `crates/rusty_fclone-core`):
+  pairing every file with its confirmed kept-side partner; rejecting a
+  file with no confirmed partner in `groups`; rejecting a file whose
+  on-disk size no longer matches its recorded group size (a stale-scan
+  guard); rejecting a nonexistent `removed` folder; `Delete` removing
+  every file and pruning the now-empty folder; `Hardlink` replacing
+  files in place without touching the folder; a per-file failure
+  (the file vanishes between plan and apply) reported without pruning
+  the directory. No CLI/GUI wiring exists yet — see Open questions.
 
 ## Verification plan
 
@@ -155,6 +223,12 @@ No benchmark exists for this capability yet — not requested, and its cost
 is dominated by I/O syscalls already covered by the detection engine's
 benchmarks.
 
+Unit tests in `folder_action::tests` (core crate) cover `plan_folder`'s
+pairing and fail-closed rejections (missing partner, stale size,
+nonexistent `removed`) and `apply_folder`'s three outcomes (successful
+delete with directory pruning, successful hardlink without pruning, a
+per-file failure without pruning).
+
 ## Traceability
 
 See `docs/traceability/TRACEABILITY.md`.
@@ -168,9 +242,33 @@ See `docs/traceability/TRACEABILITY.md`.
 - Whether a confirmation prompt should exist in addition to `--apply` is
   left to `CLI-UX` on the roadmap — not required for this unit's safety
   model to be sound.
+- `folder_action::plan_folder`/`apply_folder` have no CLI or GUI caller
+  yet — this version adds the core capability, tested on its own;
+  `--find-duplicate-folders`'s action-layer counterpart and the GUI's
+  disabled "Delete Duplicate Folder" button are a follow-up (ADR-0023).
+- No test exercises `apply_folder`'s directory-prune race (something
+  else creates a file under `removed` between the last successful delete
+  and `fs::remove_dir_all`) — narrow enough that reproducing it
+  deterministically would need real concurrency, not attempted here; the
+  `directory_removed: false` outcome it would produce is still a defined,
+  handled result, just not exercised by a test.
 
 ## Change history
 
+- 0.3.0 (2026-08-25): Added folder-level actions (FR-009 through FR-011,
+  `folder_action` module) — `plan_folder`/`apply_folder` act on every
+  file in one folder against its confirmed partner in another, reusing
+  `action::apply` per file pair rather than a new delete/hardlink/reflink
+  implementation. Fails closed: `plan_folder` re-verifies every file's
+  partner and size against the supplied `DuplicateGroup`s before
+  producing a plan, refusing rather than risking a stale or mismatched
+  pairing. `Delete` prunes the emptied folder on full success; `Hardlink`/
+  `Reflink` never do. No existing `action` type or function changed.
+  ADR-0023 — asked for directly ("Enable the folder-level delete action
+  for real") after `FCLONE-DETECTION-001`'s folder-level *detection*
+  (ADR-0021) and the GUI redesign (ADR-0022) shipped with the
+  corresponding button disabled pending this decision. CLI/GUI wiring is
+  a follow-up (see Open questions).
 - 0.2.0 (2026-08-24): Added `ActionKind::Reflink` (FR-008,
   `ACTION-REFLINK`) — copy-on-write clone as a third action kind, using
   the `reflink-copy` crate's strict `reflink` (not `reflink_or_copy`) so
