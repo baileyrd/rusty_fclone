@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.1.5
+- Version: 0.2.0
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -31,8 +31,24 @@ semantics, which are unchanged.
 - Persisting GUI-side state (window size/position, last-used scan root or
   options) across launches.
 - Any GUI-specific safety relaxation of the action layer's dry-run-by-
-  default model (ADR-0009) — `apply` defaults to unchecked in the
-  frontend, mirroring the CLI's `--apply`-required gate exactly.
+  default model (ADR-0009) — apply is never implicit; see FR-011 for the
+  current (confirmation-dialog) mechanism.
+- Scanning more than one root directory in a single scan — matches
+  `rusty_fclone_core::scan`'s one-root contract exactly (ADR-0022).
+- Near-duplicate/fuzzy matching ("Similar content" in the UI) — an
+  explicit `FCLONE-DETECTION-001` non-goal; the control is shown but
+  disabled, not silently ignored (ADR-0022).
+- A real folder-level delete action — ADR-0021 deliberately has none;
+  the Duplicate Review screen's folder-match action button is disabled
+  with an explanation rather than wired to a guessed behavior
+  (ADR-0022).
+- Rules & Automation actually applying to a scan — the screen is a
+  local, unpersisted preview only; no rule engine exists in
+  `rusty_fclone_core` (ADR-0022).
+- Reproducing the design handoff's fake OS window chrome (rounded
+  corners, drop shadow, macOS traffic-light titlebar) — the real Tauri
+  window already provides real chrome; that wrapper existed only to
+  display the mockup on an infinite design canvas (ADR-0022).
 
 ## Context and terminology
 
@@ -91,9 +107,15 @@ semantics, which are unchanged.
 - `GUI-UX-001-FR-010`: `run_action` SHALL reject an action kind outside
   `{"delete","hardlink","reflink"}` with an `Err`, without calling `plan`
   or `apply`.
-- `GUI-UX-001-FR-011`: The frontend's apply control SHALL default to
-  unchecked (preview) on every newly rendered duplicate group — never
-  pre-checked, and never remembered from a previous group's choice.
+- `GUI-UX-001-FR-011`: The frontend SHALL require an explicit, separate
+  confirmation step — naming the action, the number of files affected,
+  and the bytes to be reclaimed — before invoking `run_action` with
+  `apply: true` for a file duplicate group; declining that confirmation
+  SHALL NOT call `run_action` at all. (Revised in 0.2.0: the original
+  mechanism was an apply checkbox defaulting to unchecked on every
+  newly rendered group; the redesigned single-button Review screen has
+  no such checkbox, so a confirmation dialog is the mechanism instead.
+  The underlying requirement — apply is never implicit — is unchanged.)
 - `GUI-UX-001-FR-012`: `start_scan`'s root path and `ScanOptionsPayload`'s
   `cachePath`/`fclonesImportPath` SHALL each be trimmed of surrounding
   whitespace and, if present, one layer of surrounding matching quote
@@ -115,6 +137,31 @@ semantics, which are unchanged.
   FR-012. A nonexistent/non-directory root SHALL be rejected with an
   `Err`, matching `find_folder_duplicates`'s own `ScanError::InvalidRoot`
   contract.
+- `GUI-UX-001-FR-014`: The frontend SHALL render four screens (Dashboard,
+  Scan Setup, Duplicate Review, Rules & Automation) selected by
+  client-side navigation state, not separate windows or page loads.
+  Dashboard, Scan Setup, and Duplicate Review SHALL be driven entirely
+  by real data from `start_scan`/`run_action`/`find_duplicate_folders` —
+  no mock/sample data. Rules & Automation SHALL be a local-only preview
+  (toggle state held in frontend memory, reset on relaunch) with no
+  backend persistence or scan-time effect, and SHALL say so in its own
+  UI text (ADR-0022).
+- `GUI-UX-001-FR-015`: Once every `scan-event` for a scan has been
+  received (a `Finished` event) and at least one `DuplicateGroup` was
+  found, the frontend SHALL automatically invoke `find_duplicate_folders`
+  with that scan's root, the groups it collected, and the scan options,
+  and SHALL merge the results into the Duplicate Review list without a
+  separate user-initiated trigger.
+- `GUI-UX-001-FR-016`: The Duplicate Review screen SHALL let the user
+  choose which path in a file duplicate group is treated as kept; the
+  frontend SHALL implement this by reordering that group's `paths` so
+  the chosen path is first before calling `run_action` (matching
+  `action::plan`'s existing "first path is kept" contract), without any
+  `rusty_fclone_core` API change.
+- `GUI-UX-001-FR-017`: Scan Setup's file-type filter controls SHALL only
+  affect which already-found duplicate groups the Duplicate Review
+  screen displays (client-side, by file extension) and SHALL NOT be sent
+  to `start_scan` or otherwise change what the engine scans or reports.
 
 ## Architecture and interfaces
 
@@ -138,20 +185,38 @@ enum FolderMatchPayload { Exact { folders: Vec<String>, fileCount: u64, bytes: u
                           Contained { subset: String, superset: String, fileCount: u64, bytes: u64 } }
 ```
 
-Frontend (`ui/`, plain HTML/CSS/JS, no bundler —
-`tauri.conf.json`'s `app.withGlobalTauri: true`): `index.html` (root-path
-field, options `fieldset`, status line, group list), `app.js` (`invoke`/
-`listen` calls, group rendering, action controls), `style.css`.
+Frontend (`ui/`, plain HTML/CSS/JS, no bundler, no framework —
+`tauri.conf.json`'s `app.withGlobalTauri: true`; rebuilt in 0.2.0 against
+the design handoff, ADR-0022): `index.html` (a single `#app` mount
+point), `icons.js` (a fixed set of inline-SVG icon builders, `icon(name,
+size)`), `app.js` (all state, rendering, and `invoke`/`listen` wiring —
+a single in-memory `state` object, a `render()` that rebuilds the DOM
+from it on every state change except free-text input, and one render
+function per screen), `style.css` (CSS custom properties for the
+dark/light design tokens, one component class per UI primitive). Every
+`app.js` render helper builds elements via `document.createElement`/
+`textContent` for anything derived from scan data (paths, error
+messages) — never `innerHTML` string interpolation — so a maliciously
+named file can't inject markup into the page; `icons.js`'s fixed,
+hardcoded SVG strings are the only `innerHTML` use in the frontend.
 
 ## Data/state and invariants
 
 - Same as `CLI-UX-001`'s: `ScanProgress`'s counters are cumulative, not
   deltas; `Finished` is always the last `scan-event` for a scan (FR-006).
-- The frontend holds duplicate-group data purely in the DOM/JS memory
-  (each group's `size`/`paths` round-trip back to `run_action` from what
-  was rendered) — no separate state store, no re-fetch from the backend
-  between receiving a `duplicate_group` event and calling `run_action` on
-  it.
+- The frontend holds all state (scan options, collected duplicate groups,
+  folder matches, view/navigation, theme, session-scoped scan history) in
+  one in-memory `state` object (`app.js`) — no separate store, no
+  re-fetch from the backend between receiving a `duplicate_group` event
+  and calling `run_action` on it. None of it persists across a relaunch
+  (ADR-0022) — including the session-scoped Dashboard/Recent-Scans data,
+  which is real but not written anywhere.
+- Free-text inputs (scan root, cache path, fclones-import path) mutate
+  `state` directly on every keystroke without triggering the normal
+  full-DOM `render()` — a full re-render on every keystroke would drop
+  input focus, since `render()` replaces the DOM subtree wholesale
+  rather than patching it. Every other state change (toggles, chip
+  selection, navigation) does trigger a full `render()`.
 - Multiple concurrent scans are not prevented at the command level
   (`start_scan` has no "already running" guard); the frontend's own Scan
   button is disabled while a scan is in flight as its only guard against
@@ -207,13 +272,14 @@ field, options `fieldset`, status line, group list), `app.js` (`invoke`/
   and `commands::tests::run_action_rejects_an_unknown_kind` — all IPC-level
   via `tauri::test::get_ipc_response`, asserting on real filesystem state
   before/after, not just the response shape. The apply path was
-  additionally confirmed manually: a real file was deleted through the
-  rendered UI's Apply checkbox + Run button, verified against the
-  filesystem directly.
-- FR-011 (apply defaults unchecked) is exercised by the manual end-to-end
-  pass (the Apply checkbox was unchecked by default in the rendered DOM
-  before being explicitly checked for the apply test above); no automated
-  DOM-level test exists (see Open questions).
+  additionally confirmed manually against the redesigned frontend: a
+  real file was deleted through the rendered UI's confirmation dialog +
+  Apply button, verified against the filesystem directly (both the kept
+  and removed path matched the UI's displayed choice).
+- FR-011 (apply confirmation gate) is exercised by the manual end-to-end
+  pass: the confirmation dialog appeared with the correct action/file
+  count/byte text before any mutation, and only proceeded after
+  accepting it; no automated DOM-level test exists (see Open questions).
 - FR-012 (quote/whitespace normalization) is exercised by
   `payload::tests::normalize_path_input_*` (5 tests: double quotes,
   single quotes, whitespace inside and outside the quotes, an unquoted
@@ -234,19 +300,39 @@ field, options `fieldset`, status line, group list), `app.js` (`invoke`/
   `commands::tests::find_duplicate_folders_rejects_a_nonexistent_root`,
   plus `payload::tests::folder_match_exact_serializes_with_a_snake_case_type_tag_and_camel_case_fields`/
   `folder_match_contained_serializes_with_subset_and_superset_paths`
-  (payload shape). No frontend wiring exists yet — this backend-only
-  change lands ahead of the redesign that will call it (see Open
-  questions).
+  (payload shape), plus the manual end-to-end pass below confirming the
+  frontend calls it automatically after a scan and renders both `Exact`
+  and `Contained` results correctly, including the shallowest-first
+  redundancy suppression (ADR-0021) showing up correctly end-to-end
+  through the real IPC round trip.
+- FR-014 through FR-017 (redesigned frontend: four real-data screens,
+  automatic folder-dedup pass, keep-choice via path reordering, display-
+  only file-type filter) are exercised by the manual end-to-end pass
+  below: a real scan against a tempdir containing both file-level
+  duplicates and a folder-level `Contained` match (a subdirectory fully
+  duplicated inside a larger one with an extra file) rendered correctly
+  on Dashboard, Scan Setup, and Duplicate Review; choosing the non-
+  default copy to keep and applying `delete` removed the correct file
+  and kept the chosen one, confirmed against the filesystem directly. No
+  automated DOM-level test exists for any of these (see Open questions).
 
 ## Verification plan
 
 Unit/IPC tests in `rusty_fclone-gui` (20 tests: 13 in `payload::tests`, 7
 in `commands::tests`), run as part of `cargo test --workspace`. Manual
-end-to-end verification (this environment has no display, so via Xvfb): a
-built binary was launched, screenshotted at each step, and driven with
-`xdotool` through a full scan → group render → preview → apply cycle
-against a real tempdir with a real duplicate pair, with filesystem state
-checked directly (`ls`) before and after the apply step.
+end-to-end verification of the redesigned frontend (this environment has
+no display, so via Xvfb): a built binary was launched, screenshotted at
+each step, and driven with `xdotool` through Dashboard (empty state) →
+Scan Setup (typing a real root path, confirmed the value survives
+keystroke-by-keystroke without losing focus) → Start Scan → Duplicate
+Review (a real 4-item list: 3 file groups plus 1 folder `Contained`
+match, correctly deduplicated per ADR-0021's redundancy suppression) →
+choosing the non-default copy to keep → Apply Delete (confirmation
+dialog text checked, accepted, real file deletion confirmed via `ls`
+before/after) → Dashboard again (real updated stats: duplicate count,
+reclaim estimate, storage breakdown by category, a session-scoped Recent
+Scans row) → Rules screen → light-theme toggle. Every screen rendered
+correctly in both themes.
 
 No automated frontend/DOM test suite exists (no JS test runner is part of
 this project's dependency set) — frontend logic (`app.js`) is covered by
@@ -277,12 +363,52 @@ See `docs/traceability/TRACEABILITY.md`.
   (fixed): the MSVC C++ toolchain requirement for `embed-resource`
   wasn't documented anywhere (ADR-0020's Consequences, README's GUI
   section).
-- FR-013 (`find_duplicate_folders`) has no frontend caller yet — this
-  change adds the backend command and its tests only, ahead of the
-  design-driven frontend redesign that will call it.
+- The Dashboard's "Space to reclaim (est.)" figure doesn't shrink as
+  individual groups are resolved via Review in the same session — it's
+  computed once from the groups a scan found, not re-derived after
+  actions (ADR-0022's consequences). "Reclaimed this session" (the
+  sidebar figure) is accurate and live-updating since it's summed from
+  real `run_action` results; only the Dashboard estimate has this
+  staleness.
+- A real "Delete Duplicate Folder" action needs a product decision
+  before it can be wired up — either a new `rusty_fclone_core` action
+  (would need ADR-0021 revisited) or a defined mapping onto the existing
+  per-file action pipeline (ADR-0022).
+- Reading `CLI-SCAN-HISTORY`'s persisted history, and exporting a real
+  file (Dashboard's "Import history"/"Export (JSON)"), both need new
+  backend work that doesn't exist yet — a GUI-side SQLite reader for the
+  former, a save-file dialog (or the `dialog`/`fs` plugin work already
+  tracked above) for the latter.
 
 ## Change history
 
+- 0.2.0 (2026-08-25): Rebuilt the frontend against a design handoff
+  (`Deduplication app UI design.zip`) — four real-data screens
+  (Dashboard, Scan Setup, Duplicate Review, Rules & Automation) replacing
+  the single-page root-path-and-options form. FR-014 through FR-017
+  added; FR-011 revised (confirmation dialog replaces the apply
+  checkbox as the "never implicit" mechanism — the requirement itself is
+  unchanged). Several deliberate deviations from the mockup, all
+  decided and recorded before implementing rather than discovered in
+  review: no folder-level delete action exists (button disabled, not
+  guessed at — an explicit user decision during this change); one scan
+  root instead of a folder checklist; "Similar content" match mode
+  shown disabled (fuzzy matching is a detection non-goal); two fake
+  toggles replaced with three real `ScanOptions` toggles; file-type
+  chips filter the Review list only, defaulting to all-on (the mockup's
+  partial preselection would have silently hidden real duplicates); the
+  folder-dedup pass (FR-013's `find_duplicate_folders`, landed just
+  ahead of this change) now runs automatically after every scan;
+  choosing which copy to keep reorders `paths` client-side rather than
+  adding a core API; Dashboard/Recent-Scans are real but session-scoped,
+  not persisted; Rules & Automation is an explicit local-only preview; a
+  system font stack replaces the mockup's Google Fonts dependency
+  (this app works offline); compare cards handle groups with more than
+  two copies; the design's fake OS window chrome (traffic lights,
+  shadow, rounded window) is dropped since a real Tauri window already
+  has real chrome. Full rationale for each: ADR-0022. Default window
+  size increased from 960×640 to 1200×840 (`tauri.conf.json`) to fit the
+  new layout comfortably; still resizable, with a 860×560 minimum.
 - 0.1.5 (2026-08-25): Added `find_duplicate_folders` (FR-013) — a new
   Tauri command wrapping `rusty_fclone_core::find_folder_duplicates`
   (ADR-0021), taking the scan root, the duplicate groups a prior

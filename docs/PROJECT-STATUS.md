@@ -1,13 +1,11 @@
 # Project Status
-- Last verified main commit: `6ad7f93` — `DETECTION-FOLDER-DEDUP` (PR #30,
-  merged): folder-level duplicate detection (`Exact`/`Contained`),
-  asked for directly after the user tried a real scan through the
-  Windows GUI (PR #29). A high-fidelity UI design handoff for a full GUI
-  redesign (`Deduplication app UI design.zip`, committed at repo root —
-  a design asset, not code) landed on top of that. This branch adds the
-  first implementation step: a `find_duplicate_folders` Tauri command
-  exposing the folder-dedup engine to the GUI backend, ahead of the
-  frontend redesign that will call it.
+- Last verified main commit: `3667618` — `find_duplicate_folders` Tauri
+  command (PR #31, merged): exposes `DETECTION-FOLDER-DEDUP`'s engine
+  (ADR-0021) to the GUI backend, first step of implementing the
+  `Deduplication app UI design.zip` design handoff. This branch adds the
+  second step, `GUI-REDESIGN`: the actual frontend rebuild — four
+  real-data screens (Dashboard, Scan Setup, Duplicate Review, Rules &
+  Automation), replacing the single-page root-path-and-options form.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -171,29 +169,51 @@
   `backup`, which also has an unrelated extra file elsewhere) confirming
   the exact text and NDJSON output, including the `Contained`
   subset/superset direction. GUI surfacing was scoped as a separate
-  follow-up, not bundled into this change — now in progress, see below.
+  follow-up, not bundled into this change — done, see `GUI-REDESIGN`
+  below.
+
+- `GUI-REDESIGN`: a high-fidelity design handoff (`Deduplication app UI
+  design.zip`, committed at repo root) specified a full rebuild of
+  `rusty_fclone-gui`'s bare-bones frontend into a 4-screen app
+  (Dashboard, Scan Setup, Duplicate Review, Rules & Automation). Shipped
+  in two PRs to keep each change small and reviewable: `find_duplicate_folders`
+  (PR #31, a new Tauri command exposing `DETECTION-FOLDER-DEDUP`'s engine
+  to the GUI backend), then this branch, the actual frontend rebuild —
+  `ui/app.js`/`ui/style.css`/`ui/icons.js` rewritten from scratch, driven
+  entirely by real data from `start_scan`/`run_action`/
+  `find_duplicate_folders`, never mocked. Asked the user one question
+  before implementing (the mockup's "Delete Duplicate Folder" button has
+  no real backend — ADR-0021 deliberately has no folder-level delete
+  action): decided to disable it with an explanation rather than wire it
+  to a guessed behavior. Every other mockup/reality gap found while
+  implementing was decided and recorded rather than silently papered
+  over — one scan root instead of a folder checklist, "Similar content"
+  match mode shown disabled (fuzzy matching is a detection non-goal),
+  two fake toggles replaced with three real `ScanOptions` toggles,
+  file-type chips filter the Review list only (defaulting to all-on, not
+  the mockup's partial preselection, since a display filter silently
+  hiding real duplicates by default would be a correctness trap), the
+  folder-dedup pass now runs automatically after every scan, choosing
+  which copy to keep reorders `paths` client-side instead of adding a
+  core API, Dashboard/Recent-Scans are real but session-scoped (not
+  persisted — no GUI-side history reader or export exists yet), Rules &
+  Automation is an explicit local-only preview, a system font stack
+  replaces the mockup's Google Fonts dependency (this app works
+  offline), and the mockup's fake OS window chrome (traffic lights,
+  shadow, rounded window) is dropped since a real Tauri window already
+  has real chrome. Full rationale: ADR-0022. `GUI-UX-001` 0.2.0
+  (FR-011 revised, FR-014 through FR-017 added). Implemented, tested
+  (105/105 workspace tests — no Rust logic changed in this branch beyond
+  the prior PR's `find_duplicate_folders`; the frontend has no automated
+  test suite, same open gap as before this change), and manually
+  end-to-end verified via Xvfb + `xdotool`: a real scan against a tempdir
+  with both file- and folder-level duplicates rendered correctly across
+  all four screens and both themes, choosing a non-default copy to keep
+  and applying delete removed the correct file (confirmed via `ls`
+  before/after), and the Dashboard reflected real post-scan numbers.
 
 ## In progress
-- **GUI redesign** — a high-fidelity design handoff (`Deduplication app UI
-  design.zip`, committed at repo root) specifies a full rebuild of
-  `rusty_fclone-gui`'s current bare-bones frontend into a 4-screen app
-  (Dashboard, Scan Setup, Duplicate Review, Rules & Automation). Split
-  into two steps to keep each change small and reviewable: (1) a new
-  `find_duplicate_folders` Tauri command exposing the folder-dedup engine
-  to the GUI backend (this branch — backend only, no frontend caller
-  yet), then (2) the actual frontend rebuild wired to real Tauri commands
-  (`start_scan`, `run_action`, `find_duplicate_folders`), not mocked
-  data. Real deviations from the mockup, decided before implementing:
-  the mockup's "Delete Duplicate Folder" button has no real backend
-  (ADR-0021 deliberately has no folder-level delete action) — disabled
-  rather than wired to a guessed behavior, pending a product decision on
-  what it should actually do. Dashboard's "Import history"/"Export
-  (JSON)" and the Recent Scans table need new backend work (no
-  history-reading command exists yet, `CLI-SCAN-HISTORY` is CLI-only);
-  the "Similar content" match-sensitivity mode and per-file-type scan
-  filtering aren't real engine capabilities (fuzzy matching is an
-  explicit `FCLONE-DETECTION-001` non-goal). Step (2) will state exactly
-  what ships with real data vs. what's deferred/disabled.
+- None.
 
 ## Blocked
 - None.
@@ -214,9 +234,14 @@
   a plain text input) — deferred pending a look at Tauri's `dialog`
   plugin's own permission/capability shape (`GUI-UX-001`'s open
   questions).
-- GUI surfacing of folder-level duplicate detection — now in progress
-  (see above): the `find_duplicate_folders` command exists; the
-  frontend rebuild that calls it is the next step.
+- A real "Delete Duplicate Folder" action — needs a product decision
+  (new core action vs. mapping onto the existing per-file pipeline)
+  before it can be wired up; the button ships disabled in `GUI-REDESIGN`
+  (ADR-0022).
+- A GUI-side reader for `CLI-SCAN-HISTORY`'s persisted SQLite history,
+  and a real file-export path for the Dashboard's "Import history"/
+  "Export (JSON)" buttons — both need new backend work; they ship
+  disabled with an explanatory tooltip in `GUI-REDESIGN`.
 
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-25)
@@ -232,12 +257,18 @@
   cache database (2026-08-24), and `--find-duplicate-folders` against a
   real three-directory tree in both `--format text` and `--format json`
   (2026-08-25)
-- Manual GUI smoke test (2026-08-25): compiled binary launched under
-  Xvfb, real frontend rendered (caught and fixed one stale-embedded-
-  asset build during this pass), a full scan → duplicate-group render →
-  preview → apply cycle driven via `xdotool` against a real tempdir with
-  a known duplicate pair, filesystem state confirmed via `ls` before and
-  after the apply step.
+- Manual GUI smoke test, redesigned frontend (2026-08-25): compiled
+  binary launched under Xvfb, driven with `xdotool` through Dashboard
+  (empty state) → Scan Setup (typed a real path, confirmed no
+  keystroke-focus loss) → Start Scan → Duplicate Review (a real 4-item
+  list against a tempdir with both file- and folder-level duplicates,
+  including a `Contained` folder match correctly deduplicated per
+  ADR-0021) → chose the non-default copy to keep → Apply Delete
+  (confirmation dialog text checked, accepted, real deletion confirmed
+  via `ls` before/after — the kept and removed paths matched the UI's
+  displayed choice exactly) → Dashboard again (real post-scan stats,
+  storage breakdown, session-scoped Recent Scans row) → Rules screen →
+  light-theme toggle. Every screen rendered correctly in both themes.
 
 ## Risks and decisions needed
 - The action layer is the first genuinely destructive capability in this
