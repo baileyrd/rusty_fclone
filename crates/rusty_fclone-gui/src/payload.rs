@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use rusty_fclone_core::action::{ActionKind, ActionPlan, ApplyReport, FileAction};
-use rusty_fclone_core::{DuplicateGroup, FileError, ScanOptions, ScanProgress, ScanSummary};
+use rusty_fclone_core::{
+    DuplicateGroup, FileError, FolderMatch, ScanOptions, ScanProgress, ScanSummary,
+};
 
 /// Scan tunables sent from the frontend. Mirrors [`ScanOptions`]; every
 /// field is optional here so the frontend only needs to send what the user
@@ -151,6 +153,55 @@ impl From<GroupPayload> for DuplicateGroup {
                 .into_iter()
                 .map(|s| PathBuf::from(s).into())
                 .collect(),
+        }
+    }
+}
+
+/// One `FolderMatch` (ADR-0021), shaped for `find_duplicate_folders`'s
+/// response. A tagged enum matching `ScanEventPayload`'s convention
+/// (snake_case `type` tag, camelCase fields) — mirrors the CLI's
+/// `folder_exact`/`folder_contained` NDJSON shapes (`CLI-UX-001` FR-012).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FolderMatchPayload {
+    #[serde(rename_all = "camelCase")]
+    Exact {
+        folders: Vec<String>,
+        file_count: u64,
+        bytes: u64,
+    },
+    #[serde(rename_all = "camelCase")]
+    Contained {
+        subset: String,
+        superset: String,
+        file_count: u64,
+        bytes: u64,
+    },
+}
+
+impl From<&FolderMatch> for FolderMatchPayload {
+    fn from(m: &FolderMatch) -> Self {
+        match m {
+            FolderMatch::Exact {
+                folders,
+                file_count,
+                bytes,
+            } => FolderMatchPayload::Exact {
+                folders: folders.iter().map(|p| p.display().to_string()).collect(),
+                file_count: *file_count,
+                bytes: *bytes,
+            },
+            FolderMatch::Contained {
+                subset,
+                superset,
+                file_count,
+                bytes,
+            } => FolderMatchPayload::Contained {
+                subset: subset.display().to_string(),
+                superset: superset.display().to_string(),
+                file_count: *file_count,
+                bytes: *bytes,
+            },
         }
     }
 }
@@ -371,6 +422,38 @@ mod tests {
         assert_eq!(json["type"], "progress");
         assert_eq!(json["filesScanned"], 3);
         assert_eq!(json["bytesScanned"], 100);
+    }
+
+    #[test]
+    fn folder_match_exact_serializes_with_a_snake_case_type_tag_and_camel_case_fields() {
+        let m = FolderMatch::Exact {
+            folders: vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            file_count: 3,
+            bytes: 42,
+        };
+        let payload = FolderMatchPayload::from(&m);
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["type"], "exact");
+        assert_eq!(json["folders"], serde_json::json!(["/a", "/b"]));
+        assert_eq!(json["fileCount"], 3);
+        assert_eq!(json["bytes"], 42);
+    }
+
+    #[test]
+    fn folder_match_contained_serializes_with_subset_and_superset_paths() {
+        let m = FolderMatch::Contained {
+            subset: PathBuf::from("/small"),
+            superset: PathBuf::from("/big"),
+            file_count: 1,
+            bytes: 7,
+        };
+        let payload = FolderMatchPayload::from(&m);
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["type"], "contained");
+        assert_eq!(json["subset"], "/small");
+        assert_eq!(json["superset"], "/big");
+        assert_eq!(json["fileCount"], 1);
+        assert_eq!(json["bytes"], 7);
     }
 
     #[test]

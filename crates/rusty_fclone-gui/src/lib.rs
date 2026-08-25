@@ -7,6 +7,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::start_scan,
             commands::run_action,
+            commands::find_duplicate_folders,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
