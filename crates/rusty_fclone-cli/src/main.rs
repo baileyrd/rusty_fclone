@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
 use rusty_fclone_core::action::{self, ActionKind, ActionPlan, ApplyReport};
+use rusty_fclone_core::folder_action;
 use rusty_fclone_core::{
     find_folder_duplicates, scan, DuplicateGroup, FileError, FolderMatch, ScanEvent, ScanOptions,
     ScanProgress, ScanSummary,
@@ -188,7 +189,7 @@ fn run(cli: Cli) -> ExitCode {
     let action_kind = cli.action.as_core_kind();
 
     if let Some(kind) = action_kind {
-        if cli.apply && !cli.yes && !confirm_apply(&cli.root, kind) {
+        if cli.apply && !cli.yes && !confirm_apply(&cli.root, kind, cli.find_duplicate_folders) {
             eprintln!("aborted");
             return ExitCode::SUCCESS;
         }
@@ -233,16 +234,25 @@ fn run(cli: Cli) -> ExitCode {
         match event {
             ScanEvent::DuplicateGroup(group) => {
                 progress_line.finish();
-                had_errors |= handle_group(
-                    &group,
-                    action_kind,
-                    cli.apply,
-                    cli.format,
-                    &mut total_bytes_reclaimed,
-                    &mut total_files_acted_on,
-                );
                 if folder_dedup_root.is_some() {
+                    // Defer both printing and any action for this group
+                    // until after the folder-dedup pass runs below.
+                    // Applying --action live here could delete the very
+                    // files a folder match depends on before
+                    // find_folder_duplicates ever sees them -- a
+                    // fully-duplicated directory's defining evidence is
+                    // exactly the individual file duplicates this loop
+                    // would otherwise already be consuming (ADR-0023).
                     collected_groups.push(group);
+                } else {
+                    had_errors |= handle_group(
+                        &group,
+                        action_kind,
+                        cli.apply,
+                        cli.format,
+                        &mut total_bytes_reclaimed,
+                        &mut total_files_acted_on,
+                    );
                 }
             }
             ScanEvent::Error(err) => {
@@ -261,6 +271,57 @@ fn run(cli: Cli) -> ExitCode {
         }
     }
 
+    if let (Some(root), Some(options)) = (folder_dedup_root, folder_dedup_options) {
+        // `folder_matches` defaults to empty on error -- the fallback
+        // below then treats every collected group as unclaimed and
+        // handles it exactly as the non-folder-dedup path would.
+        let folder_matches = match find_folder_duplicates(&root, &collected_groups, &options) {
+            Ok(matches) => matches,
+            Err(err) => {
+                had_errors = true;
+                eprintln!("error: {err}");
+                Vec::new()
+            }
+        };
+
+        had_errors |= report_folder_matches(
+            cli.format,
+            &folder_matches,
+            &collected_groups,
+            &options,
+            action_kind,
+            cli.apply,
+            &mut total_bytes_reclaimed,
+            &mut total_files_acted_on,
+        );
+
+        // Every group not entirely covered by a folder match above still
+        // needs its own report (and, if requested, action) -- exactly
+        // the behavior the non-folder-dedup path already provides, just
+        // deferred to here so folder-dedup got first look at the
+        // unmodified tree. A fully-covered group is deliberately not
+        // printed again here -- its folder-level summary already covers
+        // it, rather than also flooding the output with every file it
+        // contains.
+        let claimed_folders = folder_match_roots(&folder_matches);
+        for group in &collected_groups {
+            if group_fully_covered_by(group, &claimed_folders) {
+                continue;
+            }
+            had_errors |= handle_group(
+                group,
+                action_kind,
+                cli.apply,
+                cli.format,
+                &mut total_bytes_reclaimed,
+                &mut total_files_acted_on,
+            );
+        }
+    }
+
+    // Printed after the folder-dedup pass above (not right after the scan
+    // loop) so the total reflects both file-level group actions and any
+    // folder-level ones -- one true grand total, not an undercount.
     if let Some(kind) = action_kind {
         report_action_summary(
             cli.format,
@@ -269,16 +330,6 @@ fn run(cli: Cli) -> ExitCode {
             total_bytes_reclaimed,
             total_files_acted_on,
         );
-    }
-
-    if let (Some(root), Some(options)) = (folder_dedup_root, folder_dedup_options) {
-        match find_folder_duplicates(&root, &collected_groups, &options) {
-            Ok(folder_matches) => report_folder_matches(cli.format, &folder_matches),
-            Err(err) => {
-                had_errors = true;
-                eprintln!("error: {err}");
-            }
-        }
     }
 
     if let Some(history_path) = &cli.history {
@@ -321,9 +372,14 @@ fn unix_timestamp_now() -> i64 {
 /// hasn't run yet, and groups/actions are applied incrementally as they're
 /// found (ADR-0004's streaming design) -- so this is a general warning
 /// naming the root and action, not a precise preview (ADR-0015).
-fn confirm_apply(root: &Path, kind: ActionKind) -> bool {
+fn confirm_apply(root: &Path, kind: ActionKind, find_duplicate_folders: bool) -> bool {
+    let folders_note = if find_duplicate_folders {
+        ", including whole duplicate folders,"
+    } else {
+        ""
+    };
     eprint!(
-        "This will scan {} and {} redundant files as duplicates are found. Proceed? [y/N] ",
+        "This will scan {} and {} redundant files{folders_note} as duplicates are found. Proceed? [y/N] ",
         root.display(),
         action_word(kind)
     );
@@ -562,16 +618,141 @@ fn print_group_json(
     });
 }
 
-fn report_folder_matches(format: Format, matches: &[FolderMatch]) {
+/// Every folder path involved in any folder match -- both sides of a
+/// `Contained` match, every folder in an `Exact` cluster. Used to decide
+/// whether a `DuplicateGroup` is already fully represented by the
+/// folder-level output, so it isn't also printed (and acted on) a second
+/// time as an individual group.
+fn folder_match_roots(matches: &[FolderMatch]) -> Vec<&Path> {
+    let mut roots = Vec::new();
     for m in matches {
-        match format {
-            Format::Text => print_folder_match_text(m),
-            Format::Json => print_folder_match_json(m),
+        match m {
+            FolderMatch::Exact { folders, .. } => roots.extend(folders.iter().map(|p| p.as_path())),
+            FolderMatch::Contained {
+                subset, superset, ..
+            } => {
+                roots.push(subset.as_path());
+                roots.push(superset.as_path());
+            }
+        }
+    }
+    roots
+}
+
+/// `true` when every path in `group` sits under one of `roots` -- i.e.
+/// this group's entire content is already covered by some folder match's
+/// own output above, so reporting (and acting on) it again individually
+/// would be redundant.
+fn group_fully_covered_by(group: &DuplicateGroup, roots: &[&Path]) -> bool {
+    group
+        .paths
+        .iter()
+        .all(|p| roots.iter().any(|r| p.starts_with(r)))
+}
+
+/// One `(removed, kept)` folder pair to plan/apply `folder_action` for.
+/// A `Contained` match is exactly one pair (`subset` removed against
+/// `superset`); an `Exact` cluster of 2+ folders keeps the
+/// alphabetically-first one (matching `action::plan`'s existing
+/// "first path is kept" convention for files, ADR-0023) and removes
+/// every other folder against it.
+fn folder_match_pairs(m: &FolderMatch) -> Vec<(&Path, &Path)> {
+    match m {
+        FolderMatch::Contained {
+            subset, superset, ..
+        } => vec![(subset.as_path(), superset.as_path())],
+        FolderMatch::Exact { folders, .. } => {
+            let kept = folders
+                .iter()
+                .min()
+                .expect("an Exact match always has at least 2 folders");
+            folders
+                .iter()
+                .filter(|f| *f != kept)
+                .map(|f| (f.as_path(), kept.as_path()))
+                .collect()
         }
     }
 }
 
-fn print_folder_match_text(m: &FolderMatch) {
+/// The outcome of planning (and maybe applying) `kind` for one folder pair.
+struct FolderPairOutcome {
+    kind: ActionKind,
+    removed: PathBuf,
+    kept: PathBuf,
+    file_count: u64,
+    bytes: u64,
+    applied: bool,
+    directory_removed: bool,
+    failed: usize,
+}
+
+/// Reports every folder match, planning (and, with `--apply`, applying)
+/// `action_kind` for each `folder_match_pairs` pair when one was
+/// requested. Returns whether any per-file or per-pair error occurred.
+#[allow(clippy::too_many_arguments)]
+fn report_folder_matches(
+    format: Format,
+    matches: &[FolderMatch],
+    groups: &[DuplicateGroup],
+    options: &ScanOptions,
+    action_kind: Option<ActionKind>,
+    apply: bool,
+    total_bytes_reclaimed: &mut u64,
+    total_files_acted_on: &mut u64,
+) -> bool {
+    let mut had_errors = false;
+    for m in matches {
+        let mut outcomes = Vec::new();
+        if let Some(kind) = action_kind {
+            for (removed, kept) in folder_match_pairs(m) {
+                match folder_action::plan_folder(removed, kept, groups, options, kind) {
+                    Ok(plan) => {
+                        let report = apply.then(|| folder_action::apply_folder(&plan));
+                        let (bytes, files, failed, directory_removed) = match &report {
+                            Some(r) => (
+                                r.bytes_reclaimed,
+                                r.succeeded.len() as u64,
+                                r.failed.len(),
+                                r.directory_removed,
+                            ),
+                            None => (plan.bytes_reclaimed, plan.pairs.len() as u64, 0, false),
+                        };
+                        *total_bytes_reclaimed += bytes;
+                        *total_files_acted_on += files;
+                        had_errors |= failed > 0;
+                        if let Some(r) = &report {
+                            for err in &r.failed {
+                                eprintln!("warning: {err}");
+                            }
+                        }
+                        outcomes.push(FolderPairOutcome {
+                            kind,
+                            removed: removed.to_path_buf(),
+                            kept: kept.to_path_buf(),
+                            file_count: plan.pairs.len() as u64,
+                            bytes: plan.bytes_reclaimed,
+                            applied: report.is_some(),
+                            directory_removed,
+                            failed,
+                        });
+                    }
+                    Err(err) => {
+                        had_errors = true;
+                        eprintln!("warning: {}: {err}", removed.display());
+                    }
+                }
+            }
+        }
+        match format {
+            Format::Text => print_folder_match_text(m, &outcomes),
+            Format::Json => print_folder_match_json(m, &outcomes),
+        }
+    }
+    had_errors
+}
+
+fn print_folder_match_text(m: &FolderMatch, outcomes: &[FolderPairOutcome]) {
     match m {
         FolderMatch::Exact {
             folders,
@@ -594,9 +775,43 @@ fn print_folder_match_text(m: &FolderMatch) {
             println!("  superset: {}", superset.display());
         }
     }
+    for o in outcomes {
+        println!("  keep folder: {}", o.kept.display());
+        let mut line = format!(
+            "  {} folder: {} ({} files, {} bytes)",
+            action_word(o.kind),
+            o.removed.display(),
+            o.file_count,
+            o.bytes
+        );
+        if o.applied {
+            if o.directory_removed {
+                line.push_str(" -- folder removed");
+            }
+            if o.failed > 0 {
+                line.push_str(&format!(" -- {} file(s) failed", o.failed));
+            }
+        } else {
+            line.push_str(" (preview -- pass --apply to actually do this)");
+        }
+        println!("{line}");
+    }
 }
 
-fn print_folder_match_json(m: &FolderMatch) {
+fn print_folder_match_json(m: &FolderMatch, outcomes: &[FolderPairOutcome]) {
+    let action: Vec<FolderPairActionJson> = outcomes
+        .iter()
+        .map(|o| FolderPairActionJson {
+            kind: action_word(o.kind),
+            kept: o.kept.display().to_string(),
+            removed: o.removed.display().to_string(),
+            applied: o.applied,
+            file_count: o.file_count,
+            bytes: o.bytes,
+            directory_removed: o.directory_removed,
+            failed: o.failed as u64,
+        })
+        .collect();
     match m {
         FolderMatch::Exact {
             folders,
@@ -606,6 +821,7 @@ fn print_folder_match_json(m: &FolderMatch) {
             folders: paths_to_strings(folders),
             file_count: *file_count,
             bytes: *bytes,
+            action,
         }),
         FolderMatch::Contained {
             subset,
@@ -617,6 +833,7 @@ fn print_folder_match_json(m: &FolderMatch) {
             superset: superset.display().to_string(),
             file_count: *file_count,
             bytes: *bytes,
+            action,
         }),
     }
 }
@@ -669,12 +886,14 @@ enum JsonEvent {
         folders: Vec<String>,
         file_count: u64,
         bytes: u64,
+        action: Vec<FolderPairActionJson>,
     },
     FolderContained {
         subset: String,
         superset: String,
         file_count: u64,
         bytes: u64,
+        action: Vec<FolderPairActionJson>,
     },
 }
 
@@ -687,6 +906,24 @@ struct JsonAction {
     succeeded: Vec<String>,
     failed: Vec<String>,
     bytes_reclaimed: u64,
+}
+
+/// One `folder_action` outcome for `--format json` (ADR-0023) — an empty
+/// `action` array on the enclosing `FolderExact`/`FolderContained` event
+/// means no `--action` was requested for this run. Field names are
+/// already snake_case (matching `JsonAction` and this CLI's convention,
+/// distinct from the GUI's camelCase wire format), so no `rename_all` is
+/// needed.
+#[derive(Serialize)]
+struct FolderPairActionJson {
+    kind: &'static str,
+    kept: String,
+    removed: String,
+    applied: bool,
+    file_count: u64,
+    bytes: u64,
+    directory_removed: bool,
+    failed: u64,
 }
 
 fn action_word(kind: ActionKind) -> &'static str {
@@ -914,6 +1151,100 @@ mod tests {
         let exit = run(cli);
 
         assert_eq!(exit, ExitCode::SUCCESS);
+    }
+
+    /// ADR-0023, `FCLONE-ACTION-001-FR-009`/`FR-010`/`FR-011`:
+    /// `--find-duplicate-folders --action delete --apply` actually
+    /// deletes a `Contained` match's subset folder (against its confirmed
+    /// partner in the superset) and prunes the emptied folder, without
+    /// touching the superset.
+    #[test]
+    fn find_duplicate_folders_with_action_delete_apply_removes_the_subset_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("extra.txt"), b"only in big").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.find_duplicate_folders = true;
+        cli.action = Action::Delete;
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert!(!small.exists(), "the emptied subset folder must be pruned");
+        assert!(big.join("1.txt").exists(), "the superset must be untouched");
+        assert!(big.join("extra.txt").exists());
+    }
+
+    /// The other half: without `--apply`, `--find-duplicate-folders
+    /// --action delete` must not touch the filesystem, only preview.
+    #[test]
+    fn find_duplicate_folders_with_action_delete_without_apply_is_a_dry_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.find_duplicate_folders = true;
+        cli.action = Action::Delete;
+        cli.apply = false;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert!(
+            small.join("1.txt").exists(),
+            "dry run must not delete anything"
+        );
+        assert!(big.join("1.txt").exists());
+    }
+
+    /// A duplicate group entirely outside the matched folders must still
+    /// get the normal per-file action, deferred to after the folder-dedup
+    /// pass rather than skipped -- `group_fully_covered_by` must only
+    /// suppress groups the folder-level output already represents.
+    #[test]
+    fn find_duplicate_folders_with_action_still_acts_on_an_unrelated_duplicate_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+        // Unrelated to either folder -- just two duplicate files sitting
+        // directly in the scan root.
+        let x = dir.path().join("x.txt");
+        let y = dir.path().join("y.txt");
+        fs::write(&x, b"unrelated dup").unwrap();
+        fs::write(&y, b"unrelated dup").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.find_duplicate_folders = true;
+        cli.action = Action::Delete;
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert!(!small.exists(), "the folder match must still be pruned");
+        assert!(
+            x.exists(),
+            "the alphabetically-first unrelated file is kept"
+        );
+        assert!(
+            !y.exists(),
+            "the unrelated duplicate pair must still be acted on"
+        );
     }
 
     #[test]

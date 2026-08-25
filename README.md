@@ -129,6 +129,12 @@ rusty-fclone --history ~/.local/share/rusty-fclone/history.sqlite /path/to/scan
 # Also report whole folders that are duplicates (or subsets) of each other
 # -- e.g. a Photos/2024/vacation folder copied wholesale into a backup tree.
 rusty-fclone --find-duplicate-folders /path/to/scan
+
+# Combine the two: delete a whole duplicate folder in one shot instead of
+# its files one at a time. Individually-acted-on files are skipped once
+# their folder is already covered by a folder match; unrelated duplicate
+# pairs outside any folder match are still acted on normally.
+rusty-fclone --find-duplicate-folders --action delete --apply /path/to/scan
 ```
 
 ## GUI

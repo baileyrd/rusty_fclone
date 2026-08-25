@@ -1,14 +1,14 @@
 # Project Status
-- Last verified main commit: `35c79c4` — `GUI-REDESIGN` (PR #32, merged):
-  the four-screen frontend rebuild against the `Deduplication app UI
-  design.zip` handoff, shipped with the "Delete Duplicate Folder" button
-  disabled (no backend existed for it — ADR-0021 deliberately left
-  folder-level *action* out of scope). This branch adds `FOLDER-ACTION`'s
-  core capability: a real `plan_folder`/`apply_folder` in
-  `rusty_fclone_core`, closing that gap at the engine level — asked for
-  directly ("Enable the folder-level delete action for real"). CLI/GUI
-  wiring (turning the disabled button into a working one) is a follow-up,
-  not bundled into this change.
+- Last verified main commit: `a13132d` — `FOLDER-ACTION` core (PR #33,
+  merged): a real `plan_folder`/`apply_folder` in `rusty_fclone_core`,
+  closing the engine-level gap `GUI-REDESIGN` left open (the "Delete
+  Duplicate Folder" button shipped disabled — ADR-0021 deliberately had no
+  folder-level *action*). This branch (`folder-action-cli`) wires that
+  capability into the CLI: `--find-duplicate-folders` now combines with
+  `--action <kind>`/`--apply`, continuing the same request ("Enable the
+  folder-level delete action for real"). GUI wiring (turning the disabled
+  button into a working one) remains a follow-up, not bundled into this
+  change.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -237,6 +237,30 @@
   before the UI that surfaces it" pattern as `DETECTION-FOLDER-DEDUP` →
   its CLI flag → `GUI-REDESIGN`).
 
+- `FOLDER-ACTION` (CLI wiring): `--find-duplicate-folders` now combines
+  with `--action <report|delete|hardlink|reflink>`/`--apply` —
+  `rusty_fclone-cli::report_folder_matches` calls `folder_action::
+  plan_folder`/`apply_folder` per matched folder pair (`folder_match_pairs`
+  picks the alphabetically-first folder as `kept` for an `Exact` cluster,
+  pairs subset-against-superset for `Contained`) and prints/emits the
+  result per pair, gated by the same preview/`--apply`/confirmation-prompt
+  safety model as file-level action. Found and fixed a real bug along the
+  way: the CLI's existing live per-group action (inside the streaming scan
+  loop) was consuming the file evidence the post-scan folder-dedup pass
+  needed, so a folder match could silently vanish once its files had
+  already been individually deleted. Fixed by deferring all individual-
+  group reporting/action until after the folder-dedup pass whenever
+  `--find-duplicate-folders` is set, skipping only the groups a folder
+  match already covers (`group_fully_covered_by`) so unrelated/uncovered
+  duplicate pairs still get acted on normally. ADR-0023 (unchanged),
+  `CLI-UX-001` 0.3.0 (FR-013). Implemented, tested (115/115 workspace
+  tests — 3 new CLI-level tests: apply removes the subset folder, dry run
+  touches nothing, an unrelated duplicate pair outside any folder match
+  still gets acted on), and manually smoke-tested against a real
+  filesystem (preview mode, real `--apply` folder pruning confirmed via
+  `find` before/after, and exact NDJSON field shapes for both `Exact` and
+  `Contained` matches).
+
 ## In progress
 - None.
 
@@ -259,12 +283,12 @@
   a plain text input) — deferred pending a look at Tauri's `dialog`
   plugin's own permission/capability shape (`GUI-UX-001`'s open
   questions).
-- `FOLDER-ACTION`'s CLI/GUI wiring: a `--find-duplicate-folders`
-  action-layer CLI flag, and enabling the GUI's "Delete Duplicate
+- `FOLDER-ACTION`'s GUI wiring: enabling the GUI's "Delete Duplicate
   Folder" button (with the same Delete/Hardlink/Reflink choice and
   confirmation-dialog safety gate the file-level Review screen already
-  has) — the core capability (`plan_folder`/`apply_folder`) exists and
-  is tested; only the consumers are left.
+  has) — the core capability (`plan_folder`/`apply_folder`) and the CLI's
+  `--find-duplicate-folders`/`--action`/`--apply` combination both exist
+  and are tested; only the GUI consumer is left.
 - A GUI-side reader for `CLI-SCAN-HISTORY`'s persisted SQLite history,
   and a real file-export path for the Dashboard's "Import history"/
   "Export (JSON)" buttons — both need new backend work; they ship
@@ -273,7 +297,7 @@
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-25)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-25)
-- `cargo test --workspace`: pass, 112/112 (2026-08-25)
+- `cargo test --workspace`: pass, 115/115 (2026-08-25)
 - `cargo bench --workspace --no-run`: pass (2026-08-25)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-25)
 - Manual CLI smoke tests across the project: verbosity flags, `RUST_LOG`
@@ -281,9 +305,12 @@
   format, progress checkpoints, confirmation prompt decline/accept,
   cold/warm `--cache` behavior, `--history` across two real scans,
   `--import-fclones-cache` against a real `fclones` binary and its real
-  cache database (2026-08-24), and `--find-duplicate-folders` against a
+  cache database (2026-08-24), `--find-duplicate-folders` against a
   real three-directory tree in both `--format text` and `--format json`
-  (2026-08-25)
+  (2026-08-25), and `--find-duplicate-folders` combined with
+  `--action delete --apply` against a real filesystem — preview mode,
+  real folder pruning (subset removed, superset untouched, confirmed via
+  `find` before/after), and exact NDJSON field shapes (2026-08-25)
 - Manual GUI smoke test, redesigned frontend (2026-08-25): compiled
   binary launched under Xvfb, driven with `xdotool` through Dashboard
   (empty state) → Scan Setup (typed a real path, confirmed no
@@ -307,10 +334,10 @@
 - `FOLDER-ACTION`'s blast radius is strictly larger than a single-group
   action (every file under a folder, plus the directory itself on a
   successful delete) — untested against a real, valuable directory tree
-  for the same reason as above, and with no CLI/GUI caller yet to have
-  exercised it end-to-end at all (core-level tests only). Its
-  directory-prune race (something else creates a file under `removed`
-  between the last successful per-file delete and the
+  for the same reason as above. The CLI can now exercise it end-to-end
+  (manually smoke-tested against a real filesystem), but the GUI still
+  has no caller. Its directory-prune race (something else creates a file
+  under `removed` between the last successful per-file delete and the
   `fs::remove_dir_all` prune) is a defined, handled outcome
   (`directory_removed: false`) but isn't covered by a test — narrow
   enough that reproducing it deterministically would need real

@@ -1,5 +1,5 @@
 # CLI-UX-001 — CLI Output, Progress, and Confirmation
-- Version: 0.2.2
+- Version: 0.3.0
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -101,6 +101,31 @@ confirmation prompt as a second safety layer on top of `--apply`.
   `{"type":"folder_contained","subset":<string>,"superset":<string>,"file_count":<u64>,"bytes":<u64>}`
   respectively. Off by default (ADR-0021) — collecting every group in
   memory and re-traversing the tree is extra work most scans don't need.
+- `CLI-UX-001-FR-013`: When `--find-duplicate-folders` is combined with
+  `--action <kind>`, the CLI SHALL plan (and, with `--apply`, apply)
+  `kind` for every `FolderMatch` via `rusty_fclone_core::folder_action`
+  (ADR-0023) — a `Contained` match's `subset` against its `superset`; an
+  `Exact` cluster keeping its alphabetically-first folder and acting on
+  every other one against it. To avoid a folder match's defining
+  evidence being consumed by a live per-group action before folder-dedup
+  ever sees it, the CLI SHALL defer both reporting and any `--action` for
+  every `DuplicateGroup` until after the folder-dedup pass completes
+  whenever `--find-duplicate-folders` is set (unchanged, immediate
+  per-group reporting/action when it is not). A `DuplicateGroup` every
+  one of whose paths lies under a reported folder match's folders SHALL
+  NOT be reported or acted on again individually — its folder-level
+  report already covers it; every other group SHALL still be reported
+  and, if requested, acted on exactly as when `--find-duplicate-folders`
+  is unset. In `--format text`, each acted-on folder pair SHALL print a
+  `keep folder: <path>` line and a
+  `<verb> folder: <path> (<N> files, <B> bytes)` line, annotated with
+  `-- folder removed` when `directory_removed` was true and/or
+  `-- <n> file(s) failed` when any per-file action failed, or
+  `(preview -- pass --apply to actually do this)` without `--apply`. In
+  `--format json`, the enclosing `folder_exact`/`folder_contained` event
+  SHALL gain an `action` array (one entry per acted-on pair, empty when
+  no `--action` was requested) of
+  `{"kind":<string>,"kept":<string>,"removed":<string>,"applied":<bool>,"file_count":<u64>,"bytes":<u64>,"directory_removed":<bool>,"failed":<u64>}`.
 
 ## Architecture and interfaces
 
@@ -114,11 +139,16 @@ pub struct ScanProgress { pub files_scanned: u64, pub bytes_scanned: u64 }
 
 `rusty_fclone-cli` (`src/main.rs`): `--format <text|json>` (default
 `text`), `-y`/`--yes` (bool), `--find-duplicate-folders` (bool). JSON
-serialization types (`JsonEvent`, `JsonAction`) and progress-line
-rendering (`ProgressLine`) are CLI-only, not part of the core crate's
-public surface. `--find-duplicate-folders` calls
+serialization types (`JsonEvent`, `JsonAction`, `FolderPairActionJson`)
+and progress-line rendering (`ProgressLine`) are CLI-only, not part of
+the core crate's public surface. `--find-duplicate-folders` calls
 `rusty_fclone_core::find_folder_duplicates` (`FCLONE-DETECTION-001`
-FR-010) after the scan's event stream is fully drained.
+FR-010) after the scan's event stream is fully drained, then (FR-013)
+`folder_action::plan_folder`/`apply_folder` (`FCLONE-ACTION-001`
+FR-009 through FR-011) per matched folder pair when `--action` was also
+set. `folder_match_roots`/`group_fully_covered_by` decide, per
+`DuplicateGroup`, whether it's already represented by a folder match's
+own output — CLI-only classification logic, no core-crate involvement.
 
 `rusty_fclone-cli` `history` module (ADR-0017): `--history <path>`
 (`Option<PathBuf>`). `history::ScanRecord` (one completed scan's summary)
@@ -136,6 +166,15 @@ action totals `run()` already tracks.
   last invariant (unchanged by this addition).
 - The confirmation prompt (FR-008) runs before `scan()` is even called —
   a decline touches nothing, including read-only traversal.
+- When `--find-duplicate-folders` is set, `DuplicateGroup` reporting and
+  action are deferred as a whole (FR-013) — no group is printed or acted
+  on until the scan's `Finished` event and the folder-dedup pass have
+  both completed, unlike the immediate per-event handling used when the
+  flag is unset. The action-summary total (`FR-005`'s `action_summary`
+  event / the text mode's final `reclaimed ... bytes` line) is printed
+  after this deferred pass too, so it reflects both file-level and
+  folder-level bytes reclaimed — never an undercount from being emitted
+  before folder-level actions ran.
 
 ## Errors, failure, recovery, and observability
 
@@ -193,6 +232,25 @@ action totals `run()` already tracks.
   tree (`photos/vacation`, `backup/vacation` with an extra file) confirmed
   the exact text and NDJSON output shapes, including the `Contained`
   subset/superset direction.
+- FR-013 (`--find-duplicate-folders` + `--action`) is exercised by
+  `main::tests::find_duplicate_folders_with_action_delete_apply_removes_the_subset_folder`
+  (a real `Contained` match, `--apply`'d, confirmed against the
+  filesystem: the subset folder is gone, the superset untouched),
+  `find_duplicate_folders_with_action_delete_without_apply_is_a_dry_run`,
+  and `find_duplicate_folders_with_action_still_acts_on_an_unrelated_duplicate_pair`
+  — a regression test locking in that a `DuplicateGroup` outside any
+  folder match still gets the normal per-file action once the deferred
+  pass runs, not silently skipped. This last test was added after an
+  earlier version of this feature was found, by its own first test run,
+  to apply `--action` to individual groups live during the scan —
+  consuming a folder match's defining file-level evidence before
+  `find_folder_duplicates` ever ran, so the match (and the CLI's
+  "prune the now-empty folder" behavior) silently disappeared. Deferring
+  reporting/action until after the folder-dedup pass (this version's
+  actual behavior) fixed it; the regression test exists so this doesn't
+  reappear silently. Manual smoke test additionally confirmed real
+  filesystem state (`find`, before/after) and the exact text/NDJSON
+  output shapes for both a preview and a real `--apply`'d run.
 
 ## Verification plan
 
@@ -240,6 +298,19 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.0 (2026-08-25): Added folder-level action support (FR-013) —
+  `--find-duplicate-folders` combined with `--action <kind>` now plans
+  (and, with `--apply`, applies) `kind` for every folder match via the
+  new `rusty_fclone_core::folder_action` (ADR-0023), in text and
+  `--format json` (a new `action` array on `folder_exact`/
+  `folder_contained` events). Fixed a real ordering bug found while
+  building this: applying `--action` to individual duplicate groups live
+  during the scan could delete the very files a folder match's
+  detection depends on before `find_folder_duplicates` ever ran, making
+  the match silently vanish. Fixed by deferring all `DuplicateGroup`
+  reporting and action until after the folder-dedup pass completes,
+  whenever `--find-duplicate-folders` is set — unchanged, immediate
+  behavior when it isn't. `FCLONE-ACTION-001` 0.3.0.
 - 0.2.2 (2026-08-25): Added `--find-duplicate-folders` (FR-012), which
   runs the new `rusty_fclone_core::find_folder_duplicates` after the scan
   completes and reports `FolderMatch::Exact`/`Contained` results in both
