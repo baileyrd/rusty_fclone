@@ -3,13 +3,15 @@
 //! `rusty_fclone_core`; this module only translates to/from
 //! [`crate::payload`]'s wire types and drives the background scan thread.
 
+use std::path::PathBuf;
+
 use tauri::{AppHandle, Emitter, Runtime};
 
-use rusty_fclone_core::action;
+use rusty_fclone_core::{action, find_folder_duplicates};
 
 use crate::payload::{
-    normalize_path_input, parse_action_kind, ActionResultPayload, GroupPayload, ScanEventPayload,
-    ScanOptionsPayload,
+    normalize_path_input, parse_action_kind, ActionResultPayload, FolderMatchPayload, GroupPayload,
+    ScanEventPayload, ScanOptionsPayload,
 };
 
 /// Starts a scan on a background thread and streams results back to the
@@ -81,6 +83,28 @@ pub fn run_action(
     })
 }
 
+/// Finds folder-level duplicates (ADR-0021) among the duplicate groups a
+/// prior `start_scan` already produced. `root` and `options` must match
+/// that earlier scan — the frontend already holds both (it sent them to
+/// `start_scan`) plus every `duplicate_group` event it received, so this
+/// takes all three back rather than re-scanning. A post-scan, on-demand
+/// call (not part of the `scan-event` stream): a folder verdict needs the
+/// whole tree's picture, so it can't be produced incrementally the way a
+/// `DuplicateGroup` can.
+#[tauri::command]
+pub fn find_duplicate_folders(
+    root: String,
+    groups: Vec<GroupPayload>,
+    options: ScanOptionsPayload,
+) -> Result<Vec<FolderMatchPayload>, String> {
+    let root = PathBuf::from(normalize_path_input(&root));
+    let groups: Vec<_> = groups.into_iter().map(Into::into).collect();
+    let options = options.into();
+    find_folder_duplicates(&root, &groups, &options)
+        .map(|matches| matches.iter().map(Into::into).collect())
+        .map_err(|err| err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -95,7 +119,8 @@ mod tests {
         let app = mock_builder()
             .invoke_handler(tauri::generate_handler![
                 super::start_scan,
-                super::run_action
+                super::run_action,
+                super::find_duplicate_folders
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");
@@ -179,6 +204,52 @@ mod tests {
     }
 
     #[test]
+    fn find_duplicate_folders_reports_a_contained_folder_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("extra.txt"), b"only in big").unwrap();
+
+        let response = invoke(
+            "find_duplicate_folders",
+            json!({
+                "root": dir.path().display().to_string(),
+                "groups": [
+                    {"size": 3, "paths": [small.join("1.txt").display().to_string(), big.join("1.txt").display().to_string()]},
+                ],
+                "options": {},
+            }),
+        )
+        .expect("find_duplicate_folders should succeed");
+
+        let matches = response.as_array().expect("response should be an array");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["type"], "contained");
+        assert_eq!(matches[0]["subset"], small.display().to_string());
+        assert_eq!(matches[0]["superset"], big.display().to_string());
+        assert_eq!(matches[0]["fileCount"], 1);
+    }
+
+    #[test]
+    fn find_duplicate_folders_rejects_a_nonexistent_root() {
+        let err = invoke(
+            "find_duplicate_folders",
+            json!({
+                "root": "/does/not/exist/at/all",
+                "groups": [],
+                "options": {},
+            }),
+        )
+        .expect_err("a nonexistent root must be rejected");
+
+        assert!(err.as_str().unwrap().contains("does not exist"));
+    }
+
+    #[test]
     fn run_action_rejects_an_unknown_kind() {
         let err = invoke(
             "run_action",
@@ -229,7 +300,8 @@ mod tests {
         let app = mock_builder()
             .invoke_handler(tauri::generate_handler![
                 super::start_scan,
-                super::run_action
+                super::run_action,
+                super::find_duplicate_folders
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");

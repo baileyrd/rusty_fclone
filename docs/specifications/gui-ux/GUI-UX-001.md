@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.1.4
+- Version: 0.1.5
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -102,6 +102,19 @@ semantics, which are unchanged.
   works when pasted directly into any of these fields. A path with only
   one matching side quoted (e.g. a genuine leading `"` with no trailing
   one) SHALL be left unchanged rather than guessed at.
+- `GUI-UX-001-FR-013`: The frontend SHALL be able to invoke a
+  `find_duplicate_folders` command with the scan root, the full set of
+  `DuplicateGroup`s a prior `start_scan` produced (`size`/`paths`, the
+  same shape `run_action` already accepts), and the scan options; the
+  backend SHALL call `rusty_fclone_core::find_folder_duplicates` with
+  them and return its `FolderMatch` results, each shaped as
+  `{"type":"exact","folders":[<string>,...],"fileCount":<u64>,"bytes":<u64>}`
+  or
+  `{"type":"contained","subset":<string>,"superset":<string>,"fileCount":<u64>,"bytes":<u64>}`.
+  `root` SHALL go through the same quote/whitespace normalization as
+  FR-012. A nonexistent/non-directory root SHALL be rejected with an
+  `Err`, matching `find_folder_duplicates`'s own `ScanError::InvalidRoot`
+  contract.
 
 ## Architecture and interfaces
 
@@ -113,12 +126,16 @@ semantics, which are unchanged.
 fn start_scan<R: Runtime>(app: AppHandle<R>, root: String, options: ScanOptionsPayload) -> Result<(), String>;
 #[tauri::command]
 fn run_action(group: GroupPayload, kind: String, apply: bool) -> Result<ActionResultPayload, String>;
+#[tauri::command]
+fn find_duplicate_folders(root: String, groups: Vec<GroupPayload>, options: ScanOptionsPayload) -> Result<Vec<FolderMatchPayload>, String>;
 
 // src/payload.rs — serde DTOs, kept out of rusty_fclone-core (ADR-0020)
 struct ScanOptionsPayload { /* mirrors ScanOptions, all fields optional */ }
 enum ScanEventPayload { DuplicateGroup { .. }, Error { .. }, Progress { .. }, Finished(ScanSummaryPayload) }
 struct GroupPayload { size: u64, paths: Vec<String> }
 struct ActionResultPayload { plan: ActionPlanPayload, applied: Option<ApplyReportPayload> }
+enum FolderMatchPayload { Exact { folders: Vec<String>, fileCount: u64, bytes: u64 },
+                          Contained { subset: String, superset: String, fileCount: u64, bytes: u64 } }
 ```
 
 Frontend (`ui/`, plain HTML/CSS/JS, no bundler —
@@ -210,11 +227,21 @@ field, options `fieldset`, status line, group list), `app.js` (`invoke`/
   confirmed to fail with the exact "does not exist" error a real Windows
   user hit before this fix, and to pass with it applied (verified both
   ways during development, not just written and trusted).
+- FR-013 (`find_duplicate_folders`) is exercised by
+  `commands::tests::find_duplicate_folders_reports_a_contained_folder_match`
+  (IPC-level, a real tempdir with a fully-duplicated subfolder inside a
+  bigger one, asserting on the actual response shape) and
+  `commands::tests::find_duplicate_folders_rejects_a_nonexistent_root`,
+  plus `payload::tests::folder_match_exact_serializes_with_a_snake_case_type_tag_and_camel_case_fields`/
+  `folder_match_contained_serializes_with_subset_and_superset_paths`
+  (payload shape). No frontend wiring exists yet — this backend-only
+  change lands ahead of the redesign that will call it (see Open
+  questions).
 
 ## Verification plan
 
-Unit/IPC tests in `rusty_fclone-gui` (9 tests: 5 in `payload::tests`, 4 in
-`commands::tests`), run as part of `cargo test --workspace`. Manual
+Unit/IPC tests in `rusty_fclone-gui` (20 tests: 13 in `payload::tests`, 7
+in `commands::tests`), run as part of `cargo test --workspace`. Manual
 end-to-end verification (this environment has no display, so via Xvfb): a
 built binary was launched, screenshotted at each step, and driven with
 `xdotool` through a full scan → group render → preview → apply cycle
@@ -250,9 +277,19 @@ See `docs/traceability/TRACEABILITY.md`.
   (fixed): the MSVC C++ toolchain requirement for `embed-resource`
   wasn't documented anywhere (ADR-0020's Consequences, README's GUI
   section).
+- FR-013 (`find_duplicate_folders`) has no frontend caller yet — this
+  change adds the backend command and its tests only, ahead of the
+  design-driven frontend redesign that will call it.
 
 ## Change history
 
+- 0.1.5 (2026-08-25): Added `find_duplicate_folders` (FR-013) — a new
+  Tauri command wrapping `rusty_fclone_core::find_folder_duplicates`
+  (ADR-0021), taking the scan root, the duplicate groups a prior
+  `start_scan` produced, and the scan options, and returning
+  `FolderMatchPayload::Exact`/`Contained` results. Backend-only: lands
+  ahead of the frontend redesign (see Open questions) that will surface
+  folder-level matches in the Duplicate Review screen.
 - 0.1.4 (2026-08-25): Added FR-012 — `start_scan`'s root and
   `ScanOptionsPayload`'s `cachePath`/`fclonesImportPath` now strip
   surrounding whitespace and one layer of matching quote characters

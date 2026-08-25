@@ -1,14 +1,13 @@
 # Project Status
-- Last verified main commit: `935b848` (PR #28, merged) — the `GUI` unit
-  (new `rusty_fclone-gui` crate, PR #25) plus three real-usage follow-up
-  fixes surfaced by an actual Windows build/run (PRs #26–#28: the MSVC
-  C++ toolchain prerequisite, a missing `icons/icon.ico`, and a GNU
-  linker export-ordinal overflow from an unused `cdylib` output), and a
-  fourth follow-up fix (PR #29) for a real Windows *usage* gap (quoted
-  paths pasted from Explorer's "Copy as path"). This branch adds
-  `DETECTION-FOLDER-DEDUP` on top — folder-level duplicate detection
-  (`Exact`/`Contained`), asked for directly after the user tried a real
-  scan through the newly-working Windows GUI.
+- Last verified main commit: `6ad7f93` — `DETECTION-FOLDER-DEDUP` (PR #30,
+  merged): folder-level duplicate detection (`Exact`/`Contained`),
+  asked for directly after the user tried a real scan through the
+  Windows GUI (PR #29). A high-fidelity UI design handoff for a full GUI
+  redesign (`Deduplication app UI design.zip`, committed at repo root —
+  a design asset, not code) landed on top of that. This branch adds the
+  first implementation step: a `find_duplicate_folders` Tauri command
+  exposing the folder-dedup engine to the GUI backend, ahead of the
+  frontend redesign that will call it.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -171,11 +170,30 @@
   three-directory tree (`photos/vacation` fully duplicated inside
   `backup`, which also has an unrelated extra file elsewhere) confirming
   the exact text and NDJSON output, including the `Contained`
-  subset/superset direction. GUI surfacing is explicitly scoped as a
-  separate follow-up, not bundled into this change.
+  subset/superset direction. GUI surfacing was scoped as a separate
+  follow-up, not bundled into this change — now in progress, see below.
 
 ## In progress
-- None.
+- **GUI redesign** — a high-fidelity design handoff (`Deduplication app UI
+  design.zip`, committed at repo root) specifies a full rebuild of
+  `rusty_fclone-gui`'s current bare-bones frontend into a 4-screen app
+  (Dashboard, Scan Setup, Duplicate Review, Rules & Automation). Split
+  into two steps to keep each change small and reviewable: (1) a new
+  `find_duplicate_folders` Tauri command exposing the folder-dedup engine
+  to the GUI backend (this branch — backend only, no frontend caller
+  yet), then (2) the actual frontend rebuild wired to real Tauri commands
+  (`start_scan`, `run_action`, `find_duplicate_folders`), not mocked
+  data. Real deviations from the mockup, decided before implementing:
+  the mockup's "Delete Duplicate Folder" button has no real backend
+  (ADR-0021 deliberately has no folder-level delete action) — disabled
+  rather than wired to a guessed behavior, pending a product decision on
+  what it should actually do. Dashboard's "Import history"/"Export
+  (JSON)" and the Recent Scans table need new backend work (no
+  history-reading command exists yet, `CLI-SCAN-HISTORY` is CLI-only);
+  the "Similar content" match-sensitivity mode and per-file-type scan
+  filtering aren't real engine capabilities (fuzzy matching is an
+  explicit `FCLONE-DETECTION-001` non-goal). Step (2) will state exactly
+  what ships with real data vs. what's deferred/disabled.
 
 ## Blocked
 - None.
@@ -196,14 +214,14 @@
   a plain text input) — deferred pending a look at Tauri's `dialog`
   plugin's own permission/capability shape (`GUI-UX-001`'s open
   questions).
-- GUI surfacing of folder-level duplicate detection — `DETECTION-FOLDER-DEDUP`
-  above is CLI-only by design (ADR-0021); a GUI toggle/view for the same
-  `find_folder_duplicates` results is a natural next step, not yet started.
+- GUI surfacing of folder-level duplicate detection — now in progress
+  (see above): the `find_duplicate_folders` command exists; the
+  frontend rebuild that calls it is the next step.
 
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-25)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-25)
-- `cargo test --workspace`: pass, 101/101 (2026-08-25)
+- `cargo test --workspace`: pass, 105/105 (2026-08-25)
 - `cargo bench --workspace --no-run`: pass (2026-08-25)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-25)
 - Manual CLI smoke tests across the project: verbosity flags, `RUST_LOG`
