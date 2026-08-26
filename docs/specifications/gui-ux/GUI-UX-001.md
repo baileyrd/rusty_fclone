@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.3.2
+- Version: 0.3.3
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -98,13 +98,17 @@ semantics, which are unchanged.
   SHALL NOT hardcode a different default than `ScanOptions::default()`).
 - `GUI-UX-001-FR-008`: The frontend SHALL invoke a `run_action` command
   with a duplicate group (`size`, `paths`), an action kind
-  (`"delete"|"trash"|"hardlink"|"reflink"`), and `apply: bool`; the backend SHALL
-  call `action::plan` unconditionally and SHALL call `action::apply` if
-  and only if `apply` is `true`.
+  (`"delete"|"trash"|"hardlink"|"reflink"`), an optional `keepReason`
+  string, and `apply: bool`; the backend SHALL call `action::plan`
+  unconditionally and SHALL call `action::apply` if and only if `apply` is
+  `true`. `keepReason` SHALL default to a placeholder when omitted
+  (`SELECTION-RULES` — the frontend resolves both the kept path, via
+  reordering `paths`, and the reason before calling this command; the
+  backend has no independent way to know "why").
 - `GUI-UX-001-FR-009`: `run_action`'s response SHALL include the plan
-  (`kept`, `planned` paths, `bytesReclaimed`) always, and the apply report
-  (`succeeded`, `failed`, `bytesReclaimed`) if and only if `apply` was
-  `true`.
+  (`kept`, `keepReason`, `planned` paths, `bytesReclaimed`) always, and
+  the apply report (`succeeded`, `failed`, `bytesReclaimed`) if and only
+  if `apply` was `true`.
 - `GUI-UX-001-FR-010`: `run_action` SHALL reject an action kind outside
   `{"delete","trash","hardlink","reflink"}` with an `Err`, without calling `plan`
   or `apply`.
@@ -143,10 +147,12 @@ semantics, which are unchanged.
   client-side navigation state, not separate windows or page loads.
   Dashboard, Scan Setup, and Duplicate Review SHALL be driven entirely
   by real data from `start_scan`/`run_action`/`find_duplicate_folders` —
-  no mock/sample data. Rules & Automation SHALL be a local-only preview
+  no mock/sample data. Rules & Automation's "Ignore tiny files" and
+  "Auto-clean Downloads" toggles SHALL remain a local-only preview
   (toggle state held in frontend memory, reset on relaunch) with no
-  backend persistence or scan-time effect, and SHALL say so in its own
-  UI text (ADR-0022).
+  backend persistence or scan-time effect, and SHALL say so in the
+  screen's own UI text (ADR-0022). "Keep newest copy" is the one
+  exception, reversed by `SELECTION-RULES`: see FR-022.
 - `GUI-UX-001-FR-015`: Once every `scan-event` for a scan has been
   received (a `Finished` event) and at least one `DuplicateGroup` was
   found, the frontend SHALL automatically invoke `find_duplicate_folders`
@@ -201,6 +207,18 @@ semantics, which are unchanged.
   (ADR-0009) better than a permanent-delete default. `"delete"` SHALL
   remain selectable as an explicit choice, unchanged in behavior
   (`ACTION-TRASH`, ADR-0024).
+- `GUI-UX-001-FR-022`: The frontend SHALL be able to invoke a `choose_keep`
+  command with a duplicate group and a rule name
+  (`"alphabetical"|"newest"|"oldest"|"shortest_path"|"longest_path"`); the
+  backend SHALL call `select::choose_keep` and return the chosen path and
+  its one-line reason, without planning or applying anything. The Rules &
+  Automation screen's "Keep newest copy" toggle SHALL be real (not local-
+  only preview, unlike the screen's other two toggles): enabling it SHALL
+  call `choose_keep` with rule `"newest"` for every group in Duplicate
+  Review that has no manual keep-choice override, and use its result as
+  that group's default kept path and displayed reason. A manual
+  keep-choice badge SHALL always take precedence over the rule
+  (`SELECTION-RULES`).
 
 ## Architecture and interfaces
 
@@ -481,6 +499,17 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.3 (2026-08-26): Reversed `FCLONE-ACTION-001`'s "configurable
+  keep-strategy" v1 non-goal on the GUI side too (`SELECTION-RULES`,
+  third and final Phase 1 unit of
+  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`). New `choose_keep`
+  command (FR-022) makes Rules & Automation's "Keep newest copy" toggle
+  real — the first of that screen's three toggles to stop being local-
+  only preview (FR-014 revised); "Ignore tiny files" and "Auto-clean
+  Downloads" are unaffected. `run_action` (FR-008/FR-009 revised) gained
+  an optional `keepReason` parameter, defaulted to a placeholder when
+  omitted, and its response's plan payload gained a `keepReason` field.
+  A manual keep-choice badge always overrides the rule.
 - 0.3.2 (2026-08-26): Added `"trash"` as a fourth action kind (FR-008/
   FR-018 revised) and FR-021 — the Duplicate Review/folder-review action
   selector now defaults to `"trash"` instead of `"delete"`, with permanent

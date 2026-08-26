@@ -1,8 +1,9 @@
 # Project Status
-- Last verified main commit: `17eed22` — merged `DETECTION-SCAN-FILTERS`
-  (PR #37), the first table-stakes unit from `docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch (`action-trash`)
-  implements that plan's second unit, `ACTION-TRASH`.
+- Last verified main commit: `c295f76` — merged `ACTION-TRASH` (PR #38),
+  the second table-stakes unit from `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch (`selection-rules`)
+  implements that plan's third and final Phase 1 unit,
+  `SELECTION-RULES`.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -12,9 +13,9 @@
   environment); everything merged since `v0.1.0` will be tagged once that
   happens.
 - Verified at: 2026-08-26
-- Current milestone: `ACTION-TRASH` (Phase 1 of
-  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`) — implemented, validated, not yet
-  merged. See `docs/roadmap/ROADMAP.md`.
+- Current milestone: `SELECTION-RULES` (Phase 1 of
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, now complete once this merges) —
+  implemented, validated, not yet merged. See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace (three crates) builds, lints, and tests clean
   on the pinned toolchain
 
@@ -361,17 +362,58 @@
   through the rendered UI (no Xvfb/`xdotool` pass this session — same gap
   `DETECTION-SCAN-FILTERS` already left open for its own GUI surface).
 
+- `SELECTION-RULES`: the third and final table-stakes unit from
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 1, reversing
+  `FCLONE-ACTION-001`'s v1 "configurable keep-strategy" non-goal. New
+  `rusty_fclone_core::select` module — `Rule::{AlphabeticallyFirst,
+  Newest, Oldest, ShortestPath, LongestPath}` and `choose_keep`, returning
+  the chosen path plus a one-line reason (the playbook's cheap "why this
+  one" explainability win). `action::plan` refactored into a thin wrapper
+  over new `plan_with_keep`, which takes an explicit kept path instead of
+  always `group.paths[0]` — every existing caller's behavior is
+  unchanged. `FCLONE-ACTION-001` 0.5.0 (FR-013, FR-014). Deliberately no
+  size-based rule (every path in a `DuplicateGroup` is the same size by
+  definition, so it could never distinguish anything) and no folder-level
+  `FolderMatch::Exact` rule support (stays alphabetically-first) — both
+  recorded in the spec's Non-goals rather than silently out of scope. CLI
+  gained `--keep-rule <alphabetical|newest|oldest|shortest-path|
+  longest-path>`, `CLI-UX-001` 0.3.2 (FR-015) — the `--format json` action
+  shape gained a `keep_reason` field, text output's `keep:` line now
+  shows the reason. GUI's previously-fake "Keep newest copy" toggle
+  (Rules & Automation) is now real via a new `choose_keep` Tauri command,
+  applied live to every group in Duplicate Review that has no manual
+  keep-choice override (a manual badge always wins); `run_action` gained
+  an optional `keepReason` parameter passed through to its response,
+  `GUI-UX-001` 0.3.3 (FR-008/FR-009/FR-014 revised, FR-022). No ADR —
+  routine implementation, no architecture-level decision. Implemented,
+  tested (146/146 workspace tests — 8 new `select` unit tests covering
+  every rule plus metadata-unreadable fallback and cross-rule tie-
+  breaking, 1 new `action` test for `plan_with_keep`, 1 new CLI test
+  confirming `--keep-rule newest` end-to-end, 5 new GUI tests —
+  `choose_keep` success/rejection, `run_action`'s `keepReason`
+  default/passthrough, and `parse_keep_rule`), `cargo fmt`/
+  `clippy -D warnings`/`bench --no-run`/`doc` all pass. Manually
+  smoke-tested against a real filesystem: `--keep-rule newest` against a
+  two-file tree with different modification times correctly kept the
+  newer file and reported the right reason in both `--format text` and
+  `--format json`. The GUI's real toggle is not yet manually verified
+  through the rendered UI (no Xvfb/`xdotool` pass this session — same
+  standing gap `DETECTION-SCAN-FILTERS`/`ACTION-TRASH` already left open
+  for their own GUI surfaces).
+
 ## In progress
-- None — `ACTION-TRASH` above is implemented and validated on branch
-  `action-trash`, not yet merged.
+- None — `SELECTION-RULES` above is implemented and validated on branch
+  `selection-rules`, not yet merged. Once it does, Phase 1 of
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md` is complete.
 
 ## Blocked
 - None.
 
 ## Next
-- `SELECTION-RULES` — Phase 1's remaining unit from
-  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`, once `ACTION-TRASH`
-  merges.
+- Phase 1 of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` is complete
+  once `SELECTION-RULES` merges. Phase 2's three units
+  (`ACTION-REFERENCE-FOLDERS`, `ACTION-MOVE-COPY`, `CLI-HISTORY-AUDIT`)
+  are independent of each other and can start in any order.
 - Follow-on units intentionally left open by earlier scoping decisions
   (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
   proper (full pipeline overlap, needs a `ScanEvent` finality-contract
@@ -395,9 +437,15 @@
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-26)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-26)
-- `cargo test --workspace`: pass, 132/132 (2026-08-26)
+- `cargo test --workspace`: pass, 146/146 (2026-08-26)
 - `cargo bench --workspace --no-run`: pass (2026-08-26)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-26)
+- Manual CLI smoke test, `SELECTION-RULES` (2026-08-26): a real two-file
+  tree with deliberately different modification times confirmed
+  `--keep-rule newest` kept the newer file (not the alphabetically-first
+  one) and reported the correct reason ("most recent modification time")
+  in both `--format text`'s `keep:` line and `--format json`'s
+  `keep_reason` field.
 - Manual CLI smoke test, `ACTION-TRASH` (2026-08-26): a real two-file
   duplicate pair confirmed `--action trash --apply` moved the redundant
   copy to the OS trash (found afterward at
@@ -446,6 +494,15 @@
   light-theme toggle. Every screen rendered correctly in both themes.
 
 ## Risks and decisions needed
+- `SELECTION-RULES`'s GUI surface (the real "Keep newest copy" toggle) has
+  IPC-level test coverage for the new `choose_keep` command and
+  `run_action`'s `keepReason` handling, but no Xvfb/`xdotool` end-to-end
+  pass confirmed the toggle actually changes which file is highlighted
+  and kept through the rendered UI. The async resolve-on-render pattern
+  (`ensureRuleKeepChoice`) is also new to this codebase's frontend —
+  worth a closer look the first time it's exercised through a real
+  window, since it's the first place `app.js` fetches backend data
+  outside of a scan-event stream or a direct user action.
 - `ACTION-TRASH`'s GUI surface (the new "Trash" option in the action-kind
   selector, now the default) has automated coverage at the unit-test
   level only (`parse_action_kind`) — no Xvfb/`xdotool` end-to-end pass

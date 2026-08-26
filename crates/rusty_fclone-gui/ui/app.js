@@ -113,6 +113,8 @@ const state = {
   errors: [],
   groupIndex: 0,
   keepChoice: {},
+  keepRule: "alphabetical",
+  ruleKeepChoice: {},
   actionKind: "trash",
   sessionBytesReclaimed: 0,
   actionMessage: null,
@@ -708,9 +710,41 @@ function reviewMain(item) {
   return fileReviewMain(item);
 }
 
+// Resolves (via the backend `choose_keep` command, SELECTION-RULES) which
+// path a non-default keep rule would pick for `item`, caching the result in
+// `state.ruleKeepChoice` so it's only looked up once per group. A manual
+// keep-choice badge always wins over the rule, so this is skipped entirely
+// once one exists. Mutates `state` directly rather than via `setState` for
+// the in-flight marker (`null`) to avoid re-rendering mid-render; the
+// resolved result *does* go through `setState` once the lookup returns, so
+// the card updates to reflect it.
+function ensureRuleKeepChoice(item) {
+  if (state.keepRule === "alphabetical") return;
+  if (state.keepChoice[item.key]) return;
+  if (item.key in state.ruleKeepChoice) return;
+  state.ruleKeepChoice[item.key] = null;
+  const group = item.group;
+  invoke("choose_keep", { group: { size: group.size, paths: group.paths }, rule: state.keepRule })
+    .then((result) => {
+      setState({ ruleKeepChoice: { ...state.ruleKeepChoice, [item.key]: result } });
+    })
+    .catch(() => {
+      setState({
+        ruleKeepChoice: {
+          ...state.ruleKeepChoice,
+          [item.key]: { keep: group.paths[0], reason: "alphabetically first (rule lookup failed)" },
+        },
+      });
+    });
+}
+
 function fileReviewMain(item) {
   const group = item.group;
-  const keepPath = state.keepChoice[item.key] || group.paths[0];
+  ensureRuleKeepChoice(item);
+  const ruleChoice = state.ruleKeepChoice[item.key];
+  const manualChoice = state.keepChoice[item.key];
+  const keepPath = manualChoice || (ruleChoice ? ruleChoice.keep : group.paths[0]);
+  const keepReason = manualChoice ? "your choice" : ruleChoice ? ruleChoice.reason : "alphabetically first";
   const others = group.paths.filter((p) => p !== keepPath).length;
 
   const cards = group.paths.map((path, i) => {
@@ -729,7 +763,7 @@ function fileReviewMain(item) {
       el(
         "button",
         { className: "compare-badge " + (keep ? "keep" : "remove"), onClick: () => setState({ keepChoice: { ...state.keepChoice, [item.key]: path } }) },
-        keep ? "Keeping this file" : "Marked for removal",
+        keep && !manualChoice ? `Keeping this file — ${keepReason}` : keep ? "Keeping this file" : "Marked for removal",
       ),
     );
   });
@@ -770,7 +804,7 @@ function fileReviewMain(item) {
         el("button", { className: "btn btn-ghost", onClick: nextGroup }, "Skip"),
         el(
           "button",
-          { className: "btn btn-danger", disabled: others === 0, onClick: () => applyAction(item, keepPath) },
+          { className: "btn btn-danger", disabled: others === 0, onClick: () => applyAction(item, keepPath, keepReason) },
           `Apply ${ACTION_KINDS.find((k) => k.id === state.actionKind).label}`,
         ),
       ),
@@ -883,7 +917,7 @@ function nextGroup() {
   setState({ groupIndex: (state.groupIndex + 1) % count });
 }
 
-async function applyAction(item, keepPath) {
+async function applyAction(item, keepPath, keepReason) {
   const group = item.group;
   const ordered = [keepPath, ...group.paths.filter((p) => p !== keepPath)];
   const message = `This will ${state.actionKind} ${ordered.length - 1} file(s), reclaiming ${bytesHuman(group.size * (ordered.length - 1))}. Continue?`;
@@ -893,6 +927,7 @@ async function applyAction(item, keepPath) {
     const result = await invoke("run_action", {
       group: { size: group.size, paths: ordered },
       kind: state.actionKind,
+      keepReason,
       apply: true,
     });
     const reclaimed = result.applied ? result.applied.bytesReclaimed : 0;
@@ -951,6 +986,13 @@ async function applyFolderAction(item) {
 // ---- rules (local-only preview -- ADR-0022; no backend exists yet) --------
 
 function rulesView() {
+  // "Keep newest copy" (rule id 1) is real (SELECTION-RULES) -- its on/off
+  // state lives in `state.keepRule`, not `state.rules[].enabled`, and its
+  // toggle drives every group in Review via the backend `choose_keep`
+  // command. The other two rules are still an explicit local-only preview
+  // (ADR-0022) -- unaffected by this.
+  const keepNewestEnabled = state.keepRule === "newest";
+
   return el(
     "div",
     { className: "view" },
@@ -961,30 +1003,44 @@ function rulesView() {
         "div",
         null,
         el("div", { className: "view-title" }, "Rules & Automation"),
-        el("div", { className: "view-subtitle" }, "Preview only -- not yet applied to real scans."),
+        el(
+          "div",
+          { className: "view-subtitle" },
+          "\"Keep newest copy\" applies live in Review. Everything else here is preview only.",
+        ),
       ),
     ),
     el(
       "div",
       { className: "rule-list" },
-      ...state.rules.map((r) =>
-        el(
+      ...state.rules.map((r) => {
+        const isKeepNewest = r.id === 1;
+        const enabled = isKeepNewest ? keepNewestEnabled : r.enabled;
+        const onClick = isKeepNewest
+          ? () =>
+              setState({
+                keepRule: keepNewestEnabled ? "alphabetical" : "newest",
+                ruleKeepChoice: {},
+              })
+          : () => setState({ rules: state.rules.map((x) => (x.id === r.id ? { ...x, enabled: !x.enabled } : x)) });
+        return el(
           "div",
           { className: "card rule-card" },
-          el("div", { className: "rule-icon" + (r.enabled ? " enabled" : "") }, icon("shield", 17)),
+          el("div", { className: "rule-icon" + (enabled ? " enabled" : "") }, icon("shield", 17)),
           el("div", { className: "rule-body" }, el("div", { className: "rule-title" }, r.title), el("div", { className: "rule-desc" }, r.desc)),
           el(
             "button",
-            {
-              className: "toggle-track" + (r.enabled ? " on" : ""),
-              onClick: () => setState({ rules: state.rules.map((x) => (x.id === r.id ? { ...x, enabled: !x.enabled } : x)) }),
-            },
+            { className: "toggle-track" + (enabled ? " on" : ""), onClick },
             el("div", { className: "toggle-knob" }),
           ),
-        ),
-      ),
+        );
+      }),
     ),
-    el("div", { className: "empty-note", style: "text-align:center" }, "Rules aren't wired to real scans yet -- toggles here are a local preview only."),
+    el(
+      "div",
+      { className: "empty-note", style: "text-align:center" },
+      "\"Keep newest copy\" is applied for real in Review. \"Ignore tiny files\" and \"Auto-clean Downloads\" aren't wired to real scans yet -- local preview only.",
+    ),
   );
 }
 
@@ -1006,6 +1062,7 @@ async function startScan() {
     progress: { filesScanned: 0, bytesScanned: 0 },
     groupIndex: 0,
     keepChoice: {},
+    ruleKeepChoice: {},
     view: "review",
   });
 

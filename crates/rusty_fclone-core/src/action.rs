@@ -84,15 +84,26 @@ pub struct ApplyReport {
 /// surface that as a per-file failure rather than `plan` silently dropping
 /// it, keeping the plan an honest preview of what `apply` will attempt.
 pub fn plan(group: &DuplicateGroup, kind: ActionKind) -> ActionPlan {
-    let kept = group.paths[0].to_path_buf();
-    let kept_id = get_file_id(&kept).ok();
+    plan_with_keep(group, &group.paths[0], kind)
+}
 
-    let actions: Vec<FileAction> = group.paths[1..]
+/// Like [`plan`], but the kept path is `keep` instead of always
+/// `group.paths[0]` — the entry point for rule-driven bulk selection
+/// (`SELECTION-RULES`, `crate::select::choose_keep`). `keep` is expected to
+/// be one of `group.paths` (every caller in this codebase gets it from
+/// there); passing a path that isn't just means every real path in
+/// `group.paths` ends up planned, since none of them equals `keep`.
+pub fn plan_with_keep(group: &DuplicateGroup, keep: &Path, kind: ActionKind) -> ActionPlan {
+    let keep_id = get_file_id(keep).ok();
+
+    let actions: Vec<FileAction> = group
+        .paths
         .iter()
+        .filter(|path| path.as_ref() != keep)
         .filter(|path| {
-            let same_file = kept_id
+            let same_file = keep_id
                 .as_ref()
-                .and_then(|kept_id| get_file_id(path).ok().map(|id| id == *kept_id))
+                .and_then(|keep_id| get_file_id(path).ok().map(|id| id == *keep_id))
                 .unwrap_or(false);
             !same_file
         })
@@ -105,7 +116,7 @@ pub fn plan(group: &DuplicateGroup, kind: ActionKind) -> ActionPlan {
     let bytes_reclaimed = group.size * actions.len() as u64;
     ActionPlan {
         size: group.size,
-        kept,
+        kept: keep.to_path_buf(),
         actions,
         bytes_reclaimed,
     }
@@ -212,6 +223,27 @@ mod tests {
         assert_eq!(plan.kept, a);
         let planned: Vec<&PathBuf> = plan.actions.iter().map(|a| &a.path).collect();
         assert_eq!(planned, vec![&b, &c]);
+        assert_eq!(plan.bytes_reclaimed, 6);
+    }
+
+    #[test]
+    fn plan_with_keep_honors_an_explicit_non_default_kept_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let c = dir.path().join("c.txt");
+        for p in [&a, &b, &c] {
+            fs::write(p, b"dup").unwrap();
+        }
+
+        let plan = plan_with_keep(
+            &group(3, vec![a.clone(), b.clone(), c.clone()]),
+            &b,
+            ActionKind::Delete,
+        );
+        assert_eq!(plan.kept, b);
+        let planned: Vec<&PathBuf> = plan.actions.iter().map(|a| &a.path).collect();
+        assert_eq!(planned, vec![&a, &c]);
         assert_eq!(plan.bytes_reclaimed, 6);
     }
 

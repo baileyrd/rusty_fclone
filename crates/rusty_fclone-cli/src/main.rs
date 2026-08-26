@@ -8,6 +8,7 @@ use std::sync::Arc;
 use clap::{Parser, ValueEnum};
 use rusty_fclone_core::action::{self, ActionKind, ActionPlan, ApplyReport};
 use rusty_fclone_core::folder_action;
+use rusty_fclone_core::select::{self, Rule as SelectRule};
 use rusty_fclone_core::{
     find_folder_duplicates, scan, DuplicateGroup, FileError, FolderMatch, ScanEvent, ScanOptions,
     ScanProgress, ScanSummary,
@@ -58,6 +59,37 @@ enum Format {
     Text,
     /// One JSON object per line (NDJSON), machine-readable.
     Json,
+}
+
+/// Which copy to keep in a group, applied across every group in one pass
+/// instead of the previous per-group-only alphabetically-first default.
+/// Mirrors `rusty_fclone_core::select::Rule` (`SELECTION-RULES`).
+#[derive(Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+enum KeepRule {
+    /// Keep the alphabetically-first path. Default -- matches this
+    /// project's behavior before `--keep-rule` existed.
+    #[default]
+    Alphabetical,
+    /// Keep the most recently modified copy.
+    Newest,
+    /// Keep the least recently modified copy.
+    Oldest,
+    /// Keep the copy at the shallowest path.
+    ShortestPath,
+    /// Keep the copy at the deepest path.
+    LongestPath,
+}
+
+impl KeepRule {
+    fn as_core_rule(self) -> SelectRule {
+        match self {
+            KeepRule::Alphabetical => SelectRule::AlphabeticallyFirst,
+            KeepRule::Newest => SelectRule::Newest,
+            KeepRule::Oldest => SelectRule::Oldest,
+            KeepRule::ShortestPath => SelectRule::ShortestPath,
+            KeepRule::LongestPath => SelectRule::LongestPath,
+        }
+    }
 }
 
 /// Find duplicate files, fast.
@@ -157,6 +189,12 @@ struct Cli {
     /// happen.
     #[arg(long, value_enum, default_value_t = Action::Report)]
     action: Action,
+
+    /// Which copy to keep in each group when --action is set. Applied
+    /// across every group in one pass -- no effect in the default Report
+    /// mode, which doesn't designate a kept file at all.
+    #[arg(long, value_enum, default_value_t = KeepRule::Alphabetical)]
+    keep_rule: KeepRule,
 
     /// Actually perform --action's effect. Without this flag, delete,
     /// hardlink, and reflink only print a preview and touch nothing — a
@@ -290,6 +328,7 @@ fn run(cli: Cli) -> ExitCode {
                     had_errors |= handle_group(
                         &group,
                         action_kind,
+                        cli.keep_rule.as_core_rule(),
                         cli.apply,
                         cli.format,
                         &mut total_bytes_reclaimed,
@@ -353,6 +392,7 @@ fn run(cli: Cli) -> ExitCode {
             had_errors |= handle_group(
                 group,
                 action_kind,
+                cli.keep_rule.as_core_rule(),
                 cli.apply,
                 cli.format,
                 &mut total_bytes_reclaimed,
@@ -551,6 +591,7 @@ fn report_action_summary(
 fn handle_group(
     group: &DuplicateGroup,
     action_kind: Option<ActionKind>,
+    keep_rule: SelectRule,
     apply: bool,
     format: Format,
     total_bytes_reclaimed: &mut u64,
@@ -561,7 +602,8 @@ fn handle_group(
         return false;
     };
 
-    let plan = action::plan(group, kind);
+    let (keep, keep_reason) = select::choose_keep(group, keep_rule);
+    let plan = action::plan_with_keep(group, &keep, kind);
     if plan.actions.is_empty() {
         print_group(format, group, None);
         return false;
@@ -584,7 +626,11 @@ fn handle_group(
     *total_bytes_reclaimed += bytes_reclaimed;
     *total_files_acted_on += files_acted_on;
 
-    print_group(format, group, Some((kind, &plan, apply, report.as_ref())));
+    print_group(
+        format,
+        group,
+        Some((kind, &plan, &keep_reason, apply, report.as_ref())),
+    );
 
     if let Some(report) = &report {
         for err in &report.failed {
@@ -598,7 +644,7 @@ fn handle_group(
 fn print_group(
     format: Format,
     group: &DuplicateGroup,
-    action: Option<(ActionKind, &ActionPlan, bool, Option<&ApplyReport>)>,
+    action: Option<(ActionKind, &ActionPlan, &str, bool, Option<&ApplyReport>)>,
 ) {
     match format {
         Format::Text => print_group_text(group, action),
@@ -608,16 +654,16 @@ fn print_group(
 
 fn print_group_text(
     group: &DuplicateGroup,
-    action: Option<(ActionKind, &ActionPlan, bool, Option<&ApplyReport>)>,
+    action: Option<(ActionKind, &ActionPlan, &str, bool, Option<&ApplyReport>)>,
 ) {
     println!("--- {} bytes, {} copies ---", group.size, group.paths.len());
     for path in &group.paths {
         println!("{}", path.display());
     }
-    let Some((kind, plan, ..)) = action else {
+    let Some((kind, plan, keep_reason, ..)) = action else {
         return;
     };
-    println!("  keep: {}", plan.kept.display());
+    println!("  keep: {} ({keep_reason})", plan.kept.display());
     for file_action in &plan.actions {
         println!("  {}: {}", action_word(kind), file_action.path.display());
     }
@@ -625,9 +671,9 @@ fn print_group_text(
 
 fn print_group_json(
     group: &DuplicateGroup,
-    action: Option<(ActionKind, &ActionPlan, bool, Option<&ApplyReport>)>,
+    action: Option<(ActionKind, &ActionPlan, &str, bool, Option<&ApplyReport>)>,
 ) {
-    let action = action.map(|(kind, plan, applied, report)| {
+    let action = action.map(|(kind, plan, keep_reason, applied, report)| {
         let (succeeded, failed) = match report {
             Some(report) => (
                 paths_to_strings(&report.succeeded),
@@ -642,6 +688,7 @@ fn print_group_json(
         JsonAction {
             kind: action_word(kind),
             kept: plan.kept.display().to_string(),
+            keep_reason: keep_reason.to_string(),
             applied,
             planned: plan
                 .actions
@@ -943,6 +990,7 @@ enum JsonEvent {
 struct JsonAction {
     kind: &'static str,
     kept: String,
+    keep_reason: String,
     applied: bool,
     planned: Vec<String>,
     succeeded: Vec<String>,
@@ -1000,6 +1048,7 @@ mod tests {
             exclude_extensions: Vec::new(),
             exclude_paths: ScanOptions::default().exclude_paths,
             action: Action::Report,
+            keep_rule: KeepRule::Alphabetical,
             apply: false,
             yes: false,
             find_duplicate_folders: false,
@@ -1087,6 +1136,27 @@ mod tests {
             !b.exists(),
             "the redundant copy must be gone from its original path"
         );
+    }
+
+    #[test]
+    fn keep_rule_newest_keeps_the_most_recently_modified_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(&b, b"dup").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.action = Action::Delete;
+        cli.keep_rule = KeepRule::Newest;
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert!(b.exists(), "the newest file (b) must be kept");
+        assert!(!a.exists(), "the older file (a) must be removed");
     }
 
     #[test]

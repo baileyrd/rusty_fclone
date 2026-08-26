@@ -9,11 +9,12 @@ usable from either a CLI or a desktop GUI.
 
 Detection (staged hashing, benchmarked faster than fclones on most
 workloads — see below), an action layer (delete/trash/hardlink/reflink,
-dry-run by default), richer CLI output (JSON, progress reporting, an interactive
-confirmation prompt), a desktop GUI, an opt-in incremental hash cache,
-opt-in SQLite scan-history, opt-in import of an existing fclones hash
-cache, opt-in folder-level duplicate detection, and include/exclude scan
-filters (min/max size, extension, excluded paths) are all implemented. See
+dry-run by default, rule-based keep selection), richer CLI output (JSON,
+progress reporting, an interactive confirmation prompt), a desktop GUI, an
+opt-in incremental hash cache, opt-in SQLite scan-history, opt-in import of
+an existing fclones hash cache, opt-in folder-level duplicate detection,
+and include/exclude scan filters (min/max size, extension, excluded paths)
+are all implemented. See
 [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
 checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
 what's planned.
@@ -100,6 +101,11 @@ Options:
           Actually perform --action's effect (required in addition to
           --action delete/trash/hardlink/reflink — a two-flag confirmation
           so a single typo can't cause data loss)
+      --keep-rule <RULE>
+          Which copy to keep in each group when --action is set: alphabetical
+          (default), newest, oldest, shortest-path, or longest-path. Applied
+          across every group in one pass. No effect in the default Report
+          mode, which doesn't designate a kept file at all
   -y, --yes
           Skip the interactive confirmation prompt normally shown before
           --apply mutates anything
@@ -126,6 +132,10 @@ rusty-fclone --action delete --apply --yes /path/to/scan
 # Same, but recoverable -- move redundant copies to the OS trash/recycle
 # bin instead of deleting them outright.
 rusty-fclone --action trash --apply /path/to/scan
+
+# Keep the most recently modified copy in each group instead of the
+# alphabetically-first one -- applied across every group in one pass.
+rusty-fclone --action trash --keep-rule newest --apply /path/to/scan
 
 # Reclaim the space without losing any path -- replace redundant copies
 # with hardlinks to the kept file instead of deleting them.

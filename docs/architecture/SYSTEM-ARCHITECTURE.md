@@ -110,6 +110,10 @@ DuplicateGroup ──action::plan(kind)──► ActionPlan (no filesystem mutat
   other path, re-checks its platform file-id against the kept file's —
   paths that already share its inode (existing hardlink aliases) are
   excluded, since there's nothing to reclaim by acting on them.
+  `plan_with_keep` generalizes this to an explicit, caller-chosen kept
+  path; `select::choose_keep` picks one by a named rule (newest, oldest,
+  shortest/longest path) instead of always alphabetically-first
+  (`SELECTION-RULES`).
 - `apply`'s hardlink action never leaves a path momentarily missing: it
   links the kept file to a temporary sibling name, then renames that over
   the target path.

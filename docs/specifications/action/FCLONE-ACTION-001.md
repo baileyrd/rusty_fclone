@@ -1,5 +1,5 @@
 # FCLONE-ACTION-001 — Duplicate Action Layer
-- Version: 0.4.0
+- Version: 0.5.0
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`
@@ -14,8 +14,14 @@ nature.
 
 ## Non-goals
 
-- Configurable keep-strategy (by mtime, by directory priority, interactive
-  per-group choice) — v1 always keeps the alphabetically-first path.
+- Configurable keep-strategy beyond `select::Rule`'s five options (by
+  mtime, by path depth, or the original alphabetically-first default) —
+  reversed by `SELECTION-RULES`, the same way the GUI's own "v1 non-goal"
+  was reversed by `GUI` (ADR-0020). A rule based on file size specifically
+  remains out of scope, and always will be for `DuplicateGroup`s: every
+  path in one already shares the exact same size by definition (this
+  project's detection is hash-verified exact-content matching), so a
+  size-based rule could never distinguish anything.
 - An interactive confirmation prompt — v1's safety model is the two-flag
   (`--action` + `--apply`) CLI requirement instead (ADR-0009).
 - Moving files (as opposed to deleting or hardlinking) — not requested,
@@ -24,13 +30,21 @@ nature.
   mutually-identical folders beyond the alphabetically-first convention
   `plan`/`FR-001` already establish for files — `folder_action::plan_folder`
   acts on exactly one `removed`/`kept` folder pair; a caller decides which
-  folder to keep and calls it once per remaining folder (ADR-0023).
+  folder to keep and calls it once per remaining folder (ADR-0023). Still
+  true after `SELECTION-RULES`: `select::Rule` applies to `DuplicateGroup`s
+  (files) only, not `FolderMatch`es — a folder's own timestamp is a
+  weaker, less obviously meaningful signal than a single file's, and
+  extending rule-based selection there would widen this unit's scope
+  beyond what the research behind it actually asked for (no ADR for this
+  scoping call — see the change history entry below).
 
 ## Context and terminology
 
-- **Kept file**: the one path in a group left untouched —
-  `DuplicateGroup.paths[0]` (already alphabetically-first per
-  `FCLONE-DETECTION-001`'s sort invariant).
+- **Kept file**: the one path in a group left untouched — `plan`'s default
+  is `DuplicateGroup.paths[0]` (already alphabetically-first per
+  `FCLONE-DETECTION-001`'s sort invariant); `plan_with_keep` and
+  `select::choose_keep` let a caller choose a different one by rule
+  (`SELECTION-RULES`).
 - **Redundant copy**: any other path in the group that isn't already a
   hardlink alias of the kept file.
 - **Plan**: a pure, side-effect-free description of what an action would
@@ -103,6 +117,20 @@ nature.
   kept file untouched. A trash-provider failure SHALL be recorded as a
   per-file failure (FR-005), converted to an `io::Error` via
   `io::Error::other` (ADR-0024).
+- `FCLONE-ACTION-001-FR-013`: `plan_with_keep(group, keep, kind)` SHALL
+  behave identically to `plan(group, kind)` except that the kept path
+  SHALL be `keep` instead of always `group.paths[0]`; `plan(group, kind)`
+  SHALL be defined as `plan_with_keep(group, &group.paths[0], kind)`, so
+  every existing caller's behavior is unchanged (`SELECTION-RULES`).
+- `FCLONE-ACTION-001-FR-014`: `select::choose_keep(group, rule)` SHALL
+  choose one path from `group.paths` under `rule` (`AlphabeticallyFirst`,
+  `Newest`, `Oldest`, `ShortestPath`, `LongestPath`) and SHALL return it
+  together with a one-line, human-readable reason for the choice.
+  `Rule::AlphabeticallyFirst` SHALL always return `group.paths[0]`. Every
+  other rule SHALL break a tie — including when a path's metadata can't be
+  read at all — toward the earliest path in `group.paths`' existing sorted
+  order, so it degrades to `AlphabeticallyFirst`'s exact choice whenever it
+  can't actually distinguish two paths.
 
 ## Architecture and interfaces
 
@@ -117,6 +145,7 @@ pub struct ApplyReport { pub succeeded: Vec<PathBuf>, pub failed: Vec<FileError>
                           pub bytes_reclaimed: u64 }
 
 pub fn plan(group: &DuplicateGroup, kind: ActionKind) -> ActionPlan;
+pub fn plan_with_keep(group: &DuplicateGroup, keep: &Path, kind: ActionKind) -> ActionPlan;
 pub fn apply(plan: &ActionPlan) -> ApplyReport;
 ```
 
@@ -139,10 +168,19 @@ pub fn plan_folder(removed: &Path, kept: &Path, groups: &[DuplicateGroup],
 pub fn apply_folder(plan: &FolderActionPlan) -> FolderApplyReport;
 ```
 
+Selection public API (`crates/rusty_fclone-core/src/select.rs`,
+`SELECTION-RULES`):
+
+```rust
+pub enum Rule { AlphabeticallyFirst, Newest, Oldest, ShortestPath, LongestPath }
+pub fn choose_keep(group: &DuplicateGroup, rule: Rule) -> (Arc<Path>, String);
+```
+
 CLI (`rusty_fclone-cli`): `--action <report|delete|trash|hardlink|reflink>`
-(default `report`) and `--apply` (bool). The CLI's `Action` enum is a thin
-wrapper adding `Report` — kept CLI-side rather than in core, since core
-stays CLI-agnostic (ADR-0005).
+(default `report`), `--keep-rule <alphabetical|newest|oldest|shortest-path|
+longest-path>` (default `alphabetical`), and `--apply` (bool). The CLI's
+`Action` enum is a thin wrapper adding `Report` — kept CLI-side rather than
+in core, since core stays CLI-agnostic (ADR-0005).
 
 ## Data/state and invariants
 
@@ -266,6 +304,22 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.5.0 (2026-08-26): Reversed the "configurable keep-strategy" v1
+  non-goal (`SELECTION-RULES`, third and final Phase 1 unit of
+  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`). New `select` module
+  (`FR-014`) — `Rule::{AlphabeticallyFirst, Newest, Oldest, ShortestPath,
+  LongestPath}` plus `choose_keep`, returning a one-line reason alongside
+  the chosen path (the playbook's cheap "why this one" explainability
+  win). `plan` refactored into a thin wrapper over new `plan_with_keep`
+  (`FR-013`), which takes an explicit kept path instead of always
+  `group.paths[0]` — `DuplicateGroup.paths`' own sorted order and every
+  existing caller's behavior are both unchanged. Deliberately does not
+  cover folder-level `FolderMatch::Exact` selection or a size-based rule
+  (every path in a `DuplicateGroup` shares the same size by definition) —
+  see the updated Non-goals above. CLI gained `--keep-rule`; GUI's
+  previously-fake "Keep newest copy" toggle is now real (new `choose_keep`
+  Tauri command), applied live to every group in Review. No ADR — routine
+  implementation, no architecture-level decision.
 - 0.4.0 (2026-08-26): Added `ActionKind::Trash` (FR-012) — moves a
   redundant copy to the OS trash/recycle bin via the `trash` crate instead
   of deleting it permanently, closing the largest table-stakes safety gap
