@@ -2,14 +2,14 @@
 
 A duplicate-file finder — a spiritual successor to
 [fclones](https://github.com/pkolaczk/fclones): a fast detection engine
-plus an action layer to delete, hardlink, or reflink what it finds,
+plus an action layer to delete, trash, hardlink, or reflink what it finds,
 usable from either a CLI or a desktop GUI.
 
 ## Status
 
 Detection (staged hashing, benchmarked faster than fclones on most
-workloads — see below), an action layer (delete/hardlink/reflink, dry-run
-by default), richer CLI output (JSON, progress reporting, an interactive
+workloads — see below), an action layer (delete/trash/hardlink/reflink,
+dry-run by default), richer CLI output (JSON, progress reporting, an interactive
 confirmation prompt), a desktop GUI, an opt-in incremental hash cache,
 opt-in SQLite scan-history, opt-in import of an existing fclones hash
 cache, opt-in folder-level duplicate detection, and include/exclude scan
@@ -18,8 +18,9 @@ filters (min/max size, extension, excluded paths) are all implemented. See
 checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
 what's planned.
 
-**By default, this tool only reports — it never deletes or links anything
-unless you pass both `--action <delete|hardlink|reflink>` and `--apply`.**
+**By default, this tool only reports — it never deletes, trashes, or links
+anything unless you pass both `--action <delete|trash|hardlink|reflink>`
+and `--apply`.**
 
 ## Usage
 
@@ -89,14 +90,16 @@ Options:
           another folder's. Off by default
       --action <ACTION>
           What to do with redundant copies once a group is confirmed:
-          report (default, just print groups), delete, hardlink, or
-          reflink (copy-on-write clone, CoW-capable filesystems only).
-          Without --apply, delete/hardlink/reflink only preview what would
-          happen.
+          report (default, just print groups), delete (permanent, no
+          recovery path -- prefer trash unless this is specifically
+          wanted), trash (move to the OS trash/recycle bin, recoverable),
+          hardlink, or reflink (copy-on-write clone, CoW-capable
+          filesystems only). Without --apply, delete/trash/hardlink/
+          reflink only preview what would happen.
       --apply
           Actually perform --action's effect (required in addition to
-          --action delete/hardlink/reflink — a two-flag confirmation so a
-          single typo can't cause data loss)
+          --action delete/trash/hardlink/reflink — a two-flag confirmation
+          so a single typo can't cause data loss)
   -y, --yes
           Skip the interactive confirmation prompt normally shown before
           --apply mutates anything
@@ -119,6 +122,10 @@ rusty-fclone --action delete /path/to/scan
 # Actually delete them, keeping one (alphabetically-first) copy per group,
 # without the interactive confirmation prompt.
 rusty-fclone --action delete --apply --yes /path/to/scan
+
+# Same, but recoverable -- move redundant copies to the OS trash/recycle
+# bin instead of deleting them outright.
+rusty-fclone --action trash --apply /path/to/scan
 
 # Reclaim the space without losing any path -- replace redundant copies
 # with hardlinks to the kept file instead of deleting them.

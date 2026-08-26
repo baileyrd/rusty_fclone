@@ -5,7 +5,7 @@
 `rusty_fclone` is a spiritual successor to [fclones](https://github.com/pkolaczk/fclones)
 (not "fclone" — a naming correction made early in this project's history):
 a duplicate-file finder with a detection engine and an action layer
-(delete/hardlink/reflink, see ADR-0009 and ADR-0014) on top of it,
+(delete/trash/hardlink/reflink, see ADR-0009, ADR-0014, and ADR-0024) on top of it,
 consumed by both a CLI and a desktop GUI (see ADR-0020). This document
 covers all three.
 

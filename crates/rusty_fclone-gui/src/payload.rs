@@ -247,6 +247,7 @@ pub fn normalize_path_input(s: &str) -> String {
 pub fn parse_action_kind(kind: &str) -> Result<ActionKind, String> {
     match kind {
         "delete" => Ok(ActionKind::Delete),
+        "trash" => Ok(ActionKind::Trash),
         "hardlink" => Ok(ActionKind::Hardlink),
         "reflink" => Ok(ActionKind::Reflink),
         other => Err(format!("unknown action kind: {other}")),
@@ -506,8 +507,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_action_kind_accepts_the_three_known_words_and_rejects_others() {
+    fn parse_action_kind_accepts_the_four_known_words_and_rejects_others() {
         assert_eq!(parse_action_kind("delete"), Ok(ActionKind::Delete));
+        assert_eq!(parse_action_kind("trash"), Ok(ActionKind::Trash));
         assert_eq!(parse_action_kind("hardlink"), Ok(ActionKind::Hardlink));
         assert_eq!(parse_action_kind("reflink"), Ok(ActionKind::Reflink));
         assert!(parse_action_kind("frobnicate").is_err());

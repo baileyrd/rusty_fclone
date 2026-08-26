@@ -6,7 +6,7 @@ under `crates/`) would override this file.
 ## Project shape
 - Purpose: `rusty_fclone` is a duplicate-file finder — a spiritual successor
   to [fclones](https://github.com/pkolaczk/fclones) — with a detection
-  engine and an action layer (delete/hardlink/reflink) on top of it,
+  engine and an action layer (delete/trash/hardlink/reflink) on top of it,
   consumed by both a CLI and a desktop GUI (see
   `docs/architecture/SYSTEM-ARCHITECTURE.md`).
 - Rust structure: a three-member Cargo workspace.

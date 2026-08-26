@@ -1,10 +1,8 @@
 # Project Status
-- Last verified main commit: `bf90020` — merged `docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md` (PR #36), a competitive gap analysis
-  synthesizing user-supplied market research against this repo's actual
-  state into a proposed, phased set of roadmap units. This branch
-  (`detection-scan-filters`) implements that plan's first table-stakes
-  unit, `DETECTION-SCAN-FILTERS`.
+- Last verified main commit: `17eed22` — merged `DETECTION-SCAN-FILTERS`
+  (PR #37), the first table-stakes unit from `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch (`action-trash`)
+  implements that plan's second unit, `ACTION-TRASH`.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -14,7 +12,7 @@
   environment); everything merged since `v0.1.0` will be tagged once that
   happens.
 - Verified at: 2026-08-26
-- Current milestone: `DETECTION-SCAN-FILTERS` (Phase 1 of
+- Current milestone: `ACTION-TRASH` (Phase 1 of
   `DEDUP-GAP-IMPLEMENTATION-PLAN.md`) — implemented, validated, not yet
   merged. See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace (three crates) builds, lints, and tests clean
@@ -330,17 +328,50 @@
   results correctly. The GUI's new Scan Setup fields are not yet manually
   verified through the rendered UI (no Xvfb/`xdotool` pass this session).
 
+- `ACTION-TRASH`: the second table-stakes unit from
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`. New `ActionKind::Trash` — moves a
+  redundant copy to the OS trash/recycle bin (via the new `trash` crate
+  dependency, `rusty_fclone-core`-only) instead of deleting it
+  permanently. `FCLONE-ACTION-001` 0.4.0 (FR-011 revised, FR-012).
+  `folder_action::apply_folder`'s directory-prune gate (previously
+  `plan.kind == ActionKind::Delete`) now also fires for `Trash`, since
+  both leave `removed` file-less the same way. CLI gained `--action
+  trash`, `CLI-UX-001` unchanged (reuses the existing generic `--action
+  <ACTION>` flag). GUI's action selector gained a "Trash" option and now
+  defaults to it instead of permanent `Delete` (`Delete` stays selectable,
+  unchanged in behavior), `GUI-UX-001` 0.3.2 (FR-008/FR-018 revised,
+  FR-021). ADR-0024 records the decision, modeled directly on ADR-0014's
+  "dependency, not hand-rolled per-platform FFI" reasoning for reflink —
+  verified in a scratch project that `trash` builds cleanly on Linux with
+  no C-toolchain requirement (`AGENTS.md`'s dependency policy) before
+  adding it. Implemented, tested (132/132 workspace tests — 3 new tests:
+  a core `action` test (trash removes the redundant copy, keeps the kept
+  file), a `folder_action` test (trash prunes the emptied folder just
+  like delete), and a CLI test (`--action trash --apply` actually
+  trashes); one existing GUI `payload` test extended to cover the new
+  `"trash"` word), `cargo fmt`/
+  `clippy -D warnings`/`bench --no-run`/`doc` all pass. Manually
+  smoke-tested against real filesystems in this environment: a real
+  file-level `--action trash --apply` run (the redundant copy vanished
+  from its original path and reappeared, recoverable, at
+  `~/.local/share/Trash/files/`; the kept file untouched) and a real
+  `--find-duplicate-folders` + `--action trash --apply` run (the subset
+  folder's file trashed, the now-empty folder pruned, the superset
+  untouched). The GUI's new "Trash" option is not yet manually verified
+  through the rendered UI (no Xvfb/`xdotool` pass this session — same gap
+  `DETECTION-SCAN-FILTERS` already left open for its own GUI surface).
+
 ## In progress
-- None — `DETECTION-SCAN-FILTERS` above is implemented and validated on
-  branch `detection-scan-filters`, not yet merged.
+- None — `ACTION-TRASH` above is implemented and validated on branch
+  `action-trash`, not yet merged.
 
 ## Blocked
 - None.
 
 ## Next
-- `ACTION-TRASH` and `SELECTION-RULES` — Phase 1's remaining two units from
-  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`, once
-  `DETECTION-SCAN-FILTERS` merges.
+- `SELECTION-RULES` — Phase 1's remaining unit from
+  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`, once `ACTION-TRASH`
+  merges.
 - Follow-on units intentionally left open by earlier scoping decisions
   (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
   proper (full pipeline overlap, needs a `ScanEvent` finality-contract
@@ -364,9 +395,17 @@
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-26)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-26)
-- `cargo test --workspace`: pass, 129/129 (2026-08-26)
+- `cargo test --workspace`: pass, 132/132 (2026-08-26)
 - `cargo bench --workspace --no-run`: pass (2026-08-26)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-26)
+- Manual CLI smoke test, `ACTION-TRASH` (2026-08-26): a real two-file
+  duplicate pair confirmed `--action trash --apply` moved the redundant
+  copy to the OS trash (found afterward at
+  `~/.local/share/Trash/files/`) and left the kept file untouched; a
+  second real three-file tree (two directories, one duplicate file each)
+  confirmed `--find-duplicate-folders --action trash --apply` trashed
+  the subset folder's file, pruned the now-empty folder, and left the
+  superset folder untouched.
 - Manual CLI smoke test, `DETECTION-SCAN-FILTERS` (2026-08-26): a real
   5-file tree (one 4-way duplicate spread across a subdirectory and a
   `.tmp` file, plus one small unique file) confirmed `--min-size`,
@@ -407,6 +446,19 @@
   light-theme toggle. Every screen rendered correctly in both themes.
 
 ## Risks and decisions needed
+- `ACTION-TRASH`'s GUI surface (the new "Trash" option in the action-kind
+  selector, now the default) has automated coverage at the unit-test
+  level only (`parse_action_kind`) — no Xvfb/`xdotool` end-to-end pass
+  confirmed selecting it and applying it actually trashes a file through
+  the rendered UI. The CLI path is manually verified against real
+  filesystems (see Validation above); the underlying core/folder-action
+  logic reused by both is fully unit-tested either way, so the residual
+  risk is UI wiring specifically, not the action itself.
+- `trash::delete`'s behavior on Windows/macOS is entirely delegated to and
+  trusted from the `trash` crate's own platform-specific implementations
+  (Recycle Bin Shell API, Finder Trash) — not independently re-verified in
+  this environment, which only exercises the Linux freedesktop.org trash
+  path. Same posture ADR-0014 already took for reflink's non-Linux paths.
 - `DETECTION-SCAN-FILTERS`'s GUI surface (Scan Setup's new "Include/exclude
   filters" card) has automated coverage at the payload-conversion level
   only — no Xvfb/`xdotool` end-to-end pass confirmed the fields actually

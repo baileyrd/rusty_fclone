@@ -16,8 +16,17 @@ use crate::model::DuplicateGroup;
 /// What to do with every redundant copy in a group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
-    /// Remove the redundant copy outright.
+    /// Remove the redundant copy outright — permanently, with no recovery
+    /// path. Prefer [`ActionKind::Trash`] unless a permanent, unrecoverable
+    /// delete is specifically wanted.
     Delete,
+    /// Move the redundant copy to the operating system's trash/recycle bin
+    /// (`ACTION-TRASH`) instead of deleting it outright — recoverable
+    /// through the OS's own trash UI, the same safety net most comparable
+    /// tools default to. Uses the `trash` crate's freedesktop.org trash
+    /// spec implementation on Linux, the Recycle Bin on Windows, and the
+    /// Trash on macOS.
+    Trash,
     /// Replace the redundant copy with a hardlink to the kept file, freeing
     /// its storage while every path involved keeps working.
     Hardlink,
@@ -111,6 +120,7 @@ pub fn apply(plan: &ActionPlan) -> ApplyReport {
     for action in &plan.actions {
         let result = match action.kind {
             ActionKind::Delete => fs::remove_file(&action.path),
+            ActionKind::Trash => trash::delete(&action.path).map_err(std::io::Error::other),
             ActionKind::Hardlink => hardlink_over(&plan.kept, &action.path),
             ActionKind::Reflink => reflink_over(&plan.kept, &action.path),
         };
@@ -241,6 +251,27 @@ mod tests {
         assert_eq!(report.bytes_reclaimed, 3);
         assert!(a.exists());
         assert!(!b.exists());
+    }
+
+    #[test]
+    fn apply_trash_removes_the_redundant_copy_from_its_original_path_and_keeps_the_kept_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let plan = plan(&group(3, vec![a.clone(), b.clone()]), ActionKind::Trash);
+        let report = apply(&plan);
+
+        assert_eq!(report.succeeded, vec![b.clone()]);
+        assert!(report.failed.is_empty());
+        assert_eq!(report.bytes_reclaimed, 3);
+        assert!(a.exists(), "the kept file must be untouched");
+        assert!(
+            !b.exists(),
+            "the redundant copy must be gone from its original path (moved to the OS trash)"
+        );
     }
 
     #[test]

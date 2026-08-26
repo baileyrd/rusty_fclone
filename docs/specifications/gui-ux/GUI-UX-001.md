@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.3.1
+- Version: 0.3.2
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -98,7 +98,7 @@ semantics, which are unchanged.
   SHALL NOT hardcode a different default than `ScanOptions::default()`).
 - `GUI-UX-001-FR-008`: The frontend SHALL invoke a `run_action` command
   with a duplicate group (`size`, `paths`), an action kind
-  (`"delete"|"hardlink"|"reflink"`), and `apply: bool`; the backend SHALL
+  (`"delete"|"trash"|"hardlink"|"reflink"`), and `apply: bool`; the backend SHALL
   call `action::plan` unconditionally and SHALL call `action::apply` if
   and only if `apply` is `true`.
 - `GUI-UX-001-FR-009`: `run_action`'s response SHALL include the plan
@@ -106,7 +106,7 @@ semantics, which are unchanged.
   (`succeeded`, `failed`, `bytesReclaimed`) if and only if `apply` was
   `true`.
 - `GUI-UX-001-FR-010`: `run_action` SHALL reject an action kind outside
-  `{"delete","hardlink","reflink"}` with an `Err`, without calling `plan`
+  `{"delete","trash","hardlink","reflink"}` with an `Err`, without calling `plan`
   or `apply`.
 - `GUI-UX-001-FR-011`: The frontend SHALL require an explicit, separate
   confirmation step — naming the action, the number of files affected,
@@ -166,7 +166,7 @@ semantics, which are unchanged.
 - `GUI-UX-001-FR-018`: The frontend SHALL be able to invoke a
   `run_folder_action` command with a `removed`/`kept` folder path pair,
   the full set of `DuplicateGroup`s the originating scan produced, the
-  scan options, an action kind (`"delete"|"hardlink"|"reflink"`), and
+  scan options, an action kind (`"delete"|"trash"|"hardlink"|"reflink"`), and
   `apply: bool`; the backend SHALL call
   `rusty_fclone_core::folder_action::plan_folder` unconditionally and
   SHALL call `apply_folder` if and only if `apply` is `true` — the
@@ -195,6 +195,12 @@ semantics, which are unchanged.
   explicitly local-only preview, unaffected by this requirement)
   (`DETECTION-SCAN-FILTERS`). A blank field SHALL map to `ScanOptions`'s
   own "no filtering" default (`None`/empty), never to a zero value.
+- `GUI-UX-001-FR-021`: The Duplicate Review and folder-review screens'
+  action-kind selector SHALL default to `"trash"`, not `"delete"` —
+  recoverable-by-default matches this project's stated safety posture
+  (ADR-0009) better than a permanent-delete default. `"delete"` SHALL
+  remain selectable as an explicit choice, unchanged in behavior
+  (`ACTION-TRASH`, ADR-0024).
 
 ## Architecture and interfaces
 
@@ -475,6 +481,11 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.2 (2026-08-26): Added `"trash"` as a fourth action kind (FR-008/
+  FR-018 revised) and FR-021 — the Duplicate Review/folder-review action
+  selector now defaults to `"trash"` instead of `"delete"`, with permanent
+  delete kept as an explicit choice (`ACTION-TRASH`, ADR-0024).
+  `parse_action_kind` gained a `"trash"` branch.
 - 0.3.1 (2026-08-26): Added FR-020 — a new "Include/exclude filters" card
   on Scan Setup (min/max size, include/exclude extensions, exclude paths),
   wired to `ScanOptionsPayload` and sent to `start_scan` for real, unlike
