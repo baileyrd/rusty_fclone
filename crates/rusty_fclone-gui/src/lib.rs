@@ -7,6 +7,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::start_scan,
             commands::run_action,
+            commands::choose_keep,
             commands::find_duplicate_folders,
             commands::run_folder_action,
         ])

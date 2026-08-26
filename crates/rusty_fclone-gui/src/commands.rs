@@ -7,11 +7,13 @@ use std::path::PathBuf;
 
 use tauri::{AppHandle, Emitter, Runtime};
 
+use rusty_fclone_core::select;
 use rusty_fclone_core::{action, find_folder_duplicates, folder_action};
 
 use crate::payload::{
-    normalize_path_input, parse_action_kind, ActionResultPayload, FolderActionResultPayload,
-    FolderMatchPayload, GroupPayload, ScanEventPayload, ScanOptionsPayload,
+    normalize_path_input, parse_action_kind, parse_keep_rule, ActionResultPayload,
+    ChooseKeepPayload, FolderActionResultPayload, FolderMatchPayload, GroupPayload,
+    ScanEventPayload, ScanOptionsPayload,
 };
 
 /// Starts a scan on a background thread and streams results back to the
@@ -67,10 +69,20 @@ pub fn start_scan<R: Runtime>(
 pub fn run_action(
     group: GroupPayload,
     kind: String,
+    keep_reason: Option<String>,
     apply: bool,
 ) -> Result<ActionResultPayload, String> {
     let kind = parse_action_kind(&kind)?;
     let group = group.into();
+    // The kept path is always `group.paths[0]` here -- the frontend
+    // resolves which path that should be *before* calling this command
+    // (either a manual keep-choice badge, or `choose_keep` below for a
+    // non-default rule) and sends it as the group's first path, the same
+    // reordering trick manual keep-choice already used before
+    // `SELECTION-RULES` existed (no new core API for "which path to
+    // keep"). `keep_reason` is likewise resolved by the frontend from
+    // whichever of those two paths it took, and just passed through here
+    // for display -- `action::plan` itself has no concept of "why".
     let plan = action::plan(&group, kind);
     let applied = if apply {
         Some((&action::apply(&plan)).into())
@@ -78,8 +90,23 @@ pub fn run_action(
         None
     };
     Ok(ActionResultPayload {
-        plan: (&plan).into(),
+        plan: (&plan, keep_reason.as_deref().unwrap_or("your choice")).into(),
         applied,
+    })
+}
+
+/// Chooses which path in `group` to keep under `rule`, without planning or
+/// applying any action — lets the frontend resolve (and display) a rule's
+/// pick before the user confirms, the same way it already resolves a
+/// manual keep-choice badge (`SELECTION-RULES`).
+#[tauri::command]
+pub fn choose_keep(group: GroupPayload, rule: String) -> Result<ChooseKeepPayload, String> {
+    let rule = parse_keep_rule(&rule)?;
+    let group = group.into();
+    let (keep, reason) = select::choose_keep(&group, rule);
+    Ok(ChooseKeepPayload {
+        keep: keep.display().to_string(),
+        reason,
     })
 }
 
@@ -157,6 +184,7 @@ mod tests {
             .invoke_handler(tauri::generate_handler![
                 super::start_scan,
                 super::run_action,
+                super::choose_keep,
                 super::find_duplicate_folders,
                 super::run_folder_action
             ])
@@ -239,6 +267,88 @@ mod tests {
             !b.exists(),
             "apply: true must actually delete the redundant copy"
         );
+    }
+
+    #[test]
+    fn run_action_keep_reason_defaults_to_a_placeholder_when_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let response = invoke(
+            "run_action",
+            json!({
+                "group": {"size": 3, "paths": [a.display().to_string(), b.display().to_string()]},
+                "kind": "delete",
+                "apply": false,
+            }),
+        )
+        .expect("run_action should succeed");
+
+        assert_eq!(response["plan"]["keepReason"], "your choice");
+    }
+
+    #[test]
+    fn run_action_passes_through_an_explicit_keep_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let response = invoke(
+            "run_action",
+            json!({
+                "group": {"size": 3, "paths": [a.display().to_string(), b.display().to_string()]},
+                "kind": "delete",
+                "keepReason": "most recent modification time",
+                "apply": false,
+            }),
+        )
+        .expect("run_action should succeed");
+
+        assert_eq!(
+            response["plan"]["keepReason"],
+            "most recent modification time"
+        );
+    }
+
+    #[test]
+    fn choose_keep_resolves_the_newest_file_without_touching_the_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(&b, b"dup").unwrap();
+
+        let response = invoke(
+            "choose_keep",
+            json!({
+                "group": {"size": 3, "paths": [a.display().to_string(), b.display().to_string()]},
+                "rule": "newest",
+            }),
+        )
+        .expect("choose_keep should succeed");
+
+        assert_eq!(response["keep"], b.display().to_string());
+        assert_eq!(response["reason"], "most recent modification time");
+        assert!(a.exists(), "choose_keep must never touch the filesystem");
+        assert!(b.exists(), "choose_keep must never touch the filesystem");
+    }
+
+    #[test]
+    fn choose_keep_rejects_an_unknown_rule() {
+        let response = invoke(
+            "choose_keep",
+            json!({
+                "group": {"size": 1, "paths": ["/a", "/b"]},
+                "rule": "frobnicate",
+            }),
+        );
+        assert!(response.is_err(), "an unknown keep rule must be rejected");
     }
 
     #[test]
@@ -439,6 +549,7 @@ mod tests {
             .invoke_handler(tauri::generate_handler![
                 super::start_scan,
                 super::run_action,
+                super::choose_keep,
                 super::find_duplicate_folders,
                 super::run_folder_action
             ])

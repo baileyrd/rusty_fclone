@@ -1,5 +1,5 @@
 # CLI-UX-001 — CLI Output, Progress, and Confirmation
-- Version: 0.3.1
+- Version: 0.3.2
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -53,8 +53,9 @@ confirmation prompt as a second safety layer on top of `--apply`.
   emitted as `{"type":"duplicate_group","size":<u64>,"paths":[<string>,...],"action":<action-or-null>}`.
   When an action was requested (`--action` other than `report`) and the
   group has at least one non-kept path, `action` SHALL be
-  `{"kind":<string>,"kept":<string>,"applied":<bool>,"planned":[<string>,...],"succeeded":[<string>,...],"failed":[<string>,...],"bytes_reclaimed":<u64>}`;
-  otherwise `null`.
+  `{"kind":<string>,"kept":<string>,"keep_reason":<string>,"applied":<bool>,"planned":[<string>,...],"succeeded":[<string>,...],"failed":[<string>,...],"bytes_reclaimed":<u64>}`;
+  otherwise `null`. `keep_reason` is a one-line, human-readable explanation
+  of why `kept` was chosen (`SELECTION-RULES`, `FCLONE-ACTION-001` FR-014).
 - `CLI-UX-001-FR-003`: In `--format json`, a per-file error SHALL be
   emitted as `{"type":"error","path":<string>,"message":<string>}`.
 - `CLI-UX-001-FR-004`: In `--format json`, a progress checkpoint SHALL be
@@ -135,6 +136,13 @@ confirmation prompt as a second safety layer on top of `--apply`.
   `--exclude-ext` list (the default, flag never passed) SHALL map to
   `None`, matching `ScanOptions`'s own "no filtering" default
   (`DETECTION-SCAN-FILTERS`).
+- `CLI-UX-001-FR-015`: The CLI SHALL expose `FCLONE-ACTION-001`'s
+  `select::Rule` as `--keep-rule <alphabetical|newest|oldest|
+  shortest-path|longest-path>`, default `alphabetical`, applied via
+  `action::plan_with_keep`/`select::choose_keep` in place of
+  `action::plan` for every group when `--action` is set. `--keep-rule`
+  SHALL have no effect in the default `report` mode, which does not
+  designate a kept file at all (`SELECTION-RULES`).
 
 ## Architecture and interfaces
 
@@ -307,6 +315,14 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.2 (2026-08-26): Added `--keep-rule` (FR-015), the CLI surface for
+  `FCLONE-ACTION-001` 0.5.0's new `select::Rule`/`choose_keep`
+  (`SELECTION-RULES`, third and final Phase 1 unit of
+  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`). The `--format json`
+  action shape (FR-002) gained a `keep_reason` field; text output's
+  `keep:` line now shows the reason in parentheses. No existing flag or
+  default behavior changed — `--keep-rule`'s default (`alphabetical`)
+  reproduces the exact prior behavior.
 - 0.3.1 (2026-08-26): Added `--min-size`/`--max-size`/`--include-ext`/
   `--exclude-ext`/`--exclude-path` (FR-014), the CLI surface for
   `FCLONE-DETECTION-001` 0.2.1's new scan-filter fields

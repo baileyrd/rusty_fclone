@@ -19,6 +19,7 @@ mod hash;
 mod io_pool;
 mod model;
 mod pipeline;
+pub mod select;
 mod traversal;
 
 pub use error::{FileError, FolderActionError, ScanError};

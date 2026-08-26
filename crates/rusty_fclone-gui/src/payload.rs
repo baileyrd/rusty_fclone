@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use rusty_fclone_core::action::{ActionKind, ActionPlan, ApplyReport, FileAction};
 use rusty_fclone_core::folder_action::{FolderActionPlan, FolderApplyReport};
+use rusty_fclone_core::select::Rule as SelectRule;
 use rusty_fclone_core::{
     DuplicateGroup, FileError, FolderMatch, ScanOptions, ScanProgress, ScanSummary,
 };
@@ -254,18 +255,42 @@ pub fn parse_action_kind(kind: &str) -> Result<ActionKind, String> {
     }
 }
 
+/// Parses the frontend's `keepRule` string into a [`SelectRule`]
+/// (`SELECTION-RULES`). Mirrors `parse_action_kind`'s shape.
+pub fn parse_keep_rule(rule: &str) -> Result<SelectRule, String> {
+    match rule {
+        "alphabetical" => Ok(SelectRule::AlphabeticallyFirst),
+        "newest" => Ok(SelectRule::Newest),
+        "oldest" => Ok(SelectRule::Oldest),
+        "shortest_path" => Ok(SelectRule::ShortestPath),
+        "longest_path" => Ok(SelectRule::LongestPath),
+        other => Err(format!("unknown keep rule: {other}")),
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionPlanPayload {
     pub kept: String,
+    pub keep_reason: String,
     pub planned: Vec<String>,
     pub bytes_reclaimed: u64,
 }
 
-impl From<&ActionPlan> for ActionPlanPayload {
-    fn from(plan: &ActionPlan) -> Self {
+/// Response shape for the `choose_keep` command — [`SelectRule`] applied to
+/// a group, without planning or applying an action (`SELECTION-RULES`).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChooseKeepPayload {
+    pub keep: String,
+    pub reason: String,
+}
+
+impl From<(&ActionPlan, &str)> for ActionPlanPayload {
+    fn from((plan, keep_reason): (&ActionPlan, &str)) -> Self {
         ActionPlanPayload {
             kept: plan.kept.display().to_string(),
+            keep_reason: keep_reason.to_string(),
             planned: plan
                 .actions
                 .iter()
@@ -513,6 +538,22 @@ mod tests {
         assert_eq!(parse_action_kind("hardlink"), Ok(ActionKind::Hardlink));
         assert_eq!(parse_action_kind("reflink"), Ok(ActionKind::Reflink));
         assert!(parse_action_kind("frobnicate").is_err());
+    }
+
+    #[test]
+    fn parse_keep_rule_accepts_the_five_known_words_and_rejects_others() {
+        assert_eq!(
+            parse_keep_rule("alphabetical"),
+            Ok(SelectRule::AlphabeticallyFirst)
+        );
+        assert_eq!(parse_keep_rule("newest"), Ok(SelectRule::Newest));
+        assert_eq!(parse_keep_rule("oldest"), Ok(SelectRule::Oldest));
+        assert_eq!(
+            parse_keep_rule("shortest_path"),
+            Ok(SelectRule::ShortestPath)
+        );
+        assert_eq!(parse_keep_rule("longest_path"), Ok(SelectRule::LongestPath));
+        assert!(parse_keep_rule("frobnicate").is_err());
     }
 
     #[test]
