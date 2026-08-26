@@ -1,5 +1,5 @@
 # FCLONE-ACTION-001 — Duplicate Action Layer
-- Version: 0.3.0
+- Version: 0.4.0
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`
@@ -46,7 +46,7 @@ nature.
 ## Requirements
 
 - `FCLONE-ACTION-001-FR-001`: Given a `DuplicateGroup` and an `ActionKind`
-  (`Delete`, `Hardlink`, or `Reflink`), `plan` SHALL identify the kept file
+  (`Delete`, `Trash`, `Hardlink`, or `Reflink`), `plan` SHALL identify the kept file
   as `paths[0]` and SHALL include every other path not already sharing the
   kept file's platform file-id as a planned action.
 - `FCLONE-ACTION-001-FR-002`: `plan` SHALL NOT perform any filesystem
@@ -91,19 +91,25 @@ nature.
   delete/hardlink/reflink implementation. A per-file failure SHALL be
   recorded in `FolderApplyReport::failed` and SHALL NOT prevent the
   remaining planned pairs from being attempted.
-- `FCLONE-ACTION-001-FR-011`: After an `ActionKind::Delete` folder action
-  completes with zero per-file failures, `apply_folder` SHALL prune the
-  now file-less `removed` directory tree and record the outcome in
-  `FolderApplyReport::directory_removed`. `ActionKind::Hardlink`/
+- `FCLONE-ACTION-001-FR-011`: After an `ActionKind::Delete`/`ActionKind::Trash`
+  folder action completes with zero per-file failures, `apply_folder`
+  SHALL prune the now file-less `removed` directory tree and record the
+  outcome in `FolderApplyReport::directory_removed`. `ActionKind::Hardlink`/
   `Reflink` SHALL NOT attempt any directory removal — every file stays in
   place under `removed`.
+- `FCLONE-ACTION-001-FR-012`: `apply` with `ActionKind::Trash` SHALL move
+  every planned path to the operating system's trash/recycle bin (via the
+  `trash` crate) rather than removing it permanently, and SHALL leave the
+  kept file untouched. A trash-provider failure SHALL be recorded as a
+  per-file failure (FR-005), converted to an `io::Error` via
+  `io::Error::other` (ADR-0024).
 
 ## Architecture and interfaces
 
 Public API (`crates/rusty_fclone-core/src/action.rs`):
 
 ```rust
-pub enum ActionKind { Delete, Hardlink, Reflink }
+pub enum ActionKind { Delete, Trash, Hardlink, Reflink }
 pub struct FileAction { pub path: PathBuf, pub kind: ActionKind }
 pub struct ActionPlan { pub size: u64, pub kept: PathBuf,
                          pub actions: Vec<FileAction>, pub bytes_reclaimed: u64 }
@@ -115,7 +121,8 @@ pub fn apply(plan: &ActionPlan) -> ApplyReport;
 ```
 
 `Reflink` uses the `reflink-copy` crate's strict `reflink` function (not
-`reflink_or_copy`) — see ADR-0014.
+`reflink_or_copy`) — see ADR-0014. `Trash` uses the `trash` crate's
+`trash::delete` — see ADR-0024.
 
 Folder-level public API (`crates/rusty_fclone-core/src/folder_action.rs`,
 ADR-0023), reusing `action::apply` internally rather than duplicating it:
@@ -132,7 +139,7 @@ pub fn plan_folder(removed: &Path, kept: &Path, groups: &[DuplicateGroup],
 pub fn apply_folder(plan: &FolderActionPlan) -> FolderApplyReport;
 ```
 
-CLI (`rusty_fclone-cli`): `--action <report|delete|hardlink|reflink>`
+CLI (`rusty_fclone-cli`): `--action <report|delete|trash|hardlink|reflink>`
 (default `report`) and `--apply` (bool). The CLI's `Action` enum is a thin
 wrapper adding `Report` — kept CLI-side rather than in core, since core
 stays CLI-agnostic (ADR-0005).
@@ -163,7 +170,11 @@ stays CLI-agnostic (ADR-0005).
 - `Delete`, `Hardlink`, and `Reflink` are all irreversible or hard-to-reverse
   operations on the user's filesystem — this is the first genuinely
   destructive capability in the codebase. The dry-run-by-default,
-  two-flag-to-apply design (ADR-0009) is the primary safeguard.
+  two-flag-to-apply design (ADR-0009) is the primary safeguard. `Trash`
+  (ADR-0024) is the one recoverable exception — the redundant copy is
+  moved to the OS trash/recycle bin, not removed outright — but is not
+  itself a substitute for the dry-run/`--apply` safeguard, which still
+  gates it the same as every other `ActionKind`.
 - Hardlinking requires the kept file and the target path to be on the same
   filesystem; a cross-device attempt fails per-file (FR-005) rather than
   aborting the whole run.
@@ -255,6 +266,15 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.4.0 (2026-08-26): Added `ActionKind::Trash` (FR-012) — moves a
+  redundant copy to the OS trash/recycle bin via the `trash` crate instead
+  of deleting it permanently, closing the largest table-stakes safety gap
+  found in `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` (`ACTION-TRASH`,
+  Phase 1). `folder_action::apply_folder`'s directory-prune gate (FR-011)
+  now also fires for `Trash`, matching `Delete`'s post-condition (every
+  file gone from `removed`). CLI gained `--action trash`; GUI's action
+  selector gained a "Trash" option and now defaults to it instead of
+  `Delete`, with permanent delete kept as an explicit choice. ADR-0024.
 - 0.3.0 (2026-08-25): Added folder-level actions (FR-009 through FR-011,
   `folder_action` module) — `plan_folder`/`apply_folder` act on every
   file in one folder against its confirmed partner in another, reusing

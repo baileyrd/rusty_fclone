@@ -5,7 +5,7 @@
 //!
 //! Deliberately reuses [`crate::action`]'s existing, already-tested
 //! per-file primitives ([`crate::action::apply`]) rather than duplicating
-//! their delete/hardlink/reflink logic: each file pair becomes its own
+//! their delete/trash/hardlink/reflink logic: each file pair becomes its own
 //! single-action [`crate::action::ActionPlan`], planned and applied
 //! through the exact same code path a regular file-level `DuplicateGroup`
 //! action uses.
@@ -47,8 +47,9 @@ pub struct FolderApplyReport {
     pub bytes_reclaimed: u64,
     /// `true` once every planned file was successfully removed *and* the
     /// now file-less `removed` directory tree was pruned. Only ever set
-    /// for [`ActionKind::Delete`] — hardlink/reflink replace each file in
-    /// place, so `removed` stays fully populated by design.
+    /// for [`ActionKind::Delete`]/[`ActionKind::Trash`] — hardlink/reflink
+    /// replace each file in place, so `removed` stays fully populated by
+    /// design.
     pub directory_removed: bool,
 }
 
@@ -157,10 +158,10 @@ pub fn plan_folder(
 /// path a regular `DuplicateGroup` action uses. Per-file failures don't
 /// abort the rest (ADR-0004's error-tolerance contract).
 ///
-/// After a fully successful [`ActionKind::Delete`] (every pair succeeded),
-/// the now file-less `removed` directory tree is pruned via
-/// `fs::remove_dir_all`. A failed prune (e.g. something else was added to
-/// `removed` after this plan was made) is reported via
+/// After a fully successful [`ActionKind::Delete`]/[`ActionKind::Trash`]
+/// (every pair succeeded), the now file-less `removed` directory tree is
+/// pruned via `fs::remove_dir_all`. A failed prune (e.g. something else was
+/// added to `removed` after this plan was made) is reported via
 /// `directory_removed: false`, not as a per-file failure — every actual
 /// file action already succeeded by that point.
 pub fn apply_folder(plan: &FolderActionPlan) -> FolderApplyReport {
@@ -181,7 +182,8 @@ pub fn apply_folder(plan: &FolderActionPlan) -> FolderApplyReport {
         report.bytes_reclaimed += sub_report.bytes_reclaimed;
     }
 
-    if plan.kind == ActionKind::Delete && report.failed.is_empty() {
+    let prunes_directory = matches!(plan.kind, ActionKind::Delete | ActionKind::Trash);
+    if prunes_directory && report.failed.is_empty() {
         report.directory_removed = fs::remove_dir_all(&plan.removed).is_ok();
     }
 
@@ -334,6 +336,41 @@ mod tests {
         assert!(report.failed.is_empty());
         assert_eq!(report.bytes_reclaimed, 3);
         assert!(report.directory_removed);
+        assert!(!small.exists(), "the emptied removed folder must be pruned");
+        assert!(
+            big.join("1.txt").exists(),
+            "the kept side must be untouched"
+        );
+    }
+
+    #[test]
+    fn apply_folder_trash_removes_every_file_and_prunes_the_empty_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"one").unwrap();
+        fs::write(big.join("1.txt"), b"one").unwrap();
+
+        let groups = vec![group(3, &[&small.join("1.txt"), &big.join("1.txt")])];
+        let plan = plan_folder(
+            &small,
+            &big,
+            &groups,
+            &ScanOptions::default(),
+            ActionKind::Trash,
+        )
+        .unwrap();
+        let report = apply_folder(&plan);
+
+        assert_eq!(report.succeeded, vec![small.join("1.txt")]);
+        assert!(report.failed.is_empty());
+        assert_eq!(report.bytes_reclaimed, 3);
+        assert!(
+            report.directory_removed,
+            "trash prunes the emptied directory tree just like delete"
+        );
         assert!(!small.exists(), "the emptied removed folder must be pruned");
         assert!(
             big.join("1.txt").exists(),

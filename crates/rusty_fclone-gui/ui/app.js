@@ -11,6 +11,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const ACTION_KINDS = [
+  { id: "trash", label: "Trash" },
   { id: "delete", label: "Delete" },
   { id: "hardlink", label: "Hardlink" },
   { id: "reflink", label: "Reflink" },
@@ -112,7 +113,7 @@ const state = {
   errors: [],
   groupIndex: 0,
   keepChoice: {},
-  actionKind: "delete",
+  actionKind: "trash",
   sessionBytesReclaimed: 0,
   actionMessage: null,
   rules: [
@@ -733,7 +734,7 @@ function fileReviewMain(item) {
     );
   });
 
-  const actionVerb = { delete: "removed", hardlink: "hardlinked", reflink: "reflinked" }[state.actionKind];
+  const actionVerb = { delete: "removed", trash: "trashed", hardlink: "hardlinked", reflink: "reflinked" }[state.actionKind];
 
   return el(
     "div",
@@ -830,7 +831,7 @@ function folderReviewMain(item) {
   const removedCount = pairs.length;
   const totalFiles = removedCount * match.fileCount;
   const totalBytes = removedCount * match.bytes;
-  const actionVerb = { delete: "removed", hardlink: "hardlinked", reflink: "reflinked" }[state.actionKind];
+  const actionVerb = { delete: "removed", trash: "trashed", hardlink: "hardlinked", reflink: "reflinked" }[state.actionKind];
   const actionLabel = ACTION_KINDS.find((k) => k.id === state.actionKind).label;
 
   return el(

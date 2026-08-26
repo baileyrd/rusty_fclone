@@ -22,8 +22,14 @@ use serde::Serialize;
 enum Action {
     /// Report duplicate groups; don't touch the filesystem. Default.
     Report,
-    /// Delete every redundant copy, keeping one file per group.
+    /// Delete every redundant copy permanently, keeping one file per group.
+    /// No recovery path once this succeeds -- prefer `trash` unless a
+    /// permanent, unrecoverable delete is specifically wanted.
     Delete,
+    /// Move every redundant copy to the operating system's trash/recycle
+    /// bin instead of deleting it outright, keeping one file per group.
+    /// Recoverable through the OS's own trash UI.
+    Trash,
     /// Replace every redundant copy with a hardlink to the kept file.
     Hardlink,
     /// Replace every redundant copy with a copy-on-write clone (reflink)
@@ -38,6 +44,7 @@ impl Action {
         match self {
             Action::Report => None,
             Action::Delete => Some(ActionKind::Delete),
+            Action::Trash => Some(ActionKind::Trash),
             Action::Hardlink => Some(ActionKind::Hardlink),
             Action::Reflink => Some(ActionKind::Reflink),
         }
@@ -964,6 +971,7 @@ struct FolderPairActionJson {
 fn action_word(kind: ActionKind) -> &'static str {
     match kind {
         ActionKind::Delete => "delete",
+        ActionKind::Trash => "trash",
         ActionKind::Hardlink => "hardlink",
         ActionKind::Reflink => "reflink",
     }
@@ -1057,6 +1065,28 @@ mod tests {
         assert_eq!(exit, ExitCode::SUCCESS);
         assert!(a.exists(), "the kept file must survive");
         assert!(!b.exists(), "the redundant copy must be gone");
+    }
+
+    #[test]
+    fn action_with_apply_actually_trashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.action = Action::Trash;
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert!(a.exists(), "the kept file must survive");
+        assert!(
+            !b.exists(),
+            "the redundant copy must be gone from its original path"
+        );
     }
 
     #[test]
