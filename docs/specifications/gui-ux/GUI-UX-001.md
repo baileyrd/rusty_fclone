@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.3.0
+- Version: 0.3.1
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -187,6 +187,14 @@ semantics, which are unchanged.
   requires for file groups (naming the action, folder and file counts,
   and bytes to be reclaimed) before any `run_folder_action` call with
   `apply: true`.
+- `GUI-UX-001-FR-020`: Scan Setup SHALL expose real, wired fields for
+  `FCLONE-DETECTION-001`'s scan filters (min/max size, include/exclude
+  extensions, exclude paths) in a dedicated "Include/exclude filters"
+  card, sent to `start_scan` as part of `ScanOptionsPayload` — distinct
+  from the Rules & Automation screen's toggles (FR-014's own scope,
+  explicitly local-only preview, unaffected by this requirement)
+  (`DETECTION-SCAN-FILTERS`). A blank field SHALL map to `ScanOptions`'s
+  own "no filtering" default (`None`/empty), never to a zero value.
 
 ## Architecture and interfaces
 
@@ -467,6 +475,14 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.1 (2026-08-26): Added FR-020 — a new "Include/exclude filters" card
+  on Scan Setup (min/max size, include/exclude extensions, exclude paths),
+  wired to `ScanOptionsPayload` and sent to `start_scan` for real, unlike
+  Rules & Automation's existing preview-only toggles which are unchanged
+  by this work (`DETECTION-SCAN-FILTERS`, first unit of the phased plan
+  in `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`). `ScanOptionsPayload`
+  gained five new optional fields, all defaulting to no filtering when
+  omitted or blank.
 - 0.3.0 (2026-08-25): Enabled the Duplicate Review screen's "Delete
   Duplicate Folder" button, shipped disabled in 0.2.0 pending ADR-0023's
   decision. New `run_folder_action` command (FR-018) wraps

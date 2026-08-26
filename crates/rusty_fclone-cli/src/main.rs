@@ -115,6 +115,36 @@ struct Cli {
     #[arg(long)]
     history: Option<PathBuf>,
 
+    /// Skip files smaller than this size (bytes). Applied during traversal,
+    /// before any hashing (`DETECTION-SCAN-FILTERS`).
+    #[arg(long)]
+    min_size: Option<u64>,
+
+    /// Skip files larger than this size (bytes). Applied during traversal,
+    /// before any hashing (`DETECTION-SCAN-FILTERS`).
+    #[arg(long)]
+    max_size: Option<u64>,
+
+    /// Only scan files with this extension (case-insensitive, without the
+    /// leading `.`). Repeatable. A file with no extension is skipped if
+    /// this is set (`DETECTION-SCAN-FILTERS`).
+    #[arg(long = "include-ext")]
+    include_extensions: Vec<String>,
+
+    /// Skip files with this extension (case-insensitive, without the
+    /// leading `.`), even if `--include-ext` would otherwise allow them.
+    /// Repeatable (`DETECTION-SCAN-FILTERS`).
+    #[arg(long = "exclude-ext")]
+    exclude_extensions: Vec<String>,
+
+    /// Skip this path and everything beneath it entirely -- not just from
+    /// the results, but from traversal itself. Repeatable. Matched as a
+    /// literal path prefix against the path as traversed; pass it in the
+    /// same form (relative/absolute) as `root` for reliable matching
+    /// (`DETECTION-SCAN-FILTERS`).
+    #[arg(long = "exclude-path")]
+    exclude_paths: Vec<PathBuf>,
+
     /// What to do with redundant copies once a group is confirmed.
     /// Without --apply, delete/hardlink/reflink only preview what would
     /// happen.
@@ -212,6 +242,11 @@ fn run(cli: Cli) -> ExitCode {
         io_threads: cli.io_threads,
         cache_path: cli.cache,
         fclones_import_path: cli.import_fclones_cache,
+        min_size: cli.min_size,
+        max_size: cli.max_size,
+        include_extensions: (!cli.include_extensions.is_empty()).then_some(cli.include_extensions),
+        exclude_extensions: (!cli.exclude_extensions.is_empty()).then_some(cli.exclude_extensions),
+        exclude_paths: cli.exclude_paths,
     };
     let folder_dedup_options = folder_dedup_root.is_some().then(|| options.clone());
 
@@ -951,6 +986,11 @@ mod tests {
             cache: ScanOptions::default().cache_path,
             import_fclones_cache: ScanOptions::default().fclones_import_path,
             history: None,
+            min_size: ScanOptions::default().min_size,
+            max_size: ScanOptions::default().max_size,
+            include_extensions: Vec::new(),
+            exclude_extensions: Vec::new(),
+            exclude_paths: ScanOptions::default().exclude_paths,
             action: Action::Report,
             apply: false,
             yes: false,

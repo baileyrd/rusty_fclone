@@ -36,9 +36,24 @@ pub(crate) fn traverse(
 ) {
     let root_device = get_file_id(root).ok().and_then(|id| device_component(&id));
 
+    let exclude_paths = options.exclude_paths.clone();
     let walker = WalkDir::new(root)
         .follow_links(options.follow_symlinks)
-        .skip_hidden(false);
+        .skip_hidden(false)
+        .process_read_dir(move |_depth, _dir_path, _read_dir_state, children| {
+            if exclude_paths.is_empty() {
+                return;
+            }
+            children.retain(|entry_result| {
+                let Ok(entry) = entry_result else {
+                    return true;
+                };
+                let entry_path = entry.parent_path.join(&entry.file_name);
+                !exclude_paths
+                    .iter()
+                    .any(|excluded| entry_path.starts_with(excluded))
+            });
+        });
 
     let mut candidate_count = 0u64;
     for entry in walker {
@@ -72,6 +87,15 @@ pub(crate) fn traverse(
                 continue;
             }
         };
+
+        if !size_allowed(metadata.len(), options) {
+            tracing::trace!(path = %path.display(), size = metadata.len(), "skipped -- size filter");
+            continue;
+        }
+        if !extension_allowed(&path, options) {
+            tracing::trace!(path = %path.display(), "skipped -- extension filter");
+            continue;
+        }
 
         let file_id = match get_file_id(&path) {
             Ok(id) => id,
@@ -121,6 +145,59 @@ fn is_excluded_by_filesystem_boundary(
         (Some(root), Some(entry)) => root != entry,
         _ => false,
     }
+}
+
+/// Decides whether a file's size passes `options.min_size`/`max_size`
+/// (`DETECTION-SCAN-FILTERS`). Both bounds are inclusive; either being
+/// `None` disables that side of the check.
+fn size_allowed(size: u64, options: &ScanOptions) -> bool {
+    if let Some(min) = options.min_size {
+        if size < min {
+            return false;
+        }
+    }
+    if let Some(max) = options.max_size {
+        if size > max {
+            return false;
+        }
+    }
+    true
+}
+
+/// Decides whether a file's extension passes `options.include_extensions`/
+/// `exclude_extensions` (`DETECTION-SCAN-FILTERS`). Extensions are compared
+/// case-insensitively, without the leading `.`. A file with no extension is
+/// excluded by a non-empty `include_extensions` (nothing to match) but never
+/// excluded by `exclude_extensions` (nothing on the list can match it).
+fn extension_allowed(path: &Path, options: &ScanOptions) -> bool {
+    let extension = path.extension().and_then(|ext| ext.to_str());
+
+    if let Some(include) = &options.include_extensions {
+        if !include.is_empty() {
+            match extension {
+                Some(ext) => {
+                    if !include
+                        .iter()
+                        .any(|allowed| allowed.eq_ignore_ascii_case(ext))
+                    {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+    }
+
+    if let (Some(exclude), Some(ext)) = (&options.exclude_extensions, extension) {
+        if exclude
+            .iter()
+            .any(|denied| denied.eq_ignore_ascii_case(ext))
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Extracts a comparable "which filesystem/volume is this on" value from a
@@ -312,5 +389,124 @@ mod tests {
             file_id: 7,
         };
         assert_eq!(device_component(&high_res), Some(42));
+    }
+
+    #[test]
+    fn size_allowed_enforces_both_bounds_inclusively() {
+        let options = ScanOptions {
+            min_size: Some(10),
+            max_size: Some(20),
+            ..ScanOptions::default()
+        };
+        assert!(!size_allowed(9, &options));
+        assert!(size_allowed(10, &options));
+        assert!(size_allowed(20, &options));
+        assert!(!size_allowed(21, &options));
+    }
+
+    #[test]
+    fn size_allowed_with_no_bounds_allows_everything() {
+        let options = ScanOptions::default();
+        assert!(size_allowed(0, &options));
+        assert!(size_allowed(u64::MAX, &options));
+    }
+
+    #[test]
+    fn extension_allowed_include_list_is_case_insensitive_and_excludes_no_extension() {
+        let options = ScanOptions {
+            include_extensions: Some(vec!["JPG".to_string(), "png".to_string()]),
+            ..ScanOptions::default()
+        };
+        assert!(extension_allowed(Path::new("a.jpg"), &options));
+        assert!(extension_allowed(Path::new("a.PNG"), &options));
+        assert!(!extension_allowed(Path::new("a.txt"), &options));
+        assert!(!extension_allowed(Path::new("no_extension"), &options));
+    }
+
+    #[test]
+    fn extension_allowed_exclude_list_never_excludes_a_missing_extension() {
+        let options = ScanOptions {
+            exclude_extensions: Some(vec!["tmp".to_string()]),
+            ..ScanOptions::default()
+        };
+        assert!(!extension_allowed(Path::new("a.tmp"), &options));
+        assert!(!extension_allowed(Path::new("a.TMP"), &options));
+        assert!(extension_allowed(Path::new("no_extension"), &options));
+        assert!(extension_allowed(Path::new("a.txt"), &options));
+    }
+
+    #[test]
+    fn extension_allowed_exclude_wins_even_if_include_would_allow_it() {
+        let options = ScanOptions {
+            include_extensions: Some(vec!["txt".to_string()]),
+            exclude_extensions: Some(vec!["txt".to_string()]),
+            ..ScanOptions::default()
+        };
+        assert!(!extension_allowed(Path::new("a.txt"), &options));
+    }
+
+    #[test]
+    fn min_size_filter_skips_small_files_during_a_real_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("small.txt"), b"a").unwrap();
+        fs::write(dir.path().join("big.txt"), b"aaaaaaaaaa").unwrap();
+
+        let options = ScanOptions {
+            min_size: Some(5),
+            ..ScanOptions::default()
+        };
+        let candidates = traverse_collect(dir.path(), &options, |_| {});
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].size, 10);
+    }
+
+    #[test]
+    fn extension_filter_skips_non_matching_files_during_a_real_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.jpg"), b"a").unwrap();
+        fs::write(dir.path().join("b.txt"), b"b").unwrap();
+
+        let options = ScanOptions {
+            include_extensions: Some(vec!["jpg".to_string()]),
+            ..ScanOptions::default()
+        };
+        let candidates = traverse_collect(dir.path(), &options, |_| {});
+
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn exclude_paths_prunes_the_whole_subtree_not_just_matching_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let excluded_dir = dir.path().join("excluded");
+        fs::create_dir(&excluded_dir).unwrap();
+        fs::write(excluded_dir.join("inside.txt"), b"skip me").unwrap();
+        fs::write(dir.path().join("kept.txt"), b"keep me").unwrap();
+
+        let options = ScanOptions {
+            exclude_paths: vec![excluded_dir],
+            ..ScanOptions::default()
+        };
+        let candidates = traverse_collect(dir.path(), &options, |_| {});
+
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].path.ends_with("kept.txt"));
+    }
+
+    #[test]
+    fn exclude_paths_can_target_a_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("excluded.txt"), b"skip me").unwrap();
+        fs::write(dir.path().join("kept.txt"), b"keep me").unwrap();
+
+        let options = ScanOptions {
+            exclude_paths: vec![dir.path().join("excluded.txt")],
+            ..ScanOptions::default()
+        };
+        let candidates = traverse_collect(dir.path(), &options, |_| {});
+
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].path.ends_with("kept.txt"));
     }
 }

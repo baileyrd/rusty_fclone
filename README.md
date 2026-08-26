@@ -12,7 +12,8 @@ workloads — see below), an action layer (delete/hardlink/reflink, dry-run
 by default), richer CLI output (JSON, progress reporting, an interactive
 confirmation prompt), a desktop GUI, an opt-in incremental hash cache,
 opt-in SQLite scan-history, opt-in import of an existing fclones hash
-cache, and opt-in folder-level duplicate detection are all implemented. See
+cache, opt-in folder-level duplicate detection, and include/exclude scan
+filters (min/max size, extension, excluded paths) are all implemented. See
 [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
 checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
 what's planned.
@@ -66,6 +67,22 @@ Options:
           exist). When set, a summary of this scan (files/bytes scanned,
           duplicate groups/files, and any action's result) is appended as
           one row after the scan completes. Off by default
+      --min-size <BYTES>
+          Skip files smaller than this size (bytes). Applied during
+          traversal, before any hashing
+      --max-size <BYTES>
+          Skip files larger than this size (bytes). Applied during
+          traversal, before any hashing
+      --include-ext <EXT>
+          Only scan files with this extension (case-insensitive, without
+          the leading `.`). Repeatable
+      --exclude-ext <EXT>
+          Skip files with this extension (case-insensitive, without the
+          leading `.`), even if --include-ext would otherwise allow them.
+          Repeatable
+      --exclude-path <PATH>
+          Skip this path and everything beneath it entirely -- not just
+          from the results, but from traversal itself. Repeatable
       --find-duplicate-folders
           After the scan completes, also look for folders whose entire
           recursive file content duplicates -- or is a subset of --
@@ -125,6 +142,12 @@ rusty-fclone --import-fclones-cache ~/.cache/fclones /path/to/scan
 # Keep a longer-term record of every scan (files/bytes scanned, duplicates
 # found, action results) in a queryable SQLite database.
 rusty-fclone --history ~/.local/share/rusty-fclone/history.sqlite /path/to/scan
+
+# Skip node_modules/.git entirely (not even traversed), ignore anything
+# under 1 KB, and only consider photos.
+rusty-fclone --exclude-path ./node_modules --exclude-path ./.git \
+  --min-size 1024 --include-ext jpg --include-ext png --include-ext heic \
+  /path/to/scan
 
 # Also report whole folders that are duplicates (or subsets) of each other
 # -- e.g. a Photos/2024/vacation folder copied wholesale into a backup tree.

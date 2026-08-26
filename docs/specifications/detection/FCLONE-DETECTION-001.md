@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.2.0
+- Version: 0.2.1
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -137,6 +137,22 @@ reporting, a GUI) is out of scope for this specification and depends on it.
   `DuplicateGroup`s its files belong to (path-suffix matching against
   each group's other paths), not by comparing every pair of directories
   in the tree.
+- `FCLONE-DETECTION-001-FR-014`: The engine SHALL support include/exclude
+  scan filters, applied during traversal before any file content is read:
+  `ScanOptions::min_size`/`max_size` (inclusive byte bounds, either
+  optional), `ScanOptions::include_extensions`/`exclude_extensions`
+  (case-insensitive, without the leading `.`; `exclude_extensions` is
+  checked after `include_extensions` and wins if both would otherwise
+  apply), and `ScanOptions::exclude_paths` (directories or individual
+  files skipped entirely, matched as a literal path prefix against the
+  path as traversed, not canonicalized). A file excluded by any of these
+  SHALL be silently omitted from candidates — this is not a per-file
+  error and SHALL NOT be reported via `ScanEvent::Error`
+  (`DETECTION-SCAN-FILTERS`).
+- `FCLONE-DETECTION-001-NFR-007`: A directory subtree covered by
+  `ScanOptions::exclude_paths` SHALL NOT be descended into at all —
+  pruned before traversal reads its contents, not filtered out of
+  results afterward (`DETECTION-SCAN-FILTERS`).
 
 ## Architecture and interfaces
 
@@ -155,7 +171,11 @@ pub struct ScanOptions { pub follow_symlinks: bool, pub cross_filesystems: bool,
                           pub verify_matches: bool, pub small_file_threshold: u64,
                           pub partial_hash_sample_size: u64, pub io_threads: Option<usize>,
                           pub cache_path: Option<PathBuf>,
-                          pub fclones_import_path: Option<PathBuf> }
+                          pub fclones_import_path: Option<PathBuf>,
+                          pub min_size: Option<u64>, pub max_size: Option<u64>,
+                          pub include_extensions: Option<Vec<String>>,
+                          pub exclude_extensions: Option<Vec<String>>,
+                          pub exclude_paths: Vec<PathBuf> }
 
 pub fn find_folder_duplicates(root: &Path, groups: &[DuplicateGroup], options: &ScanOptions)
     -> Result<Vec<FolderMatch>, ScanError>;
@@ -164,7 +184,10 @@ pub enum FolderMatch { Exact { folders: Vec<PathBuf>, file_count: u64, bytes: u6
                                     file_count: u64, bytes: u64 } }
 ```
 
-Internal modules: `traversal` (jwalk-based walk + file-id), `io_pool`
+Internal modules: `traversal` (jwalk-based walk + file-id; also applies
+`min_size`/`max_size`/`include_extensions`/`exclude_extensions` per file and
+prunes `exclude_paths` subtrees via jwalk's `process_read_dir` before
+descending, `DETECTION-SCAN-FILTERS`), `io_pool`
 (hand-rolled blocking read workers), `hash` (xxh3-128 + sampling), `device`
 (Linux rotational-disk detection for `io_threads` auto-sizing), `cache`
 (`redb`-backed full-hash cache, ADR-0016), `fclones_import` (reads an
@@ -261,6 +284,15 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.2.1 (2026-08-26): Added include/exclude scan filters (FR-014, NFR-007)
+  — `ScanOptions::min_size`/`max_size`, `include_extensions`/
+  `exclude_extensions`, and `exclude_paths`, all applied during traversal
+  before any hashing. `exclude_paths` prunes whole subtrees via jwalk's
+  `process_read_dir` rather than filtering results after the fact —
+  matching directories are never descended into
+  (`DETECTION-SCAN-FILTERS`, first unit of the phased gap-closure plan in
+  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`). No existing behavior
+  changed: every new field defaults to `None`/empty (no filtering).
 - 0.2.0 (2026-08-25): Added folder-level duplicate detection (FR-010
   through FR-013, NFR-006) — asked for directly ("is it possible to
   identify if folders of files are duplicates?", both exact and
