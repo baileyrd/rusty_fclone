@@ -47,6 +47,32 @@ pub struct ScanOptions {
     /// a one-off import, or alongside it so an imported hash is also
     /// persisted for future rusty-fclone-only re-scans (ADR-0019).
     pub fclones_import_path: Option<PathBuf>,
+
+    /// Files smaller than this (in bytes) are skipped during traversal,
+    /// before any hashing. `None` (default) disables the check
+    /// (`DETECTION-SCAN-FILTERS`).
+    pub min_size: Option<u64>,
+    /// Files larger than this (in bytes) are skipped during traversal,
+    /// before any hashing. `None` (default) disables the check
+    /// (`DETECTION-SCAN-FILTERS`).
+    pub max_size: Option<u64>,
+    /// If set, only files whose extension (case-insensitive, without the
+    /// leading `.`) appears in this list are scanned; a file with no
+    /// extension is skipped. An empty (but `Some`) list behaves the same
+    /// as `None` -- no filtering. Checked before `exclude_extensions`
+    /// (`DETECTION-SCAN-FILTERS`).
+    pub include_extensions: Option<Vec<String>>,
+    /// Files whose extension (case-insensitive, without the leading `.`)
+    /// appears in this list are skipped, even if `include_extensions`
+    /// would otherwise allow them. A file with no extension is never
+    /// excluded by this list (`DETECTION-SCAN-FILTERS`).
+    pub exclude_extensions: Option<Vec<String>>,
+    /// Directory subtrees to skip entirely during traversal -- neither
+    /// their files nor anything beneath them is visited. Matched as a
+    /// literal path prefix against the path as traversed (not
+    /// canonicalized), so pass these in the same form (relative/absolute)
+    /// as the scan root for reliable matching (`DETECTION-SCAN-FILTERS`).
+    pub exclude_paths: Vec<PathBuf>,
 }
 
 impl Default for ScanOptions {
@@ -60,6 +86,11 @@ impl Default for ScanOptions {
             io_threads: None,
             cache_path: None,
             fclones_import_path: None,
+            min_size: None,
+            max_size: None,
+            include_extensions: None,
+            exclude_extensions: None,
+            exclude_paths: Vec::new(),
         }
     }
 }

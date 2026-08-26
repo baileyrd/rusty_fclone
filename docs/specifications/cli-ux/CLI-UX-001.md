@@ -1,5 +1,5 @@
 # CLI-UX-001 — CLI Output, Progress, and Confirmation
-- Version: 0.3.0
+- Version: 0.3.1
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -126,6 +126,15 @@ confirmation prompt as a second safety layer on top of `--apply`.
   SHALL gain an `action` array (one entry per acted-on pair, empty when
   no `--action` was requested) of
   `{"kind":<string>,"kept":<string>,"removed":<string>,"applied":<bool>,"file_count":<u64>,"bytes":<u64>,"directory_removed":<bool>,"failed":<u64>}`.
+- `CLI-UX-001-FR-014`: The CLI SHALL expose `FCLONE-DETECTION-001`'s
+  scan-filter fields as flags: `--min-size <BYTES>`, `--max-size <BYTES>`,
+  `--include-ext <EXT>` (repeatable), `--exclude-ext <EXT>` (repeatable),
+  and `--exclude-path <PATH>` (repeatable), mapped directly onto
+  `ScanOptions::min_size`/`max_size`/`include_extensions`/
+  `exclude_extensions`/`exclude_paths`. An empty `--include-ext`/
+  `--exclude-ext` list (the default, flag never passed) SHALL map to
+  `None`, matching `ScanOptions`'s own "no filtering" default
+  (`DETECTION-SCAN-FILTERS`).
 
 ## Architecture and interfaces
 
@@ -298,6 +307,12 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.1 (2026-08-26): Added `--min-size`/`--max-size`/`--include-ext`/
+  `--exclude-ext`/`--exclude-path` (FR-014), the CLI surface for
+  `FCLONE-DETECTION-001` 0.2.1's new scan-filter fields
+  (`DETECTION-SCAN-FILTERS`, first unit of the phased plan in
+  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`). No existing flag or
+  output shape changed.
 - 0.3.0 (2026-08-25): Added folder-level action support (FR-013) —
   `--find-duplicate-folders` combined with `--action <kind>` now plans
   (and, with `--apply`, applies) `kind` for every folder match via the

@@ -93,6 +93,11 @@ const state = {
     ioThreads: null,
     cachePath: "",
     fclonesImportPath: "",
+    minSize: "",
+    maxSize: "",
+    includeExtensions: "",
+    excludeExtensions: "",
+    excludePaths: "",
   },
   matchMode: "exact",
   typeFilter: new Set(TYPE_FILTERS.map((t) => t.id)),
@@ -500,6 +505,50 @@ function scanView() {
           el("div", { className: "field-label" }, "Import fclones cache"),
           pathInput("(none) -- import an existing fclones cache", opt.fclonesImportPath, (v) => { state.options.fclonesImportPath = v; }),
         ),
+      ),
+    ),
+    el(
+      "div",
+      { className: "card" },
+      el("div", { className: "card-title", style: "margin-bottom:4px" }, "Include/exclude filters"),
+      el("div", { className: "hint", style: "margin-bottom:14px" }, "Applied during the scan itself -- a filtered-out file is never read or hashed."),
+      el(
+        "div",
+        { className: "field-row" },
+        el(
+          "div",
+          { className: "field-col" },
+          el("div", { className: "field-label" }, "Min size (bytes)"),
+          pathInput("(none)", opt.minSize, (v) => { state.options.minSize = v; }),
+        ),
+        el(
+          "div",
+          { className: "field-col" },
+          el("div", { className: "field-label" }, "Max size (bytes)"),
+          pathInput("(none)", opt.maxSize, (v) => { state.options.maxSize = v; }),
+        ),
+      ),
+      el(
+        "div",
+        { className: "field-row" },
+        el(
+          "div",
+          { className: "field-col" },
+          el("div", { className: "field-label" }, "Only these extensions"),
+          pathInput("(none) -- e.g. jpg, png, heic", opt.includeExtensions, (v) => { state.options.includeExtensions = v; }),
+        ),
+        el(
+          "div",
+          { className: "field-col" },
+          el("div", { className: "field-label" }, "Skip these extensions"),
+          pathInput("(none) -- e.g. tmp, log", opt.excludeExtensions, (v) => { state.options.excludeExtensions = v; }),
+        ),
+      ),
+      el(
+        "div",
+        { className: "field-col" },
+        el("div", { className: "field-label" }, "Skip these folders (comma-separated)"),
+        pathInput("(none) -- e.g. /home/me/node_modules, /home/me/.cache", opt.excludePaths, (v) => { state.options.excludePaths = v; }),
       ),
     ),
     el(
@@ -966,6 +1015,23 @@ async function startScan() {
   }
 }
 
+// Parses a comma-separated field into a trimmed, non-empty-entry array, or
+// `null` if the field is blank (meaning "no filter" -- see `ScanOptions`'s
+// own `None` default for include/exclude extension lists).
+function parseCsv(value) {
+  if (!value || !value.trim()) return null;
+  const items = value.split(",").map((s) => s.trim()).filter(Boolean);
+  return items.length ? items : null;
+}
+
+// Parses a size field (bytes) into a non-negative integer, or `null` if
+// blank or not a valid number.
+function parseSize(value) {
+  if (!value || !value.trim()) return null;
+  const n = Number(value.trim());
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+}
+
 function scanOptionsPayload() {
   const o = state.options;
   return {
@@ -975,6 +1041,11 @@ function scanOptionsPayload() {
     ioThreads: o.ioThreads,
     cachePath: o.cachePath || null,
     fclonesImportPath: o.fclonesImportPath || null,
+    minSize: parseSize(o.minSize),
+    maxSize: parseSize(o.maxSize),
+    includeExtensions: parseCsv(o.includeExtensions),
+    excludeExtensions: parseCsv(o.excludeExtensions),
+    excludePaths: parseCsv(o.excludePaths) || [],
   };
 }
 

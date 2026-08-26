@@ -33,6 +33,12 @@ pub struct ScanOptionsPayload {
     pub io_threads: Option<usize>,
     pub cache_path: Option<String>,
     pub fclones_import_path: Option<String>,
+    pub min_size: Option<u64>,
+    pub max_size: Option<u64>,
+    pub include_extensions: Option<Vec<String>>,
+    pub exclude_extensions: Option<Vec<String>>,
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
 }
 
 impl From<ScanOptionsPayload> for ScanOptions {
@@ -59,6 +65,15 @@ impl From<ScanOptionsPayload> for ScanOptions {
                 .as_deref()
                 .map(normalize_path_input)
                 .map(PathBuf::from),
+            min_size: p.min_size,
+            max_size: p.max_size,
+            include_extensions: p.include_extensions,
+            exclude_extensions: p.exclude_extensions,
+            exclude_paths: p
+                .exclude_paths
+                .iter()
+                .map(|s| PathBuf::from(normalize_path_input(s)))
+                .collect(),
         }
     }
 }
@@ -409,6 +424,11 @@ mod tests {
             io_threads: Some(4),
             cache_path: Some("cache.redb".into()),
             fclones_import_path: None,
+            min_size: None,
+            max_size: None,
+            include_extensions: None,
+            exclude_extensions: None,
+            exclude_paths: Vec::new(),
         };
         let options: ScanOptions = payload.into();
         let defaults = ScanOptions::default();
@@ -435,6 +455,11 @@ mod tests {
             io_threads: None,
             cache_path: Some("\"C:\\cache\\hashes.redb\"".into()),
             fclones_import_path: Some("\"C:\\Users\\me\\.cache\\fclones\"".into()),
+            min_size: None,
+            max_size: None,
+            include_extensions: None,
+            exclude_extensions: None,
+            exclude_paths: Vec::new(),
         };
         let options: ScanOptions = payload.into();
 
@@ -445,6 +470,38 @@ mod tests {
         assert_eq!(
             options.fclones_import_path,
             Some(PathBuf::from("C:\\Users\\me\\.cache\\fclones"))
+        );
+    }
+
+    #[test]
+    fn scan_options_payload_passes_through_filters_and_normalizes_exclude_paths() {
+        let payload = ScanOptionsPayload {
+            follow_symlinks: false,
+            cross_filesystems: false,
+            verify_matches: false,
+            small_file_threshold: None,
+            partial_hash_sample_size: None,
+            io_threads: None,
+            cache_path: None,
+            fclones_import_path: None,
+            min_size: Some(1024),
+            max_size: Some(1_000_000),
+            include_extensions: Some(vec!["jpg".to_string(), "png".to_string()]),
+            exclude_extensions: Some(vec!["tmp".to_string()]),
+            exclude_paths: vec!["\"/home/me/node_modules\"".to_string()],
+        };
+        let options: ScanOptions = payload.into();
+
+        assert_eq!(options.min_size, Some(1024));
+        assert_eq!(options.max_size, Some(1_000_000));
+        assert_eq!(
+            options.include_extensions,
+            Some(vec!["jpg".to_string(), "png".to_string()])
+        );
+        assert_eq!(options.exclude_extensions, Some(vec!["tmp".to_string()]));
+        assert_eq!(
+            options.exclude_paths,
+            vec![PathBuf::from("/home/me/node_modules")]
         );
     }
 

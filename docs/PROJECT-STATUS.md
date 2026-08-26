@@ -1,13 +1,10 @@
 # Project Status
-- Last verified main commit: `a71a6a9` — `FOLDER-ACTION` CLI wiring
-  (PR #34, merged): `--find-duplicate-folders` combined with
-  `--action <kind>`/`--apply` in `rusty_fclone-cli`. This branch
-  (`folder-action-gui`) finishes the request that started `FOLDER-ACTION`
-  ("Enable the folder-level delete action for real") by wiring the same
-  capability into the GUI: a new `run_folder_action` command, plus a
-  per-folder keep-choice badge for `Exact` matches, enable the "Delete
-  Duplicate Folder" button that shipped disabled in `GUI-REDESIGN`. With
-  this merged, `FOLDER-ACTION` is complete end-to-end (core + CLI + GUI).
+- Last verified main commit: `bf90020` — merged `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md` (PR #36), a competitive gap analysis
+  synthesizing user-supplied market research against this repo's actual
+  state into a proposed, phased set of roadmap units. This branch
+  (`detection-scan-filters`) implements that plan's first table-stakes
+  unit, `DETECTION-SCAN-FILTERS`.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -16,10 +13,12 @@
   pushed yet (tag pushes require a maintainer's own credentials in this
   environment); everything merged since `v0.1.0` will be tagged once that
   happens.
-- Verified at: 2026-08-25
-- Current milestone: none in progress. See `docs/roadmap/ROADMAP.md`.
-- Health: green — workspace (now three crates) builds, lints, and tests
-  clean on the pinned toolchain
+- Verified at: 2026-08-26
+- Current milestone: `DETECTION-SCAN-FILTERS` (Phase 1 of
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`) — implemented, validated, not yet
+  merged. See `docs/roadmap/ROADMAP.md`.
+- Health: green — workspace (three crates) builds, lints, and tests clean
+  on the pinned toolchain
 
 ## Completed
 - `DETECTION-BASELINE`, `DETECTION-BENCHMARK`, `DETECTION-BENCHMARK-VS-FCLONES`,
@@ -286,13 +285,62 @@
   pre-existing file-level card and the new folder-level one are affected
   equally) — see `GUI-UX-001`'s open questions.
 
+- `DEDUP-GAP-IMPLEMENTATION-PLAN`: added
+  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`, synthesizing two
+  user-supplied market-research documents (a duplicate-file-finder
+  capability/UX playbook and a per-product competitive analysis) against
+  this repo's actual, verified current state into a proposed three-phase
+  set of roadmap-shaped units. Deliberately not added to
+  `docs/roadmap/ROADMAP.md` itself at the time (pending sign-off), since
+  that file drives `WORKFLOW.md`'s automatic next-unit selection. Merged
+  via PR #36.
+
+- `DETECTION-SCAN-FILTERS`: the first table-stakes unit from that plan.
+  New `ScanOptions` fields — `min_size`, `max_size`,
+  `include_extensions`, `exclude_extensions`, `exclude_paths` — applied
+  during traversal, before any hashing. Directory subtrees named in
+  `exclude_paths` are pruned via jwalk's `process_read_dir` before
+  traversal descends into them (not filtered from results afterward);
+  size and extension filters apply per-file right after `stat`, before
+  the `get_file_id` syscall, so an excluded file costs one stat and
+  nothing else. `FCLONE-DETECTION-001` 0.2.1 (FR-014, NFR-007). CLI
+  gained `--min-size`/`--max-size`/`--include-ext`/`--exclude-ext`
+  (repeatable)/`--exclude-path` (repeatable), `CLI-UX-001` 0.3.1
+  (FR-014). GUI's Scan Setup screen gained a real "Include/exclude
+  filters" card wired to `ScanOptionsPayload` and sent to `start_scan`
+  for real — deliberately left the Rules & Automation screen's existing
+  three preview-only toggles untouched rather than silently making only
+  one of them (the size-related one) real while the screen still
+  blanket-labels itself "Preview only," `GUI-UX-001` 0.3.1 (FR-020). No
+  ADR — routine implementation, no architecture-level decision (per
+  `AGENTS.md`'s change rules). Implemented, tested (129/129 workspace
+  tests — 9 new `rusty_fclone-core` `traversal` tests: size-bounds unit
+  tests, extension-list unit tests including the exclude-wins-over-
+  include and no-extension edge cases, and three real-traversal tests
+  including one proving an excluded directory's contents are never
+  visited, not just filtered afterward; 1 new `rusty_fclone-gui`
+  `payload` test asserting the five new fields round-trip and
+  `exclude_paths` gets the same quote-stripping normalization as other
+  path fields), `cargo fmt`/`clippy -D warnings`/`bench --no-run`/`doc`
+  all pass. No dedicated CLI-level test asserts a non-default filter
+  value end-to-end (see Risks below — same standing gap as `--cache`/
+  `--io-threads`, neither of which has one either). Manually smoke-tested
+  against a real filesystem (see Validation below) — `--min-size`,
+  `--exclude-ext`, and `--exclude-path` each confirmed to change scan
+  results correctly. The GUI's new Scan Setup fields are not yet manually
+  verified through the rendered UI (no Xvfb/`xdotool` pass this session).
+
 ## In progress
-- None.
+- None — `DETECTION-SCAN-FILTERS` above is implemented and validated on
+  branch `detection-scan-filters`, not yet merged.
 
 ## Blocked
 - None.
 
 ## Next
+- `ACTION-TRASH` and `SELECTION-RULES` — Phase 1's remaining two units from
+  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`, once
+  `DETECTION-SCAN-FILTERS` merges.
 - Follow-on units intentionally left open by earlier scoping decisions
   (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
   proper (full pipeline overlap, needs a `ScanEvent` finality-contract
@@ -314,11 +362,17 @@
   disabled with an explanatory tooltip in `GUI-REDESIGN`.
 
 ## Validation
-- `cargo fmt --all --check`: pass (2026-08-25)
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-25)
-- `cargo test --workspace`: pass, 119/119 (2026-08-25)
-- `cargo bench --workspace --no-run`: pass (2026-08-25)
-- `cargo doc --workspace --all-features --no-deps`: pass (2026-08-25)
+- `cargo fmt --all --check`: pass (2026-08-26)
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-26)
+- `cargo test --workspace`: pass, 129/129 (2026-08-26)
+- `cargo bench --workspace --no-run`: pass (2026-08-26)
+- `cargo doc --workspace --all-features --no-deps`: pass (2026-08-26)
+- Manual CLI smoke test, `DETECTION-SCAN-FILTERS` (2026-08-26): a real
+  5-file tree (one 4-way duplicate spread across a subdirectory and a
+  `.tmp` file, plus one small unique file) confirmed `--min-size`,
+  `--exclude-ext`, and `--exclude-path` each correctly changed which
+  files were scanned and which duplicate copies were reported, matching
+  the automated tests' expectations exactly.
 - Manual CLI smoke tests across the project: verbosity flags, `RUST_LOG`
   override, default output silent on success, action dry runs, JSON
   format, progress checkpoints, confirmation prompt decline/accept,
@@ -353,6 +407,15 @@
   light-theme toggle. Every screen rendered correctly in both themes.
 
 ## Risks and decisions needed
+- `DETECTION-SCAN-FILTERS`'s GUI surface (Scan Setup's new "Include/exclude
+  filters" card) has automated coverage at the payload-conversion level
+  only — no Xvfb/`xdotool` end-to-end pass confirmed the fields actually
+  render, accept input, and change a real scan's results through the
+  rendered UI (every other GUI unit in this project has had one). Also,
+  no dedicated CLI-level test asserts a non-default `--min-size`/
+  `--exclude-ext`/etc. value end-to-end (only a real manual smoke test —
+  see Validation above); this matches the existing pattern for `--cache`/
+  `--io-threads`, neither of which has a dedicated CLI-level test either.
 - The action layer is the first genuinely destructive capability in this
   codebase. Its safety model (dry-run default, two-flag confirmation, plus
   the interactive confirmation prompt) is documented and tested, but has
