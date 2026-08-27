@@ -1,5 +1,5 @@
 # CLI-UX-001 — CLI Output, Progress, and Confirmation
-- Version: 0.3.4
+- Version: 0.3.5
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -158,6 +158,22 @@ confirmation prompt as a second safety layer on top of `--apply`.
   an error naming the specific action that needs it, before any scan
   runs. `--archive-dir` SHALL have no effect with any other `--action`
   value (`ACTION-MOVE-COPY`).
+- `CLI-UX-001-FR-018`: When `--history <path>` is set and `--apply` runs
+  a real action, the CLI SHALL record one row per individual file/pair
+  actually acted on (path, action kind, bytes, success/failure, and the
+  error text on failure), correlated with its real per-file outcome —
+  never for a preview (`--action` without `--apply`), which plans but
+  runs nothing. The CLI SHALL additionally expose a separate `rusty-
+  fclone history <list|stats>` command reading an existing `--history`
+  database: `list [--limit N]` (default 20) prints the most recent scans
+  newest first; `stats [--since TS] [--until TS]` (Unix timestamps,
+  either bound optional) prints aggregate totals (scan count, files/bytes
+  scanned, duplicate groups/files, bytes reclaimed, files acted on) across
+  scans in that range. Both SHALL support `--format text|json`, matching
+  the main command's own convention. `history` SHALL be treated as a
+  reserved top-level keyword: `rusty-fclone history ...` never triggers a
+  scan, and `rusty-fclone <ROOT> ...` for any other first argument SHALL
+  be completely unaffected (`CLI-HISTORY-AUDIT`).
 
 ## Architecture and interfaces
 
@@ -182,12 +198,27 @@ set. `folder_match_roots`/`group_fully_covered_by` decide, per
 `DuplicateGroup`, whether it's already represented by a folder match's
 own output — CLI-only classification logic, no core-crate involvement.
 
-`rusty_fclone-cli` `history` module (ADR-0017): `--history <path>`
-(`Option<PathBuf>`). `history::ScanRecord` (one completed scan's summary)
+`rusty_fclone-cli` `history` module (ADR-0017, extended by ADR-0027):
+`--history <path>` (`Option<PathBuf>`). `history::ScanRecord` (one
+completed scan's summary, now including `actions: Vec<ActionRecord>`)
 and `history::record_scan(path, &ScanRecord) -> rusqlite::Result<()>`
-(creates the database/table if needed, appends one row). CLI-only, no
-core-crate involvement — computed entirely from `ScanSummary` and the
-action totals `run()` already tracks.
+(creates the `scans`/`actions` schema if needed, appends one `scans` row
+plus one `actions` row per entry, in one transaction). `history::
+list_scans(path, limit) -> rusqlite::Result<Vec<ScanRow>>` and `history::
+stats(path, since, until) -> rusqlite::Result<HistoryStats>` are the
+read-only counterparts, backing the `history` subcommand. CLI-only, no
+core-crate involvement — computed entirely from `ScanSummary`, the action
+totals `run()` already tracks, and each group/pair's real `ApplyReport`/
+`FolderApplyReport` outcome.
+
+A separate `HistoryCli` (`#[derive(Parser)]`, its own `list`/`stats`
+subcommands via `HistoryCommand`) is parsed only when `main` detects
+`args[1] == "history"`, before `Cli::parse` ever runs — a manual
+pre-dispatch rather than folding `history` into `Cli` as a
+`#[command(subcommand)]`, since `Cli::root` is a required positional
+argument clap can't cleanly disambiguate from a subcommand name at the
+same position without restructuring every existing scan invocation
+(ADR-0027).
 
 ## Data/state and invariants
 
@@ -306,6 +337,24 @@ action totals `run()` already tracks.
   bytes reclaimed, with a repeated run against the same tree failing
   cleanly on the already-archived destination rather than clobbering it;
   `move` without `--archive-dir` was rejected before any scan ran.
+- FR-018 (per-action history rows, `history` subcommand) is exercised by
+  `main::tests::history_flag_records_one_action_row_per_file_acted_on`,
+  `history_flag_records_no_action_rows_for_a_dry_run`,
+  `history_flag_records_action_rows_for_folder_level_actions`,
+  `history_list_reports_recent_scans_newest_first`,
+  `history_stats_aggregates_across_the_database`, and
+  `history_subcommand_reports_failure_for_an_unreadable_database`, plus
+  `history::tests::*` (11 tests: action-row recording, correct scan
+  correlation across multiple scans, `list_scans`'s newest-first/limit
+  behavior and empty-database case, `stats`'s aggregation with and
+  without a date range and its empty-database case). Manual smoke test
+  against a real filesystem: two real scans (one `report`-only, one
+  `--action trash --apply`) against a `--history` database, followed by
+  `history list` (both `--format text` and `--format json`) and `history
+  stats`, confirmed the exact row counts, per-action detail (right path/
+  kind/bytes/succeeded), and aggregate totals matched what actually
+  happened on disk; a plain `rusty-fclone <ROOT>` invocation confirmed
+  unaffected by the new `history` keyword dispatch.
 
 ## Verification plan
 
@@ -347,12 +396,34 @@ See `docs/traceability/TRACEABILITY.md`.
   a strictly-machine-consumed pipeline would still see that one non-JSON
   line on stderr if `--yes` isn't passed.
 - `--history`'s schema isn't versioned; a future incompatible change would
-  need a migration story that doesn't exist yet (not needed for a single
-  `CREATE TABLE IF NOT EXISTS` in v1). No query/report subcommand exists
-  yet either — reading recorded history back is a future unit.
+  need a migration story that doesn't exist yet (not needed for two
+  `CREATE TABLE IF NOT EXISTS` statements in v1).
+- `history stats --since`/`--until` take raw Unix timestamps, not
+  human-readable date strings — deliberate, to avoid adding a
+  date-parsing dependency for a "at minimum" exit-gate ask; a future unit
+  could add friendlier parsing on top without changing the stored schema
+  or query semantics.
+- A real directory literally named `history` at a scan root needs
+  `rusty-fclone ./history` to disambiguate from the reserved subcommand
+  keyword — narrow, and not expected to matter in practice (ADR-0027).
 
 ## Change history
 
+- 0.3.5 (2026-08-27): Added per-action history detail rows and a
+  `rusty-fclone history <list|stats>` query subcommand (FR-018,
+  `CLI-HISTORY-AUDIT`, third and final unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2, closing Phase 2 in full).
+  Closes the two gaps `CLI-SCAN-HISTORY` (ADR-0017) deliberately deferred:
+  per-file/pair audit detail, and reading history back. `history` is a
+  reserved top-level keyword, dispatched manually in `main` before
+  `Cli::parse` runs, rather than folded into `Cli` as a
+  `#[command(subcommand)]` — `Cli::root`'s required positional argument
+  makes that ambiguous without a breaking restructure this unit's scope
+  doesn't call for. GUI's "Export (JSON)" button (Dashboard) is wired for
+  real via a plain `<a download>`/object-URL, no new Tauri plugin needed;
+  "Import history" stays an explicit disabled placeholder, blocked on the
+  same Tauri `dialog`/`fs` plugin prerequisite already tracked for the
+  GUI's root-path field. ADR-0027.
 - 0.3.4 (2026-08-27): Added `--action move`/`copy` and `--archive-dir`
   (FR-017), the CLI surface for `FCLONE-ACTION-001`'s archive-folder
   actions (`ACTION-MOVE-COPY`, second unit of `docs/roadmap/

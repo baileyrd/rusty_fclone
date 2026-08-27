@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.3.5
+- Version: 0.3.6
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -237,6 +237,16 @@ semantics, which are unchanged.
   read "will be copied to the archive folder -- nothing reclaimed" for
   `"copy"` specifically, rather than showing a byte figure that would
   never actually be freed (`ACTION-MOVE-COPY`, ADR-0026).
+- `GUI-UX-001-FR-025`: The Dashboard's "Export (JSON)" button SHALL
+  download `state.scanHistory` (the session's in-memory Recent Scans
+  data) as a JSON file via a client-side `<a download>`/object-URL,
+  disabled only when there are no scans yet this session. This exports
+  the current session's data, not a persisted `--history` SQLite
+  database, which the GUI has no reader for. The "Import history" button
+  SHALL remain disabled, with a tooltip naming the specific blocker
+  (reading an arbitrary database needs a real filesystem path, which
+  needs Tauri's `dialog`/`fs` plugin — not yet wired into the GUI)
+  (`CLI-HISTORY-AUDIT`, ADR-0027).
 
 ## Architecture and interfaces
 
@@ -457,6 +467,12 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   specific reclaim-text rewrite in `app.js` have no automated coverage
   and no manual Xvfb/`xdotool` pass this session, the same standing gap
   as FR-020 through FR-023.
+- FR-025 (Export/Import history buttons) has no automated coverage for
+  either half — `exportScanHistoryJson`'s `<a download>` mechanism has no
+  JS test harness in this project (same standing gap as the rest of
+  `app.js`), and "Import history" is an intentionally-disabled
+  placeholder with nothing to test yet. No manual Xvfb/`xdotool` pass
+  this session either, same as every other GUI surface above.
 
 ## Verification plan
 
@@ -537,14 +553,23 @@ See `docs/traceability/TRACEABILITY.md`.
   this change's scope (no CSS was touched to add FR-018/FR-019). Worth a
   dedicated look, since `GUI-REDESIGN`'s own manual pass (`PROJECT-
   STATUS.md`) reported "every screen rendered correctly in both themes."
-- Reading `CLI-SCAN-HISTORY`'s persisted history, and exporting a real
-  file (Dashboard's "Import history"/"Export (JSON)"), both need new
-  backend work that doesn't exist yet — a GUI-side SQLite reader for the
-  former, a save-file dialog (or the `dialog`/`fs` plugin work already
-  tracked above) for the latter.
+- Reading `CLI-SCAN-HISTORY`/`CLI-HISTORY-AUDIT`'s persisted SQLite
+  history (Dashboard's "Import history") still needs a GUI-side SQLite
+  reader plus a real filesystem path from the user, which needs the
+  `dialog`/`fs` plugin work already tracked above — "Export (JSON)" no
+  longer has this problem (FR-025 wired it via a client-side download
+  instead, needing neither).
 
 ## Change history
 
+- 0.3.6 (2026-08-27): Wired the Dashboard's "Export (JSON)" button for
+  real (FR-025, `CLI-HISTORY-AUDIT`, third and final unit of `docs/
+  roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2). Downloads
+  `state.scanHistory` via a plain `<a download>`/object-URL, a standard
+  webview download needing no new Tauri plugin or permission. "Import
+  history" stays an explicit disabled placeholder, its tooltip now naming
+  the specific blocker (a real filesystem path needs Tauri's `dialog`/
+  `fs` plugin) rather than a generic "not wired in yet". ADR-0027.
 - 0.3.5 (2026-08-27): Added the archive-folder actions' GUI surface
   (FR-024, `ACTION-MOVE-COPY`, second unit of `docs/roadmap/
   DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2). `ACTION_KINDS` gained

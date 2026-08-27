@@ -266,10 +266,190 @@ struct Cli {
     verbose: u8,
 }
 
+/// Queries a `--history` database written by earlier scans
+/// (`CLI-HISTORY-AUDIT`). A separate top-level command, reached as
+/// `rusty-fclone history <SUBCOMMAND>` -- `history` is reserved as a
+/// subcommand keyword rather than folded into `Cli` as
+/// `#[command(subcommand)]`, since `Cli`'s own `root` is a required
+/// positional argument and clap can't disambiguate "a subcommand name"
+/// from "a directory named the same as a subcommand" at the same
+/// argument position. `main` pre-dispatches on `args[1] == "history"`
+/// before `Cli::parse` ever runs, so every existing `rusty-fclone <ROOT>
+/// ...` invocation is completely unaffected (ADR-0027).
+#[derive(Parser)]
+#[command(name = "rusty-fclone history")]
+struct HistoryCli {
+    /// Path to the `--history` database to query.
+    #[arg(long)]
+    db: PathBuf,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    format: Format,
+
+    #[command(subcommand)]
+    command: HistoryCommand,
+}
+
+#[derive(clap::Subcommand)]
+enum HistoryCommand {
+    /// List the most recent scans, newest first.
+    List {
+        /// Maximum number of scans to list.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// Aggregate totals (scans, bytes reclaimed, files acted on, ...)
+    /// across every scan in an optional date range.
+    Stats {
+        /// Only include scans started at or after this Unix timestamp
+        /// (seconds).
+        #[arg(long)]
+        since: Option<i64>,
+        /// Only include scans started at or before this Unix timestamp
+        /// (seconds).
+        #[arg(long)]
+        until: Option<i64>,
+    },
+}
+
 fn main() -> ExitCode {
+    // `args[0]` is the program name; `args[1]`, if present, is either
+    // "history" (routed to `HistoryCli`) or the start of a normal scan
+    // invocation (routed to `Cli` exactly as before). `parse_from` only
+    // reads `argv[0]` for its own program-name display, so passing
+    // "history" there (rather than the real program name) is harmless --
+    // `--help`/error text under `rusty-fclone history ...` just reads
+    // "rusty-fclone history" instead, which is arguably more correct
+    // anyway (see `HistoryCli`'s `#[command(name = ...)]`).
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("history") {
+        let cli = HistoryCli::parse_from(&args[1..]);
+        return run_history(cli);
+    }
+
     let cli = Cli::parse();
     init_tracing(cli.verbose);
     run(cli)
+}
+
+/// Runs `rusty-fclone history <SUBCOMMAND>` -- read-only queries against a
+/// `--history` database, no scanning involved (`CLI-HISTORY-AUDIT`).
+fn run_history(cli: HistoryCli) -> ExitCode {
+    match cli.command {
+        HistoryCommand::List { limit } => match history::list_scans(&cli.db, limit) {
+            Ok(rows) => {
+                for row in rows {
+                    match cli.format {
+                        Format::Text => println!(
+                            "{} @ {}  files={} bytes={} dup_groups={} dup_files={}  action={} applied={} reclaimed={} acted_on={}",
+                            row.root,
+                            row.started_at,
+                            row.files_scanned,
+                            row.bytes_scanned,
+                            row.duplicate_groups,
+                            row.duplicate_files,
+                            row.action_kind.as_deref().unwrap_or("none"),
+                            opt_to_string(row.action_applied),
+                            opt_to_string(row.bytes_reclaimed),
+                            opt_to_string(row.files_acted_on),
+                        ),
+                        Format::Json => print_history_json(&HistoryJsonEvent::Scan {
+                            id: row.id,
+                            root: row.root,
+                            started_at: row.started_at,
+                            files_scanned: row.files_scanned,
+                            bytes_scanned: row.bytes_scanned,
+                            duplicate_groups: row.duplicate_groups,
+                            duplicate_files: row.duplicate_files,
+                            action_kind: row.action_kind,
+                            action_applied: row.action_applied,
+                            bytes_reclaimed: row.bytes_reclaimed,
+                            files_acted_on: row.files_acted_on,
+                        }),
+                    }
+                }
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("error: {err}");
+                ExitCode::FAILURE
+            }
+        },
+        HistoryCommand::Stats { since, until } => match history::stats(&cli.db, since, until) {
+            Ok(totals) => {
+                match cli.format {
+                    Format::Text => println!(
+                        "{} scans, {} files scanned ({} bytes), {} duplicate groups ({} files), {} bytes reclaimed across {} files",
+                        totals.scans,
+                        totals.files_scanned,
+                        totals.bytes_scanned,
+                        totals.duplicate_groups,
+                        totals.duplicate_files,
+                        totals.bytes_reclaimed,
+                        totals.files_acted_on,
+                    ),
+                    Format::Json => print_history_json(&HistoryJsonEvent::Stats {
+                        scans: totals.scans,
+                        files_scanned: totals.files_scanned,
+                        bytes_scanned: totals.bytes_scanned,
+                        duplicate_groups: totals.duplicate_groups,
+                        duplicate_files: totals.duplicate_files,
+                        bytes_reclaimed: totals.bytes_reclaimed,
+                        files_acted_on: totals.files_acted_on,
+                    }),
+                }
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("error: {err}");
+                ExitCode::FAILURE
+            }
+        },
+    }
+}
+
+/// `history list`'s text-format placeholder for a field that's `None`
+/// because the scan it belongs to had no `--action` (`report` mode).
+fn opt_to_string<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map_or_else(|| "-".to_string(), |v| v.to_string())
+}
+
+fn print_history_json(event: &HistoryJsonEvent) {
+    println!(
+        "{}",
+        serde_json::to_string(event).expect("HistoryJsonEvent always serializes")
+    );
+}
+
+/// NDJSON event shape for `rusty-fclone history --format json`
+/// (`CLI-HISTORY-AUDIT`). Field names are snake_case, matching
+/// `JsonEvent`'s own convention.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum HistoryJsonEvent {
+    Scan {
+        id: i64,
+        root: String,
+        started_at: i64,
+        files_scanned: u64,
+        bytes_scanned: u64,
+        duplicate_groups: u64,
+        duplicate_files: u64,
+        action_kind: Option<String>,
+        action_applied: Option<bool>,
+        bytes_reclaimed: Option<u64>,
+        files_acted_on: Option<u64>,
+    },
+    Stats {
+        scans: u64,
+        files_scanned: u64,
+        bytes_scanned: u64,
+        duplicate_groups: u64,
+        duplicate_files: u64,
+        bytes_reclaimed: u64,
+        files_acted_on: u64,
+    },
 }
 
 /// Sets up the `tracing-subscriber` output on stderr (so it never mixes
@@ -354,6 +534,10 @@ fn run(cli: Cli) -> ExitCode {
     let mut progress_line = ProgressLine::new(cli.format);
     let mut final_summary = ScanSummary::default();
     let mut collected_groups: Vec<DuplicateGroup> = Vec::new();
+    // Per-action detail rows for `--history` (`CLI-HISTORY-AUDIT`) --
+    // only collected when a history database is actually configured, so
+    // a scan with `--history` unset pays nothing for this.
+    let mut history_actions = cli.history.is_some().then(Vec::new);
 
     for event in handle {
         match event {
@@ -379,6 +563,7 @@ fn run(cli: Cli) -> ExitCode {
                         cli.format,
                         &mut total_bytes_reclaimed,
                         &mut total_files_acted_on,
+                        history_actions.as_mut(),
                     );
                 }
             }
@@ -421,6 +606,7 @@ fn run(cli: Cli) -> ExitCode {
             cli.apply,
             &mut total_bytes_reclaimed,
             &mut total_files_acted_on,
+            history_actions.as_mut(),
         );
 
         // Every group not entirely covered by a folder match above still
@@ -445,6 +631,7 @@ fn run(cli: Cli) -> ExitCode {
                 cli.format,
                 &mut total_bytes_reclaimed,
                 &mut total_files_acted_on,
+                history_actions.as_mut(),
             );
         }
     }
@@ -474,6 +661,7 @@ fn run(cli: Cli) -> ExitCode {
             action_applied: action_kind.as_ref().map(|_| cli.apply),
             bytes_reclaimed: action_kind.as_ref().map(|_| total_bytes_reclaimed),
             files_acted_on: action_kind.as_ref().map(|_| total_files_acted_on),
+            actions: history_actions.unwrap_or_default(),
         };
         if let Err(err) = history::record_scan(history_path, &record) {
             eprintln!("warning: failed to record scan history: {err}");
@@ -646,6 +834,7 @@ fn handle_group(
     format: Format,
     total_bytes_reclaimed: &mut u64,
     total_files_acted_on: &mut u64,
+    history_actions: Option<&mut Vec<history::ActionRecord>>,
 ) -> bool {
     let Some(kind) = action_kind else {
         print_group(format, group, None);
@@ -676,6 +865,16 @@ fn handle_group(
     *total_bytes_reclaimed += bytes_reclaimed;
     *total_files_acted_on += files_acted_on;
 
+    if let (Some(report), Some(history_actions)) = (&report, history_actions) {
+        record_action_outcomes(
+            history_actions,
+            plan.actions.iter().map(|fa| (fa.path.as_path(), plan.size)),
+            action_word(&kind),
+            &report.succeeded,
+            &report.failed,
+        );
+    }
+
     print_group(
         format,
         group,
@@ -689,6 +888,38 @@ fn handle_group(
     }
 
     had_errors
+}
+
+/// Pushes one [`history::ActionRecord`] per `(path, bytes)` entry into
+/// `history_actions`, correlating each planned action against its real
+/// outcome in `succeeded`/`failed` (`CLI-HISTORY-AUDIT`). Shared by
+/// [`handle_group`] (every `FileAction` in an [`ActionPlan`]) and
+/// [`report_folder_matches`] (every `FolderFilePair` in a
+/// `FolderActionPlan`) — `ApplyReport` and `FolderApplyReport` both
+/// have `succeeded`/`failed` fields of these same two types, so one
+/// function covers both without needing to know which report it's
+/// reading from.
+fn record_action_outcomes<'a>(
+    history_actions: &mut Vec<history::ActionRecord>,
+    entries: impl IntoIterator<Item = (&'a Path, u64)>,
+    kind_word: &'static str,
+    succeeded: &[PathBuf],
+    failed: &[FileError],
+) {
+    for (path, bytes) in entries {
+        let ok = succeeded.iter().any(|p| p.as_path() == path);
+        let error = failed
+            .iter()
+            .find(|e| e.path.as_ref() == path)
+            .map(|e| e.source.to_string());
+        history_actions.push(history::ActionRecord {
+            path: path.display().to_string(),
+            kind: kind_word,
+            bytes,
+            succeeded: ok,
+            error,
+        });
+    }
 }
 
 fn print_group(
@@ -840,6 +1071,7 @@ fn report_folder_matches(
     apply: bool,
     total_bytes_reclaimed: &mut u64,
     total_files_acted_on: &mut u64,
+    mut history_actions: Option<&mut Vec<history::ActionRecord>>,
 ) -> bool {
     let mut had_errors = false;
     for m in matches {
@@ -871,6 +1103,15 @@ fn report_folder_matches(
                         if let Some(r) = &report {
                             for err in &r.failed {
                                 eprintln!("warning: {err}");
+                            }
+                            if let Some(history_actions) = history_actions.as_mut() {
+                                record_action_outcomes(
+                                    history_actions,
+                                    plan.pairs.iter().map(|p| (p.remove.as_path(), p.size)),
+                                    action_word(kind),
+                                    &r.succeeded,
+                                    &r.failed,
+                                );
                             }
                         }
                         outcomes.push(FolderPairOutcome {
@@ -1644,5 +1885,179 @@ mod tests {
         assert_eq!(action_kind.as_deref(), Some("delete"));
         assert_eq!(applied, Some(true));
         assert_eq!(reclaimed, Some(3));
+    }
+
+    /// `CLI-HISTORY-AUDIT`: an applied action records one `actions` row
+    /// per file, correlated with its real per-file outcome.
+    #[test]
+    fn history_flag_records_one_action_row_per_file_acted_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let history_path = history_dir.path().join("history.sqlite");
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.history = Some(history_path.clone());
+        cli.action = Action::Trash;
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+        assert_eq!(exit, ExitCode::SUCCESS);
+
+        let conn = rusqlite::Connection::open(&history_path).unwrap();
+        let (path, kind, bytes, succeeded, error): (String, String, i64, bool, Option<String>) =
+            conn.query_row(
+                "SELECT path, kind, bytes, succeeded, error FROM actions",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(path, b.display().to_string());
+        assert_eq!(kind, "trash");
+        assert_eq!(bytes, 3);
+        assert!(succeeded);
+        assert!(error.is_none());
+    }
+
+    /// A dry run (`--apply` not passed) records the scan summary as
+    /// before, but no `actions` rows -- nothing real happened yet to
+    /// audit.
+    #[test]
+    fn history_flag_records_no_action_rows_for_a_dry_run() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"dup").unwrap();
+        fs::write(dir.path().join("b.txt"), b"dup").unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let history_path = history_dir.path().join("history.sqlite");
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.history = Some(history_path.clone());
+        cli.action = Action::Delete;
+        cli.apply = false;
+        let exit = run(cli);
+        assert_eq!(exit, ExitCode::SUCCESS);
+
+        let conn = rusqlite::Connection::open(&history_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM actions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// `--find-duplicate-folders` combined with `--action`/`--apply`
+    /// records per-pair `actions` rows too, not just per-file ones.
+    #[test]
+    fn history_flag_records_action_rows_for_folder_level_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let history_path = history_dir.path().join("history.sqlite");
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.find_duplicate_folders = true;
+        cli.history = Some(history_path.clone());
+        cli.action = Action::Delete;
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+        assert_eq!(exit, ExitCode::SUCCESS);
+
+        let conn = rusqlite::Connection::open(&history_path).unwrap();
+        let (path, kind): (String, String) = conn
+            .query_row("SELECT path, kind FROM actions", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(path, small.join("1.txt").display().to_string());
+        assert_eq!(kind, "delete");
+    }
+
+    #[test]
+    fn history_list_reports_recent_scans_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("history.sqlite");
+        for (root, started_at) in [("/a", 1), ("/b", 2)] {
+            let mut record = crate::history::ScanRecord {
+                root: root.to_string(),
+                started_at,
+                files_scanned: 1,
+                bytes_scanned: 1,
+                duplicate_groups: 0,
+                duplicate_files: 0,
+                action_kind: None,
+                action_applied: None,
+                bytes_reclaimed: None,
+                files_acted_on: None,
+                actions: Vec::new(),
+            };
+            record.started_at = started_at;
+            crate::history::record_scan(&db_path, &record).unwrap();
+        }
+
+        let cli = HistoryCli {
+            db: db_path,
+            format: Format::Text,
+            command: HistoryCommand::List { limit: 10 },
+        };
+        let exit = run_history(cli);
+        assert_eq!(exit, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn history_stats_aggregates_across_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("history.sqlite");
+        let record = crate::history::ScanRecord {
+            root: "/a".to_string(),
+            started_at: 1,
+            files_scanned: 5,
+            bytes_scanned: 500,
+            duplicate_groups: 1,
+            duplicate_files: 2,
+            action_kind: Some("delete"),
+            action_applied: Some(true),
+            bytes_reclaimed: Some(500),
+            files_acted_on: Some(1),
+            actions: Vec::new(),
+        };
+        crate::history::record_scan(&db_path, &record).unwrap();
+
+        let cli = HistoryCli {
+            db: db_path,
+            format: Format::Json,
+            command: HistoryCommand::Stats {
+                since: None,
+                until: None,
+            },
+        };
+        let exit = run_history(cli);
+        assert_eq!(exit, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn history_subcommand_reports_failure_for_an_unreadable_database() {
+        let cli = HistoryCli {
+            db: PathBuf::from("/does/not/exist/history.sqlite"),
+            format: Format::Text,
+            command: HistoryCommand::List { limit: 10 },
+        };
+        let exit = run_history(cli);
+        assert_eq!(exit, ExitCode::FAILURE);
     }
 }
