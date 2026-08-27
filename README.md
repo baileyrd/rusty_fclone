@@ -12,11 +12,12 @@ workloads — see below), an action layer (delete/trash/hardlink/reflink/
 move/copy, dry-run by default, rule-based keep selection, a protected/
 reference-folder guardrail), richer CLI output (JSON, progress reporting,
 an interactive confirmation prompt), a desktop GUI with inline media
-preview for image and audio duplicates, an opt-in incremental hash cache,
-opt-in SQLite scan-history with per-action audit detail and a `history`
-query subcommand, opt-in import of an existing fclones hash cache, opt-in
-folder-level duplicate detection, and include/exclude scan filters
-(min/max size, extension, excluded paths) are all implemented. See
+preview for image and audio duplicates and persisted, named scan
+profiles, an opt-in incremental hash cache, opt-in SQLite scan-history
+with per-action audit detail and a `history` query subcommand, opt-in
+import of an existing fclones hash cache, opt-in folder-level duplicate
+detection, and include/exclude scan filters (min/max size, extension,
+excluded paths) are all implemented. See
 [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
 checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
 what's planned.
@@ -245,7 +246,8 @@ each, and a Rules & Automation preview. Duplicate Review's compare-cards
 show an inline thumbnail for supported image files and a playable audio
 control for supported audio files, instead of just a filename — falling
 back to a generic file icon for unsupported types, oversized files, or
-video. Light and dark themes.
+video. Scan Setup's directory and options can be saved as a named,
+persisted profile and reloaded on a later launch. Light and dark themes.
 
 ```sh
 cargo run -p rusty_fclone-gui

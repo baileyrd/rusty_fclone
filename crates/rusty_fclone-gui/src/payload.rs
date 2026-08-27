@@ -19,8 +19,12 @@ use rusty_fclone_core::{
 
 /// Scan tunables sent from the frontend. Mirrors [`ScanOptions`]; every
 /// field is optional here so the frontend only needs to send what the user
-/// actually changed from the default.
-#[derive(Debug, Deserialize)]
+/// actually changed from the default. Also doubles as a saved
+/// [`ScanProfilePayload`]'s stored options shape (`SCAN-PROFILES`) — the
+/// same "only what changed from default" representation is exactly what's
+/// worth persisting, so `Serialize`/persisting-friendly derives were added
+/// rather than introducing a second, parallel options type.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanOptionsPayload {
     #[serde(default)]
@@ -416,6 +420,19 @@ pub struct FolderActionResultPayload {
 #[serde(rename_all = "camelCase")]
 pub struct PreviewPayload {
     pub data_url: String,
+}
+
+/// A named, persisted `{root, ScanOptions}` preset (`SCAN-PROFILES`) —
+/// saved from and re-loaded into the Scan Setup screen, so a setup survives
+/// a GUI restart instead of staying session-only like the existing "Recent
+/// scans" list. `options` reuses [`ScanOptionsPayload`] directly rather
+/// than a second parallel type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanProfilePayload {
+    pub name: String,
+    pub root: String,
+    pub options: ScanOptionsPayload,
 }
 
 #[cfg(test)]

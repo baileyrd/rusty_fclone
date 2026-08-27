@@ -13,9 +13,10 @@ use rusty_fclone_core::{action, find_folder_duplicates, folder_action};
 use crate::payload::{
     normalize_path_input, normalize_path_list, parse_action_kind, parse_keep_rule,
     ActionResultPayload, ChooseKeepPayload, FolderActionResultPayload, FolderMatchPayload,
-    GroupPayload, PreviewPayload, ScanEventPayload, ScanOptionsPayload,
+    GroupPayload, PreviewPayload, ScanEventPayload, ScanOptionsPayload, ScanProfilePayload,
 };
 use crate::preview;
+use crate::profiles;
 
 /// Starts a scan on a background thread and streams results back to the
 /// frontend as `scan-event` events, one per [`rusty_fclone_core::ScanEvent`]
@@ -199,6 +200,45 @@ pub fn read_preview(path: String) -> Result<PreviewPayload, String> {
     preview::build_data_url(&path).map(|data_url| PreviewPayload { data_url })
 }
 
+/// Lists every saved scan profile (`SCAN-PROFILES`, ADR-0029), in the order
+/// they're stored — the frontend decides how to display them.
+#[tauri::command]
+pub fn list_scan_profiles() -> Result<Vec<ScanProfilePayload>, String> {
+    let dir = profiles::default_profiles_dir()?;
+    profiles::load(&dir)
+}
+
+/// Saves the current `{root, options}` as a named profile, overwriting any
+/// existing profile with the same name, and returns the full updated list.
+#[tauri::command]
+pub fn save_scan_profile(
+    name: String,
+    root: String,
+    options: ScanOptionsPayload,
+) -> Result<Vec<ScanProfilePayload>, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("a scan profile needs a name".to_string());
+    }
+    let root = normalize_path_input(&root);
+    let dir = profiles::default_profiles_dir()?;
+    profiles::upsert(
+        &dir,
+        ScanProfilePayload {
+            name,
+            root,
+            options,
+        },
+    )
+}
+
+/// Deletes the named profile, if any, and returns the remaining list.
+#[tauri::command]
+pub fn delete_scan_profile(name: String) -> Result<Vec<ScanProfilePayload>, String> {
+    let dir = profiles::default_profiles_dir()?;
+    profiles::remove(&dir, &name)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -217,7 +257,10 @@ mod tests {
                 super::choose_keep,
                 super::find_duplicate_folders,
                 super::run_folder_action,
-                super::read_preview
+                super::read_preview,
+                super::list_scan_profiles,
+                super::save_scan_profile,
+                super::delete_scan_profile
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");
@@ -775,6 +818,33 @@ mod tests {
         assert!(!err.as_str().unwrap().is_empty());
     }
 
+    /// `SCAN-PROFILES`: an empty name is rejected before any directory
+    /// resolution or disk I/O happens — this is the one `save_scan_profile`
+    /// behavior testable at the IPC layer without touching the real OS
+    /// config directory (`profiles::default_profiles_dir()`'s actual
+    /// resolution has no test seam; see `profiles.rs`'s own doc comment and
+    /// its hermetic tempdir-based tests for the rest of the module's
+    /// coverage).
+    #[test]
+    fn save_scan_profile_rejects_an_empty_name() {
+        let err = invoke(
+            "save_scan_profile",
+            json!({ "name": "", "root": "/data", "options": {} }),
+        )
+        .expect_err("an empty profile name must be rejected");
+        assert!(err.as_str().unwrap().contains("name"));
+    }
+
+    #[test]
+    fn save_scan_profile_rejects_a_whitespace_only_name() {
+        let err = invoke(
+            "save_scan_profile",
+            json!({ "name": "   ", "root": "/data", "options": {} }),
+        )
+        .expect_err("a whitespace-only profile name must be rejected");
+        assert!(err.as_str().unwrap().contains("name"));
+    }
+
     #[test]
     fn find_duplicate_folders_rejects_a_nonexistent_root() {
         let err = invoke(
@@ -846,7 +916,10 @@ mod tests {
                 super::choose_keep,
                 super::find_duplicate_folders,
                 super::run_folder_action,
-                super::read_preview
+                super::read_preview,
+                super::list_scan_profiles,
+                super::save_scan_profile,
+                super::delete_scan_profile
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");

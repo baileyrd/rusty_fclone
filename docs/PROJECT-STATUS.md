@@ -1,11 +1,11 @@
 # Project Status
-- Last verified main commit: `6631cbc` — merged `CLI-HISTORY-AUDIT` (PR
-  #42), Phase 2's third and final unit of `docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md` — **Phase 2 is complete**. This
-  branch (`gui-media-preview`) implements that plan's Phase 3, first
-  unit: `GUI-MEDIA-PREVIEW`. Unlike Phase 1/2, Phase 3 units are each
-  individually scoped/greenlit (per the plan's own §5 rationale) rather
-  than pre-approved as a batch; the user asked for Phase 3 directly.
+- Last verified main commit: `c331061` — merged `GUI-MEDIA-PREVIEW` (PR
+  #43), Phase 3's first unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch (`scan-profiles`)
+  implements that plan's Phase 3, second unit: `SCAN-PROFILES`. Unlike
+  Phase 1/2, Phase 3 units are each individually scoped/greenlit (per the
+  plan's own §5 rationale) rather than pre-approved as a batch; the user
+  asked for `SCAN-PROFILES` directly after `GUI-MEDIA-PREVIEW` merged.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -15,8 +15,8 @@
   environment); everything merged since `v0.1.0` will be tagged once that
   happens.
 - Verified at: 2026-08-27
-- Current milestone: `GUI-MEDIA-PREVIEW` (Phase 3 of
-  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, first unit) — implemented,
+- Current milestone: `SCAN-PROFILES` (Phase 3 of
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, second unit) — implemented,
   validated, not yet merged. See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace (three crates) builds, lints, and tests clean
   on the pinned toolchain
@@ -566,23 +566,67 @@
   this environment (no display/`xdotool`) — the same standing gap every
   GUI-facing unit this session has carried.
 
+- `SCAN-PROFILES`: second unit of `DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s
+  Phase 3 — saved scan setups. New `list_scan_profiles`/
+  `save_scan_profile`/`delete_scan_profile` commands and a `profiles`
+  module persist a named `{root, ScanOptions}` preset as a flat JSON file
+  under the OS config directory (`dirs::config_dir()`, already present in
+  `Cargo.lock` as one of Tauri's own transitive dependencies — declaring
+  it directly added zero new supply-chain surface), not SQLite — a
+  deliberately different choice than `CLI-SCAN-HISTORY`/`CLI-HISTORY-
+  AUDIT`'s append-only log, since a handful of named presets is a
+  read-and-rewrite-whole shape, not a query-shaped one. `GUI-UX-001`
+  0.3.7 → 0.3.8 (FR-027), narrowing the spec's prior "no persisted GUI
+  state" non-goal to exclude this explicit, user-initiated save (window
+  size/position and any unsaved in-progress state are still never
+  persisted). Scan Setup gained a "Saved scan profiles" card: a name
+  field plus "Save current setup," and a list of saved profiles each
+  with "Load"/"Delete" — saving under a name already in use overwrites
+  that profile rather than erroring or duplicating it. `ScanOptionsPayload`
+  gained `Serialize`/`Clone`/`Default` so the same struct doubles as the
+  persisted shape, avoiding a second parallel options type. Deliberately
+  no `AppHandle` in the three new commands — Tauri's own
+  `app.path().app_config_dir()` needs one, but its behavior under
+  `tauri::test`'s mock IPC harness resolves to the *real* host config
+  directory (the mock identifier defaults to empty string), which would
+  make an IPC-level test write into this machine's actual `~/.config`
+  instead of a hermetic tempdir. Resolving the directory via
+  `dirs::config_dir()` directly instead keeps `profiles::load`/`upsert`/
+  `remove` taking an explicit `&Path`, fully unit-tested against a
+  tempdir the same way `preview::build_data_url` already was for
+  `GUI-MEDIA-PREVIEW`; the real directory-resolution call itself
+  (`profiles::default_profiles_dir()`) is a trusted, untested boundary,
+  the same category as `trash`/reflink's non-Linux behavior (ADR-0014/
+  ADR-0024). ADR-0029. Implemented, tested (204/204 workspace tests — 7
+  new `profiles` module tests, 2 new `commands` tests for
+  `save_scan_profile`'s empty/whitespace-only name rejection — the only
+  `save_scan_profile` behavior testable at the IPC layer without
+  touching real disk, since the directory resolution has no test seam by
+  design), `cargo fmt`/`clippy -D warnings`/`bench --no-run`/`doc` all
+  pass. Verified by hand once in this environment (a scratch test,
+  removed before committing): `default_profiles_dir()` resolved to
+  `/root/.config/rusty-fclone`, and a saved/reloaded profile matched the
+  expected JSON shape exactly — see Validation below. Not yet manually
+  verified through a rendered window in this environment (no display/
+  `xdotool`) — the same standing gap every GUI-facing unit this session
+  has carried.
+
 ## In progress
-- None — `GUI-MEDIA-PREVIEW` above is implemented and validated on
-  branch `gui-media-preview`, not yet merged.
+- None — `SCAN-PROFILES` above is implemented and validated on
+  branch `scan-profiles`, not yet merged.
 
 ## Blocked
 - None.
 
 ## Next
-- Phase 3 of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` (§4) has two
-  more listed bets not yet started: `DETECTION-PERCEPTUAL-IMAGES` (a new
+- Phase 3 of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` (§4) has one
+  more listed bet not yet started: `DETECTION-PERCEPTUAL-IMAGES` (a new
   opt-in similarity-matching mode, needs its own dependency justification
-  and ADR, the largest lift on the list) and `SCAN-PROFILES` (saved
-  GUI scan setups, pairs naturally with `DETECTION-SCAN-FILTERS`). A
-  Dashboard chart upgrade is called out as small enough to fold into
-  whichever unit next touches the Dashboard rather than standing alone.
-  Each still needs its own explicit go-ahead, same as `GUI-MEDIA-PREVIEW`
-  did — not a pre-approved batch the way Phase 1/2 were.
+  and ADR, the largest lift on the list). A Dashboard chart upgrade is
+  called out as small enough to fold into whichever unit next touches the
+  Dashboard rather than standing alone. Still needs its own explicit
+  go-ahead, same as `GUI-MEDIA-PREVIEW`/`SCAN-PROFILES` did — not a
+  pre-approved batch the way Phase 1/2 were.
 - Follow-on units intentionally left open by earlier scoping decisions
   (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
   proper (full pipeline overlap, needs a `ScanEvent` finality-contract
@@ -604,9 +648,24 @@
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-27)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-27)
-- `cargo test --workspace`: pass, 195/195 (2026-08-27)
+- `cargo test --workspace`: pass, 204/204 (2026-08-27)
 - `cargo bench --workspace --no-run`: pass (2026-08-27)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-27)
+- `SCAN-PROFILES` verification (2026-08-27): no CLI surface exists for
+  this unit (GUI-only), so covered by `profiles::tests::*`'s 7 hermetic
+  tempdir-based tests (empty-when-missing, insert, overwrite-by-name,
+  preserving other saved profiles, remove, no-op remove of an unknown
+  name, and a full `ScanOptionsPayload` round trip through the saved JSON
+  file) plus a one-time manual check of the real, untestable-by-design
+  directory resolution: a scratch test (removed before committing) called
+  `profiles::default_profiles_dir()` for real in this environment,
+  confirmed it resolved to `/root/.config/rusty-fclone`, and confirmed a
+  saved-then-reloaded profile's JSON matched the exact expected shape
+  (camelCase fields, `null` for unset options, `[]` for an empty
+  `excludePaths`) before the scratch directory was deleted. No Xvfb/
+  `xdotool` pass confirming the new "Saved scan profiles" card renders,
+  saves, loads, and deletes correctly through the rendered UI — see Risks
+  below.
 - `GUI-MEDIA-PREVIEW` verification (2026-08-27): no traditional CLI-against-
   filesystem smoke test applies here (this unit is GUI-only, with no CLI
   surface). Verified instead via the 10 automated `preview`/`commands`
@@ -709,6 +768,20 @@
   light-theme toggle. Every screen rendered correctly in both themes.
 
 ## Risks and decisions needed
+- `SCAN-PROFILES`'s "Saved scan profiles" card (save/list/load/delete) has
+  hermetic unit-test coverage for the underlying storage logic and
+  IPC-level coverage for `save_scan_profile`'s name validation, but no
+  Xvfb/`xdotool` end-to-end pass confirmed saving, listing, loading, or
+  deleting a profile actually works through the rendered UI — `xdotool`
+  isn't installed in this environment, same standing gap as every other
+  GUI surface this session. Separately, `profiles::default_profiles_dir()`
+  (the real OS-config-directory lookup, via the `dirs` crate) has no
+  automated test by design — exercising it for real would write into the
+  host machine's actual config directory rather than a hermetic tempdir —
+  and was instead verified once by hand (see Validation above); this is
+  the same category of trust ADR-0014/ADR-0024 already established for
+  `trash`/reflink's non-Linux platform behavior, now applied to path
+  resolution instead of a destructive filesystem operation.
 - `GUI-MEDIA-PREVIEW`'s rendered behavior (thumbnail/audio-player display
   in Duplicate Review's compare-cards) has IPC-level test coverage for
   `read_preview` and payload conversion, but no Xvfb/`xdotool` end-to-end

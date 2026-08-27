@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.3.7
+- Version: 0.3.8
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -28,8 +28,10 @@ semantics, which are unchanged.
 - Packaged, installable distribution (`.deb`/`.AppImage`/`.dmg`/`.msi`) —
   `release.yml` doesn't build GUI bundles yet; see
   `docs/roadmap/ROADMAP.md`'s `GUI-RELEASE-BUNDLES`.
-- Persisting GUI-side state (window size/position, last-used scan root or
-  options) across launches.
+- Persisting GUI-side state (window size/position, or the *current,
+  in-progress* scan root/options) across launches — unaffected by
+  `SCAN-PROFILES` (FR-027), which only persists a preset the user
+  explicitly named and saved, never the screen's live, unsaved state.
 - Any GUI-specific safety relaxation of the action layer's dry-run-by-
   default model (ADR-0009) — apply is never implicit; see FR-011 for the
   current (confirmation-dialog) mechanism.
@@ -257,6 +259,18 @@ semantics, which are unchanged.
   size cap, or a read error) SHALL fall back to the existing generic file
   icon, never an error state visible to the user. Video groups SHALL NOT
   attempt a preview (`GUI-MEDIA-PREVIEW`, ADR-0028).
+- `GUI-UX-001-FR-027`: Scan Setup SHALL expose a "Saved scan profiles"
+  card letting the user save the current `{root, ScanOptions}` under a
+  name (`save_scan_profile`), list every saved profile
+  (`list_scan_profiles`, fetched once at startup), load a saved profile
+  back into the screen's fields (`applyScanProfile`, client-side only —
+  no command call), and delete one (`delete_scan_profile`). Saving under
+  a name already in use SHALL overwrite that profile, not create a
+  duplicate or error. `save_scan_profile` SHALL reject an empty or
+  whitespace-only name with an `Err` without persisting anything. Every
+  successful save/delete response SHALL be the full, current profile
+  list, which the frontend SHALL use to replace `state.scanProfiles`
+  wholesale (`SCAN-PROFILES`, ADR-0029).
 
 ## Architecture and interfaces
 
@@ -278,9 +292,15 @@ fn run_folder_action(removed: String, kept: String, groups: Vec<GroupPayload>, o
                       reference_paths: Vec<String>, archive_dir: Option<String>) -> Result<FolderActionResultPayload, String>;
 #[tauri::command]
 fn read_preview(path: String) -> Result<PreviewPayload, String>;
+#[tauri::command]
+fn list_scan_profiles() -> Result<Vec<ScanProfilePayload>, String>;
+#[tauri::command]
+fn save_scan_profile(name: String, root: String, options: ScanOptionsPayload) -> Result<Vec<ScanProfilePayload>, String>;
+#[tauri::command]
+fn delete_scan_profile(name: String) -> Result<Vec<ScanProfilePayload>, String>;
 
 // src/payload.rs — serde DTOs, kept out of rusty_fclone-core (ADR-0020)
-struct ScanOptionsPayload { /* mirrors ScanOptions, all fields optional */ }
+struct ScanOptionsPayload { /* mirrors ScanOptions, all fields optional; also the persisted shape a ScanProfilePayload stores */ }
 enum ScanEventPayload { DuplicateGroup { .. }, Error { .. }, Progress { .. }, Finished(ScanSummaryPayload) }
 struct GroupPayload { size: u64, paths: Vec<String> }
 struct ActionResultPayload { plan: ActionPlanPayload, applied: Option<ApplyReportPayload> }
@@ -288,9 +308,16 @@ enum FolderMatchPayload { Exact { folders: Vec<String>, fileCount: u64, bytes: u
                           Contained { subset: String, superset: String, fileCount: u64, bytes: u64 } }
 struct FolderActionResultPayload { plan: FolderActionPlanPayload, applied: Option<FolderApplyReportPayload> }
 struct PreviewPayload { data_url: String }
+struct ScanProfilePayload { name: String, root: String, options: ScanOptionsPayload }
 
 // src/preview.rs (ADR-0028) — no serde/core involvement
 fn build_data_url(path: &Path) -> Result<String, String>; // "data:<mime>;base64,<...>"
+
+// src/profiles.rs (ADR-0029) — no serde/core involvement, no AppHandle
+fn default_profiles_dir() -> Result<PathBuf, String>; // dirs::config_dir()/"rusty-fclone"
+fn load(dir: &Path) -> Result<Vec<ScanProfilePayload>, String>;
+fn upsert(dir: &Path, profile: ScanProfilePayload) -> Result<Vec<ScanProfilePayload>, String>;
+fn remove(dir: &Path, name: &str) -> Result<Vec<ScanProfilePayload>, String>;
 ```
 
 Frontend (`ui/app.js`): `folderMatchPairs(item)` mirrors the CLI's
@@ -501,12 +528,27 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   byte-for-byte through a real base64 decoder. `app.js`'s `ensurePreview`/
   card-rendering changes have no automated coverage (same standing gap as
   the rest of `app.js`) and no manual Xvfb/`xdotool` pass this session.
+- FR-027 (saved scan profiles) is exercised by `profiles::tests::*` (7
+  tests, hermetic against a tempdir: empty-list-when-missing, insert,
+  overwrite-by-name, preserving other profiles, remove, no-op remove of an
+  unknown name, and a full options round trip through the saved JSON
+  file) plus `commands::tests::save_scan_profile_rejects_an_empty_name`/
+  `save_scan_profile_rejects_a_whitespace_only_name` (IPC-level — the two
+  behaviors testable without touching the real OS config directory, since
+  `profiles::default_profiles_dir()`'s actual resolution has no test seam
+  by design; see ADR-0029). That real resolution was instead verified by
+  hand once in this environment (resolved to `/root/.config/rusty-fclone`,
+  a saved/reloaded profile matched the expected JSON exactly — see
+  `PROJECT-STATUS.md`'s Validation entry). `app.js`'s profile card
+  (`profilesCard`/`loadScanProfiles`/`saveScanProfile`/`applyScanProfile`/
+  `deleteScanProfile`) has no automated coverage (same standing gap as the
+  rest of `app.js`) and no manual Xvfb/`xdotool` pass this session.
 
 ## Verification plan
 
-Unit/IPC tests in `rusty_fclone-gui` (47 tests: 17 in `payload::tests`, 23
-in `commands::tests`, 7 in `preview::tests`), run as part of `cargo test
---workspace`. Manual
+Unit/IPC tests in `rusty_fclone-gui` (56 tests: 17 in `payload::tests`, 25
+in `commands::tests`, 7 in `preview::tests`, 7 in `profiles::tests`), run
+as part of `cargo test --workspace`. Manual
 end-to-end verification of the redesigned frontend (this environment has
 no display, so via Xvfb): a built binary was launched, screenshotted at
 each step, and driven with `xdotool` through Dashboard (empty state) →
@@ -596,9 +638,29 @@ See `docs/traceability/TRACEABILITY.md`.
   `dialog`/`fs` plugin work already tracked above — "Export (JSON)" no
   longer has this problem (FR-025 wired it via a client-side download
   instead, needing neither).
+- `SCAN-PROFILES`' saved profiles have no rename operation (only save,
+  which upserts by name, and delete) and no import/export of the profile
+  file itself — narrow enough that renaming today means save-under-a-
+  new-name then delete-the-old-one, not tracked as a real gap unless a
+  user reports wanting one directly.
 
 ## Change history
 
+- 0.3.8 (2026-08-27): Added persisted scan profiles (FR-027,
+  `SCAN-PROFILES`, second unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 3). New `list_scan_profiles`/
+  `save_scan_profile`/`delete_scan_profile` commands and a `profiles`
+  module persist a named `{root, ScanOptions}` preset as a flat JSON file
+  under the OS config directory (`dirs::config_dir()`, already a
+  transitive dependency of Tauri — no new supply-chain surface), rather
+  than SQLite (a different shape than `CLI-SCAN-HISTORY`'s append-only
+  log). Scan Setup gained a "Saved scan profiles" card: save the current
+  setup under a name, list saved profiles, load one back into the
+  screen's fields, or delete one. `ScanOptionsPayload` gained
+  `Serialize`/`Clone`/`Default` so it doubles as the persisted shape.
+  The Non-goals list's "no persisted GUI state" item was narrowed to
+  exclude this explicit, user-initiated save (window size/position and
+  unsaved in-progress state are still never persisted). ADR-0029.
 - 0.3.7 (2026-08-27): Added inline media preview to Duplicate Review's
   compare-cards (FR-026, `GUI-MEDIA-PREVIEW`, first unit of `docs/
   roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 3). New `read_preview`

@@ -18,6 +18,13 @@ rusty_fclone-core = { path = "../rusty_fclone-core" }
 tauri = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Already present in the dependency tree as one of Tauri's own transitive
+# dependencies (its own `app_config_dir()` uses it internally) -- declared
+# here directly so `profiles::default_profiles_dir` can resolve the OS
+# config directory as a plain function, with no `AppHandle` needed
+# (SCAN-PROFILES, ADR-0029). No new supply-chain surface: same crate,
+# same version already in Cargo.lock.
+dirs = "6"
 
 [dev-dependencies]
 tempfile = { workspace = true }
