@@ -11,11 +11,12 @@ Detection (staged hashing, benchmarked faster than fclones on most
 workloads — see below), an action layer (delete/trash/hardlink/reflink/
 move/copy, dry-run by default, rule-based keep selection, a protected/
 reference-folder guardrail), richer CLI output (JSON, progress reporting,
-an interactive confirmation prompt), a desktop GUI, an opt-in incremental
-hash cache, opt-in SQLite scan-history with per-action audit detail and a
-`history` query subcommand, opt-in import of an existing fclones hash
-cache, opt-in folder-level duplicate detection, and include/exclude scan
-filters (min/max size, extension, excluded paths) are all implemented. See
+an interactive confirmation prompt), a desktop GUI with inline media
+preview for image and audio duplicates, an opt-in incremental hash cache,
+opt-in SQLite scan-history with per-action audit detail and a `history`
+query subcommand, opt-in import of an existing fclones hash cache, opt-in
+folder-level duplicate detection, and include/exclude scan filters
+(min/max size, extension, excluded paths) are all implemented. See
 [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
 checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
 what's planned.
@@ -240,7 +241,11 @@ screens instead of a terminal: a Dashboard summarizing duplicates found
 and space reclaimed this session, Scan Setup for picking a directory and
 tuning options, Duplicate Review for stepping through file- and
 folder-level duplicate matches and previewing or applying an action on
-each, and a Rules & Automation preview. Light and dark themes.
+each, and a Rules & Automation preview. Duplicate Review's compare-cards
+show an inline thumbnail for supported image files and a playable audio
+control for supported audio files, instead of just a filename — falling
+back to a generic file icon for unsupported types, oversized files, or
+video. Light and dark themes.
 
 ```sh
 cargo run -p rusty_fclone-gui

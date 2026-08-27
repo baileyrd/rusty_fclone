@@ -1,9 +1,11 @@
 # Project Status
-- Last verified main commit: `78edda7` — merged `ACTION-MOVE-COPY` (PR
-  #41), Phase 2's second unit of `docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch (`cli-history-audit`)
-  implements that plan's Phase 2, third and final unit:
-  `CLI-HISTORY-AUDIT` — once this merges, Phase 2 is complete.
+- Last verified main commit: `6631cbc` — merged `CLI-HISTORY-AUDIT` (PR
+  #42), Phase 2's third and final unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md` — **Phase 2 is complete**. This
+  branch (`gui-media-preview`) implements that plan's Phase 3, first
+  unit: `GUI-MEDIA-PREVIEW`. Unlike Phase 1/2, Phase 3 units are each
+  individually scoped/greenlit (per the plan's own §5 rationale) rather
+  than pre-approved as a batch; the user asked for Phase 3 directly.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -13,10 +15,9 @@
   environment); everything merged since `v0.1.0` will be tagged once that
   happens.
 - Verified at: 2026-08-27
-- Current milestone: `CLI-HISTORY-AUDIT` (Phase 2 of
-  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, third of three independent units,
-  completing the phase) — implemented, validated, not yet merged. See
-  `docs/roadmap/ROADMAP.md`.
+- Current milestone: `GUI-MEDIA-PREVIEW` (Phase 3 of
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, first unit) — implemented,
+  validated, not yet merged. See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace (three crates) builds, lints, and tests clean
   on the pinned toolchain
 
@@ -533,22 +534,55 @@
   yet manually verified through a rendered window — same standing gap as
   every prior GUI surface this session.
 
+- `GUI-MEDIA-PREVIEW`: first unit of `DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s
+  Phase 3 — inline thumbnail/audio-player preview in Duplicate Review's
+  compare-cards, the playbook's single most-cited UX failure category
+  across the products studied. New `read_preview` command/`preview`
+  module returns a `data:<mime>;base64,<...>` URI for a small, supported
+  image or audio file. Deliberately no new Tauri capability/permission
+  grant (didn't adopt the `asset:`/`dialog`/`fs` plugin prerequisite this
+  project keeps deferring elsewhere) and no new dependency (base64 is
+  hand-rolled, ~30 lines, tested against RFC 4648's own vectors plus a
+  real 69-byte PNG file round-tripped byte-for-byte through a real
+  decoder — extra assurance since it's hand-rolled rather than a
+  battle-tested crate). Photo-category previews render inside the
+  existing 56x56 thumbnail slot (`object-fit: cover`); audio-category
+  previews render as a full-width `<audio controls>` row, since playback
+  controls need real width. Video is explicitly not attempted (typical
+  file sizes make whole-file base64 embedding impractical — multi-
+  hundred-MB memory spikes, a frozen UI thread — without a streaming
+  prerequisite this project hasn't adopted). HEIC/TIFF are excluded from
+  preview despite being in `app.js`'s existing `EXT_CATEGORY`'s "photo"
+  bucket, since most target webview engines (WebKitGTK, WebView2,
+  WKWebView) don't render either natively. A rejected/unsupported path
+  (unsupported extension, over the 25 MB size cap, or a real I/O error)
+  falls back to the existing generic file icon, never a visible error.
+  `GUI-UX-001` 0.3.7 (FR-026). ADR-0028 — this project's first Phase 3
+  unit, each of which the plan requires its own ADR and spec revision
+  for, unlike Phase 1/2's routine-implementation units. Implemented,
+  tested (195/195 workspace tests — 7 new `preview` module tests, 3 new
+  `commands` tests), `cargo fmt`/`clippy -D warnings`/`bench --no-run`/
+  `doc` all pass. Not yet manually verified through a rendered window in
+  this environment (no display/`xdotool`) — the same standing gap every
+  GUI-facing unit this session has carried.
+
 ## In progress
-- None — `CLI-HISTORY-AUDIT` above is implemented and validated on
-  branch `cli-history-audit`, not yet merged. Once it merges, Phase 2 of
-  `DEDUP-GAP-IMPLEMENTATION-PLAN.md` is complete in full.
+- None — `GUI-MEDIA-PREVIEW` above is implemented and validated on
+  branch `gui-media-preview`, not yet merged.
 
 ## Blocked
 - None.
 
 ## Next
-- Phase 2 of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` is complete
-  once `CLI-HISTORY-AUDIT` merges. Phase 3 (`docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md` §4) is a set of larger, separately-
-  scoped bets (`GUI-MEDIA-PREVIEW`, `DETECTION-PERCEPTUAL-IMAGES`,
-  `SCAN-PROFILES`, a Dashboard chart upgrade) not yet greenlit into
-  `ROADMAP.md` — needs an explicit decision on which, if any, to start
-  next.
+- Phase 3 of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` (§4) has two
+  more listed bets not yet started: `DETECTION-PERCEPTUAL-IMAGES` (a new
+  opt-in similarity-matching mode, needs its own dependency justification
+  and ADR, the largest lift on the list) and `SCAN-PROFILES` (saved
+  GUI scan setups, pairs naturally with `DETECTION-SCAN-FILTERS`). A
+  Dashboard chart upgrade is called out as small enough to fold into
+  whichever unit next touches the Dashboard rather than standing alone.
+  Each still needs its own explicit go-ahead, same as `GUI-MEDIA-PREVIEW`
+  did — not a pre-approved batch the way Phase 1/2 were.
 - Follow-on units intentionally left open by earlier scoping decisions
   (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
   proper (full pipeline overlap, needs a `ScanEvent` finality-contract
@@ -570,9 +604,21 @@
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-27)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-27)
-- `cargo test --workspace`: pass, 185/185 (2026-08-27)
+- `cargo test --workspace`: pass, 195/195 (2026-08-27)
 - `cargo bench --workspace --no-run`: pass (2026-08-27)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-27)
+- `GUI-MEDIA-PREVIEW` verification (2026-08-27): no traditional CLI-against-
+  filesystem smoke test applies here (this unit is GUI-only, with no CLI
+  surface). Verified instead via the 10 automated `preview`/`commands`
+  tests (RFC 4648 base64 vectors, mime-mapping including the HEIC/TIFF/
+  video exclusions, size-cap and unsupported-extension rejection, IPC round
+  trips), plus a self-initiated extra check: a real 69-byte PNG file was
+  base64-encoded by `build_data_url`'s hand-rolled encoder and confirmed
+  byte-for-byte round-trippable through Python's own standard-library
+  base64 decoder, as added assurance for hand-rolled encoding logic before
+  trusting it over a well-tested crate. No Xvfb/`xdotool` pass confirming
+  the `<img>`/`<audio>` elements actually render in a live window — see
+  Risks below.
 - Manual CLI smoke test, `CLI-HISTORY-AUDIT` (2026-08-27): two real scans
   against `/tmp/history-smoke` (one report-only, one `--action trash
   --apply` across 3 redundant files) recorded against a `--history`
@@ -663,6 +709,16 @@
   light-theme toggle. Every screen rendered correctly in both themes.
 
 ## Risks and decisions needed
+- `GUI-MEDIA-PREVIEW`'s rendered behavior (thumbnail/audio-player display
+  in Duplicate Review's compare-cards) has IPC-level test coverage for
+  `read_preview` and payload conversion, but no Xvfb/`xdotool` end-to-end
+  pass confirmed the `<img>`/`<audio controls>` elements actually appear,
+  size correctly inside the 56x56 thumbnail slot, and play audio through
+  the rendered UI — `xdotool` isn't installed in this environment, same
+  standing gap as every prior GUI surface this session. The hand-rolled
+  base64 encoder is additionally verified via RFC 4648 test vectors and a
+  real-file round trip (see Validation above), so the residual risk here
+  is UI wiring/rendering specifically, not the encoding logic.
 - `CLI-HISTORY-AUDIT`'s `history` keyword reservation means a real
   directory literally named `history` at a scan root now needs
   `rusty-fclone ./history` (or an absolute path) to disambiguate from the

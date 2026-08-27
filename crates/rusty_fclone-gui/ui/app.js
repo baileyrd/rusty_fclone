@@ -120,6 +120,11 @@ const state = {
   scanHistory: [],
   errors: [],
   groupIndex: 0,
+  // Inline media preview (GUI-MEDIA-PREVIEW, ADR-0028) -- keyed by file
+  // path, value is `null` (loading), a data: URI (loaded), or `false`
+  // (not previewable: unsupported type, too large, or a read error).
+  // Session-scoped like every other render cache here; never persisted.
+  previewCache: {},
   keepChoice: {},
   keepRule: "alphabetical",
   ruleKeepChoice: {},
@@ -781,6 +786,31 @@ function ensureRuleKeepChoice(item) {
     });
 }
 
+// Categories the backend's `read_preview` command can actually render
+// (GUI-MEDIA-PREVIEW) -- video is deliberately excluded, see ADR-0028.
+const PREVIEWABLE_CATEGORIES = new Set(["photo", "audio"]);
+
+// Resolves (via the backend `read_preview` command) an inline thumbnail/
+// player for `path`, caching the result in `state.previewCache` keyed by
+// path -- shared across every group a given file happens to appear in,
+// and looked up only once per path. Same in-flight-marker pattern as
+// `ensureRuleKeepChoice`: mutates `state` directly for the `null` "in
+// flight" marker to avoid a re-render mid-render, then goes through
+// `setState` once the real result (a data: URI, or `false` for "not
+// previewable") comes back.
+function ensurePreview(path) {
+  if (!PREVIEWABLE_CATEGORIES.has(categoryOf(path))) return;
+  if (path in state.previewCache) return;
+  state.previewCache[path] = null;
+  invoke("read_preview", { path })
+    .then((result) => {
+      setState({ previewCache: { ...state.previewCache, [path]: result.dataUrl } });
+    })
+    .catch(() => {
+      setState({ previewCache: { ...state.previewCache, [path]: false } });
+    });
+}
+
 function fileReviewMain(item) {
   const group = item.group;
   ensureRuleKeepChoice(item);
@@ -792,10 +822,17 @@ function fileReviewMain(item) {
 
   const cards = group.paths.map((path, i) => {
     const keep = path === keepPath;
+    const category = categoryOf(path);
+    ensurePreview(path);
+    const preview = state.previewCache[path];
+    const hasPreview = typeof preview === "string";
+    const thumb = hasPreview && category === "photo"
+      ? el("img", { src: preview, alt: `preview of ${fileNameOf(path)}` })
+      : icon("file", 26);
     return el(
       "div",
       { className: "compare-card " + (keep ? "keep" : "remove") },
-      el("div", { className: "compare-thumb" }, icon("file", 26)),
+      el("div", { className: "compare-thumb" }, thumb),
       el("div", { className: "compare-label" }, `Copy ${i + 1}`),
       el("div", { className: "compare-path" }, path),
       el(
@@ -803,6 +840,9 @@ function fileReviewMain(item) {
         { className: "compare-meta" },
         el("div", { className: "compare-meta-row" }, el("span", { className: "k" }, "Size"), el("span", null, bytesHuman(group.size))),
       ),
+      hasPreview && category === "audio"
+        ? el("audio", { src: preview, controls: true, className: "compare-audio" })
+        : null,
       el(
         "button",
         { className: "compare-badge " + (keep ? "keep" : "remove"), onClick: () => setState({ keepChoice: { ...state.keepChoice, [item.key]: path } }) },

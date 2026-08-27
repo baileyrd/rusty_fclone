@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.3.6
+- Version: 0.3.7
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -247,6 +247,16 @@ semantics, which are unchanged.
   (reading an arbitrary database needs a real filesystem path, which
   needs Tauri's `dialog`/`fs` plugin — not yet wired into the GUI)
   (`CLI-HISTORY-AUDIT`, ADR-0027).
+- `GUI-UX-001-FR-026`: The Duplicate Review screen's compare-cards SHALL
+  show an inline preview for a path in a `"photo"`- or `"audio"`-category
+  group (per the existing `EXT_CATEGORY` classification), resolved via a
+  new `read_preview` command and cached client-side by path. A `"photo"`
+  preview SHALL render as an `<img>` filling the existing thumbnail slot;
+  an `"audio"` preview SHALL render as a full-width `<audio controls>`
+  element. A path the command rejects (unsupported extension, over the
+  size cap, or a read error) SHALL fall back to the existing generic file
+  icon, never an error state visible to the user. Video groups SHALL NOT
+  attempt a preview (`GUI-MEDIA-PREVIEW`, ADR-0028).
 
 ## Architecture and interfaces
 
@@ -266,6 +276,8 @@ fn find_duplicate_folders(root: String, groups: Vec<GroupPayload>, options: Scan
 #[tauri::command]
 fn run_folder_action(removed: String, kept: String, groups: Vec<GroupPayload>, options: ScanOptionsPayload, kind: String, apply: bool,
                       reference_paths: Vec<String>, archive_dir: Option<String>) -> Result<FolderActionResultPayload, String>;
+#[tauri::command]
+fn read_preview(path: String) -> Result<PreviewPayload, String>;
 
 // src/payload.rs — serde DTOs, kept out of rusty_fclone-core (ADR-0020)
 struct ScanOptionsPayload { /* mirrors ScanOptions, all fields optional */ }
@@ -275,6 +287,10 @@ struct ActionResultPayload { plan: ActionPlanPayload, applied: Option<ApplyRepor
 enum FolderMatchPayload { Exact { folders: Vec<String>, fileCount: u64, bytes: u64 },
                           Contained { subset: String, superset: String, fileCount: u64, bytes: u64 } }
 struct FolderActionResultPayload { plan: FolderActionPlanPayload, applied: Option<FolderApplyReportPayload> }
+struct PreviewPayload { data_url: String }
+
+// src/preview.rs (ADR-0028) — no serde/core involvement
+fn build_data_url(path: &Path) -> Result<String, String>; // "data:<mime>;base64,<...>"
 ```
 
 Frontend (`ui/app.js`): `folderMatchPairs(item)` mirrors the CLI's
@@ -473,11 +489,24 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   `app.js`), and "Import history" is an intentionally-disabled
   placeholder with nothing to test yet. No manual Xvfb/`xdotool` pass
   this session either, same as every other GUI surface above.
+- FR-026 (inline media preview) is exercised by
+  `commands::tests::read_preview_returns_a_data_url_for_a_supported_image`,
+  `commands::tests::read_preview_rejects_an_unsupported_extension`,
+  `commands::tests::read_preview_rejects_a_nonexistent_file` (IPC-level),
+  plus `preview::tests::*` (7 tests: the hand-rolled base64 encoder
+  against RFC 4648's own test vectors, extension→MIME mapping including
+  the deliberate HEIC/TIFF/video exclusions, the size-cap boundary, and a
+  real I/O error). The base64 encoder was additionally verified outside
+  the unit-test suite against a real 69-byte PNG file, round-tripped
+  byte-for-byte through a real base64 decoder. `app.js`'s `ensurePreview`/
+  card-rendering changes have no automated coverage (same standing gap as
+  the rest of `app.js`) and no manual Xvfb/`xdotool` pass this session.
 
 ## Verification plan
 
-Unit/IPC tests in `rusty_fclone-gui` (37 tests: 17 in `payload::tests`, 20
-in `commands::tests`), run as part of `cargo test --workspace`. Manual
+Unit/IPC tests in `rusty_fclone-gui` (47 tests: 17 in `payload::tests`, 23
+in `commands::tests`, 7 in `preview::tests`), run as part of `cargo test
+--workspace`. Manual
 end-to-end verification of the redesigned frontend (this environment has
 no display, so via Xvfb): a built binary was launched, screenshotted at
 each step, and driven with `xdotool` through Dashboard (empty state) →
@@ -531,6 +560,14 @@ See `docs/traceability/TRACEABILITY.md`.
 - `release.yml` doesn't build or bundle the GUI (Non-goals) — a real
   release needs per-platform bundler prerequisites and real (non-
   placeholder) icon assets in every format `tauri build`'s bundler wants.
+- `GUI-MEDIA-PREVIEW`'s video exclusion, HEIC/TIFF exclusion, and 25 MB
+  size cap are all real, felt limitations, not just documentation —
+  video preview needs the asset/stream-protocol prerequisite this
+  project keeps deferring (same one blocking "Import history" and the
+  native root-path picker); a user with an oversized file or an
+  iPhone-exported HEIC library sees the plain file icon, not a preview,
+  with no in-UI explanation of why. Worth a tooltip or similar
+  explanation if this becomes a real point of confusion.
 - Only verified on Linux (this development environment's only available
   platform, see `PROJECT-STATUS.md`) — macOS and Windows are unverified
   end-to-end. A real Windows build attempt did surface one real gap
@@ -562,6 +599,21 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.7 (2026-08-27): Added inline media preview to Duplicate Review's
+  compare-cards (FR-026, `GUI-MEDIA-PREVIEW`, first unit of `docs/
+  roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 3). New `read_preview`
+  command/`preview` module returns a `data:` URI for a small, supported
+  image or audio file — no new Tauri capability/permission grant, no new
+  dependency (base64 is hand-rolled, ~30 lines, tested against RFC 4648's
+  vectors and a real PNG file). Images render inside the existing
+  thumbnail slot; audio gets a full-width `<audio controls>` row. Video
+  is explicitly not attempted — typical file sizes make whole-file
+  base64 embedding impractical without an asset/stream-protocol
+  prerequisite this project has deferred elsewhere. HEIC/TIFF are
+  excluded from preview despite being in `EXT_CATEGORY`'s "photo"
+  bucket, since most target webview engines don't render either
+  natively. A rejected/unsupported path falls back to the existing
+  generic file icon, never a visible error. ADR-0028.
 - 0.3.6 (2026-08-27): Wired the Dashboard's "Export (JSON)" button for
   real (FR-025, `CLI-HISTORY-AUDIT`, third and final unit of `docs/
   roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2). Downloads

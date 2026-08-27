@@ -1,5 +1,6 @@
 mod commands;
 mod payload;
+mod preview;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,6 +11,7 @@ pub fn run() {
             commands::choose_keep,
             commands::find_duplicate_folders,
             commands::run_folder_action,
+            commands::read_preview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
