@@ -408,6 +408,16 @@ pub struct FolderActionResultPayload {
     pub applied: Option<FolderApplyReportPayload>,
 }
 
+/// Response shape for the `read_preview` command (`GUI-MEDIA-PREVIEW`) --
+/// a ready-to-use `data:` URI for an `<img>`/`<audio>` element, or the
+/// command returns `Err` (unsupported type, too large, or a real I/O
+/// error) instead of this.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPayload {
+    pub data_url: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

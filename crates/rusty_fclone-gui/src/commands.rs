@@ -13,8 +13,9 @@ use rusty_fclone_core::{action, find_folder_duplicates, folder_action};
 use crate::payload::{
     normalize_path_input, normalize_path_list, parse_action_kind, parse_keep_rule,
     ActionResultPayload, ChooseKeepPayload, FolderActionResultPayload, FolderMatchPayload,
-    GroupPayload, ScanEventPayload, ScanOptionsPayload,
+    GroupPayload, PreviewPayload, ScanEventPayload, ScanOptionsPayload,
 };
+use crate::preview;
 
 /// Starts a scan on a background thread and streams results back to the
 /// frontend as `scan-event` events, one per [`rusty_fclone_core::ScanEvent`]
@@ -187,6 +188,17 @@ pub fn run_folder_action(
     })
 }
 
+/// Reads `path` (a real, small image or audio file) and returns it as a
+/// ready-to-embed `data:` URI for the Duplicate Review screen's
+/// compare-card thumbnails (`GUI-MEDIA-PREVIEW`, ADR-0028). Fails closed
+/// on an unsupported extension, a file over the size cap, or a real I/O
+/// error — never a partial preview.
+#[tauri::command]
+pub fn read_preview(path: String) -> Result<PreviewPayload, String> {
+    let path = PathBuf::from(normalize_path_input(&path));
+    preview::build_data_url(&path).map(|data_url| PreviewPayload { data_url })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -204,7 +216,8 @@ mod tests {
                 super::run_action,
                 super::choose_keep,
                 super::find_duplicate_folders,
-                super::run_folder_action
+                super::run_folder_action,
+                super::read_preview
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");
@@ -720,6 +733,48 @@ mod tests {
         );
     }
 
+    /// `GUI-MEDIA-PREVIEW`: a real, small, supported image file round-trips
+    /// through `read_preview` as a correctly-shaped `data:` URI.
+    #[test]
+    fn read_preview_returns_a_data_url_for_a_supported_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.png");
+        fs::write(&path, b"pretend png bytes").unwrap();
+
+        let response = invoke(
+            "read_preview",
+            json!({ "path": path.display().to_string() }),
+        )
+        .expect("read_preview should succeed for a supported image");
+
+        let data_url = response["dataUrl"].as_str().unwrap();
+        assert!(data_url.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn read_preview_rejects_an_unsupported_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("video.mp4");
+        fs::write(&path, b"video bytes").unwrap();
+
+        let err = invoke(
+            "read_preview",
+            json!({ "path": path.display().to_string() }),
+        )
+        .expect_err("video is not a supported preview target yet");
+        assert!(err.as_str().unwrap().contains("unsupported"));
+    }
+
+    #[test]
+    fn read_preview_rejects_a_nonexistent_file() {
+        let err = invoke(
+            "read_preview",
+            json!({ "path": "/does/not/exist/at/all.png" }),
+        )
+        .expect_err("a missing file must be rejected");
+        assert!(!err.as_str().unwrap().is_empty());
+    }
+
     #[test]
     fn find_duplicate_folders_rejects_a_nonexistent_root() {
         let err = invoke(
@@ -790,7 +845,8 @@ mod tests {
                 super::run_action,
                 super::choose_keep,
                 super::find_duplicate_folders,
-                super::run_folder_action
+                super::run_folder_action,
+                super::read_preview
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");
