@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.3.9
+- Version: 0.4.0
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -292,6 +292,15 @@ semantics, which are unchanged.
   `run_action`/`run_folder_action` call of any kind, ever. Every card for
   a `SimilarGroup` SHALL visibly state that its images are not confirmed
   identical (`DETECTION-PERCEPTUAL-IMAGES`, ADR-0030).
+- `GUI-UX-001-FR-029`: The Dashboard's "Storage breakdown" chart SHALL
+  render each category as a distinct, focusable segment separated from
+  its neighbors by a visible gap (never touching), and SHALL show, on
+  hover or keyboard focus of any segment, a tooltip naming that
+  category's exact byte total and percentage share — identical
+  information whether reached by mouse or keyboard. The legend below the
+  chart SHALL always display each category's exact byte total alongside
+  its percentage, not percentage alone, so the same information is
+  reachable without hovering anything (`DASHBOARD-CHART-UPGRADE`).
 
 ## Architecture and interfaces
 
@@ -372,6 +381,23 @@ for photo thumbnails the same way `fileReviewMain` does) with a
 `var(--warning)`-tinted banner stating the images aren't confirmed
 identical, and only a "Skip" button — no keep-choice badge, no action
 bar, no `run_action`/`run_folder_action` call anywhere in this code path.
+
+`storageBreakdown()` (FR-029) now returns each category's raw byte total
+alongside its existing `pct`/`color`/`label` fields. Each segment of the
+Dashboard's storage-breakdown bar is a real `<button>` (native tab focus
+and keyboard activation, no bespoke ARIA needed) wired to a new shared
+`showChartTooltip`/`hideChartTooltip` pair — one `.chart-tooltip` element
+created once and appended to `<body>` (a sibling of `#app`, so it
+survives `render()`'s wholesale rebuild instead of needing to be
+recreated per state change, the same "bypass `render()` for something
+that shouldn't trigger a full rebuild" precedent `pathInput` already
+established for keystroke input), positioned via
+`getBoundingClientRect()` and shown/hidden imperatively on
+`mouseenter`/`focus`/`mouseleave`/`blur`. `el()`'s prop handling gained a
+generic `on<Event>` branch (any prop key starting with `on` whose value
+is a function is wired via `addEventListener`), replacing the
+single-purpose `onClick` branch it previously had, so a new interaction
+doesn't need a bespoke case added to `el()` every time one comes up.
 
 Frontend (`ui/`, plain HTML/CSS/JS, no bundler, no framework —
 `tauri.conf.json`'s `app.withGlobalTauri: true`; rebuilt in 0.2.0 against
@@ -595,6 +621,13 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   `reviewItems()`/`groupListRow` dispatch have no automated coverage
   (same standing gap as the rest of `app.js`) and no manual Xvfb/
   `xdotool` pass this session.
+- FR-029 (storage-breakdown chart upgrade) is a pure `app.js`/`style.css`
+  change with no Rust surface, so it has no automated coverage (same
+  standing gap as the rest of `app.js`) and no manual Xvfb/`xdotool` pass
+  this session. The underlying categorical palette (`KIND_COLOR`) was
+  run through the `dataviz` skill's palette validator against both
+  theme surfaces as part of this change — see this requirement's Open
+  questions entry for what it found and how the chart mitigates it.
 
 ## Verification plan
 
@@ -704,9 +737,48 @@ See `docs/traceability/TRACEABILITY.md`.
   is a deliberate, considered scoping decision for this project's
   destructive-action safety model, not an oversight to close later
   without a fresh decision.
+- `KIND_COLOR`'s six category hues (used app-wide — chips, group-row
+  swatches, category badges, and now the storage-breakdown chart, not
+  introduced or changed by FR-029) fail the `dataviz` skill's
+  categorical-palette validator on several checks against both theme
+  surfaces: `photo` (`--accent`, blue) and `video` (`--purple`) fall
+  below the normal-vision separation floor (ΔE 9.8, and further below
+  the protanopia/tritanopia floor) — genuinely hard to tell apart by
+  hue alone, for any viewer, not just a CVD-specific edge case — and
+  several hues sit outside the recommended lightness band or below the
+  3:1 contrast-vs-surface threshold, especially in light mode (this
+  palette was tuned for a dark surface first). FR-029's chart mitigates
+  this specifically (a visible text legend and a hover/focus tooltip
+  always pair every color with its category name and exact value, so
+  nothing here is identified by hue alone) rather than by changing the
+  palette itself — re-deriving `KIND_COLOR` is a whole-app design change
+  (every chip/swatch/badge that uses it, sourced from the ADR-0022
+  design handoff), well beyond a "small, cheap" chart upgrade's scope.
+  Worth a dedicated pass if this becomes a real complaint, not something
+  to quietly patch inside an unrelated change.
 
 ## Change history
 
+- 0.4.0 (2026-08-27): Upgraded the Dashboard's "Storage breakdown" chart
+  (FR-029, `DASHBOARD-CHART-UPGRADE`, the one remaining item from `docs/
+  roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`, now fully implemented). The
+  stacked bar itself was already the textbook-correct form for this
+  data (per the `dataviz` skill's own form guidance, part-to-whole with
+  a handful of categories calls for a horizontal stacked bar, not a
+  donut) — this upgrade brings it up to the skill's concrete mark specs
+  rather than changing chart type: a visible 2px gap now separates every
+  segment (previously touching), each segment is a real, keyboard-
+  focusable `<button>` with a hover/focus tooltip showing its exact byte
+  total and percentage (previously no interactivity at all), and the
+  legend now always shows the exact byte total alongside the percentage
+  (previously percentage only). `el()` gained a generic `on<Event>` prop
+  handler, replacing its single-purpose `onClick` case. The existing
+  `KIND_COLOR` palette was run through the skill's validator as part of
+  this work — see Open questions for what it found (a real photo/video
+  hue-separation issue) and why this chart mitigates it via mandatory
+  text pairing rather than a palette change, which is out of this
+  small unit's scope. No ADR — routine implementation, no
+  architecture-level decision.
 - 0.3.9 (2026-08-27): Enabled the previously-disabled "Similar content"
   match-sensitivity option (FR-028, `DETECTION-PERCEPTUAL-IMAGES`, third
   and final unit of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s

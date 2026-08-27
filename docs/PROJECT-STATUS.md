@@ -1,13 +1,14 @@
 # Project Status
-- Last verified main commit: `9127767` — merged `SCAN-PROFILES` (PR #44),
-  Phase 3's second unit of `docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch
-  (`detection-perceptual-images`) implements that plan's Phase 3, third
-  and final unit: `DETECTION-PERCEPTUAL-IMAGES` — completing Phase 3, and
-  the plan as a whole. Unlike Phase 1/2, Phase 3 units were each
-  individually scoped/greenlit (per the plan's own §5 rationale) rather
-  than pre-approved as a batch; the user asked for
-  `DETECTION-PERCEPTUAL-IMAGES` directly after `SCAN-PROFILES` merged.
+- Last verified main commit: `616285e` — merged `DETECTION-PERCEPTUAL-
+  IMAGES` (PR #45), Phase 3's third and final unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md` — completing the plan's three
+  phases. This branch (`dashboard-chart-upgrade`) implements the one
+  item the plan left explicitly deferred rather than done as its own
+  Phase 3 unit: the "Visual chart confirmation/upgrade" line item,
+  called out in the plan itself as small/cheap enough to fold into
+  whichever future unit next touches the Dashboard. The user asked for
+  it directly after `DETECTION-PERCEPTUAL-IMAGES` merged; once this
+  merges, every item `DEDUP-GAP-IMPLEMENTATION-PLAN.md` lists is done.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -17,9 +18,9 @@
   environment); everything merged since `v0.1.0` will be tagged once that
   happens.
 - Verified at: 2026-08-27
-- Current milestone: `DETECTION-PERCEPTUAL-IMAGES` (Phase 3 of
-  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, third and final unit) —
-  implemented, validated, not yet merged. See `docs/roadmap/ROADMAP.md`.
+- Current milestone: `DASHBOARD-CHART-UPGRADE` (the last remaining item
+  of `DEDUP-GAP-IMPLEMENTATION-PLAN.md`) — implemented, validated, not
+  yet merged. See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace (three crates) builds, lints, and tests clean
   on the pinned toolchain
 
@@ -668,19 +669,71 @@
   in this environment (no display/`xdotool`) — the same standing gap
   every GUI-facing unit this session has carried.
 
+- `DASHBOARD-CHART-UPGRADE`: the last remaining item from `DEDUP-GAP-
+  IMPLEMENTATION-PLAN.md` — with this, the plan is fully implemented.
+  Confirmed the Dashboard's "Storage breakdown" was already a real
+  chart (a horizontal stacked bar), not numbers-only — and per the
+  `dataviz` skill's own form guidance, a stacked bar is the textbook-
+  correct form for part-to-whole data with a handful of categories, not
+  a donut, so this upgrade brought the existing bar up to the skill's
+  concrete mark/interaction specs rather than swapping chart types.
+  `storageBreakdown()` gained a `bytes` field alongside its existing
+  `pct`/`color`/`label`. Each segment is now a real `<button>` (native
+  keyboard focus, no bespoke ARIA) separated from its neighbors by a
+  visible 2px gap (previously touching), with a hover/focus tooltip
+  showing its exact byte total and percentage — the same information on
+  keyboard focus as on mouse hover, per the skill's interaction
+  requirement. A new shared `showChartTooltip`/`hideChartTooltip` pair
+  manages one tooltip element created once and appended to `<body>` (a
+  sibling of `#app`, so it survives `render()`'s full-rebuild cycle
+  instead of needing per-state-change recreation — the same "bypass
+  `render()` for something that shouldn't trigger a full rebuild"
+  precedent `pathInput` already established for keystroke input). The
+  legend now always shows the exact byte total alongside the
+  percentage, not percentage alone. `el()` gained a generic `on<Event>`
+  prop handler (any prop key starting with `on` whose value is a
+  function is wired via `addEventListener`), replacing its previous
+  single-purpose `onClick` case, so future interactions don't need a
+  bespoke branch added every time. `GUI-UX-001` 0.3.9 → 0.4.0 (FR-029).
+  No ADR — routine implementation, no architecture-level decision.
+  Ran `KIND_COLOR`'s six existing categorical hues (used app-wide —
+  chips, group-row swatches, badges, and now this chart, unchanged by
+  this work) through the `dataviz` skill's `validate_palette.js`
+  against both theme surfaces, as the skill's own procedure requires
+  before shipping any categorical palette: found a real, pre-existing
+  issue — `photo` (blue, `--accent`) and `video` (purple, `--purple`)
+  fall below the normal-vision hue-separation floor (ΔE 9.8, further
+  below the protanopia/tritanopia floor), genuinely hard to tell apart
+  by color alone for any viewer, plus several hues sit below the
+  recommended contrast/lightness band against the surface, especially
+  in light mode (this palette was tuned for a dark surface first, per
+  ADR-0022's design-handoff origin). This chart mitigates the finding
+  specifically — every color is always paired with a text legend entry
+  and a hover/focus tooltip, so nothing here is identified by hue alone
+  — rather than by changing `KIND_COLOR` itself, since re-deriving the
+  app-wide categorical palette (every chip/swatch/badge that uses it)
+  is a whole-app design decision well beyond a "small, cheap" chart
+  upgrade's scope; recorded as a disclosed, deliberate scope boundary
+  in `GUI-UX-001`'s open questions rather than silently patched or
+  silently ignored. Pure `app.js`/`style.css` change — no Rust code
+  touched, so `cargo fmt`/`clippy -D warnings`/`test`/`bench --no-run`/
+  `doc` were re-run and confirmed unaffected (221/221 tests, unchanged
+  count). Not yet manually verified through a rendered window in this
+  environment (no display/`xdotool`) — the same standing gap every
+  GUI-facing unit this session has carried.
+
 ## In progress
-- None — `DETECTION-PERCEPTUAL-IMAGES` above is implemented and
-  validated on branch `detection-perceptual-images`, not yet merged.
+- None — `DASHBOARD-CHART-UPGRADE` above is implemented and validated
+  on branch `dashboard-chart-upgrade`, not yet merged.
 
 ## Blocked
 - None.
 
 ## Next
 - `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` is now fully implemented
-  — all three phases, all units, done. Its only remaining listed item is
-  the small Dashboard chart upgrade, explicitly called out as cheap
-  enough to fold into whichever future unit next touches the Dashboard
-  rather than standing alone; nothing else from the plan is outstanding.
+  in its entirety — all three phases, every listed unit including the
+  small Dashboard chart upgrade. Nothing from the plan remains
+  outstanding.
 - Follow-on units intentionally left open by earlier scoping decisions
   (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
   proper (full pipeline overlap, needs a `ScanEvent` finality-contract
@@ -705,6 +758,28 @@
 - `cargo test --workspace`: pass, 221/221 (2026-08-27)
 - `cargo bench --workspace --no-run`: pass (2026-08-27)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-27)
+- `DASHBOARD-CHART-UPGRADE` verification (2026-08-27): pure `app.js`/
+  `style.css` change, no Rust surface — `cargo fmt --all --check`,
+  `cargo test --workspace` (221/221, unchanged count), `cargo clippy
+  --workspace --all-targets --all-features -- -D warnings`, `cargo bench
+  --workspace --no-run`, and `cargo doc --workspace --all-features
+  --no-deps` were all re-run and confirmed unaffected. `node --check`
+  confirmed `app.js` parses. The `dataviz` skill's `scripts/
+  validate_palette.js` was run against `KIND_COLOR`'s six existing
+  categorical hues (`#5b8cff` photo, `#a78bfa` video, `#fbbf24`
+  document, `#34d399` audio, `#f472b6` archive, `#3a4048`/`#cbd5e1`
+  other for dark/light) on both theme surfaces (`#171a1f` dark,
+  `#f7f8fa` light) — both runs FAILED, with `photo`/`video` specifically
+  falling below the normal-vision hue-separation floor (ΔE 9.8,
+  further below the protanopia/tritanopia floor) and several hues below
+  the recommended contrast-vs-surface threshold, worse in light mode.
+  This is a pre-existing, whole-app palette characteristic (unaffected
+  by this change, sourced from ADR-0022's design handoff, used in
+  chips/swatches/badges throughout the GUI) — not something this small
+  chart upgrade changed or could reasonably fix on its own; the chart
+  itself mitigates the consequence by never relying on color alone
+  (mandatory text legend + hover/focus tooltip on every segment). See
+  `GUI-UX-001`'s open questions and the Risks entry below.
 - `DETECTION-PERCEPTUAL-IMAGES` verification (2026-08-27): `image` crate
   scratch-verified in a throwaway project (`default-features = false,
   features = ["jpeg", "png", "gif", "bmp"]`) to build with zero `-sys`/
@@ -844,6 +919,26 @@
   light-theme toggle. Every screen rendered correctly in both themes.
 
 ## Risks and decisions needed
+- `KIND_COLOR`'s six app-wide categorical hues (chips, group-row swatches,
+  badges, and now the Dashboard's storage-breakdown chart) fail the
+  `dataviz` skill's palette validator on both theme surfaces — most
+  notably, `photo` (blue) and `video` (purple) sit below the
+  normal-vision hue-separation floor, genuinely hard to tell apart by
+  color alone for any viewer, not just a CVD-specific concern (see
+  `DASHBOARD-CHART-UPGRADE`'s Validation entry above for the full run).
+  This predates `DASHBOARD-CHART-UPGRADE` (sourced from ADR-0022's
+  design handoff) and wasn't introduced or worsened by it; the chart
+  mitigates its own exposure to the issue (mandatory text legend + hover/
+  focus tooltip, never color-alone identification) but the underlying
+  app-wide palette is unchanged and the same risk still applies anywhere
+  else in the GUI a viewer would need to distinguish a photo-category
+  item from a video-category one by color alone (e.g. the file-type
+  filter chips on Scan Setup, or a compare-card's category swatch). A
+  dedicated palette-remediation pass — informed by the skill's
+  color-formula method rather than reused as-is here, since re-deriving
+  it touches every chip/swatch/badge in the app — is worth doing if this
+  becomes a real user-reported confusion, not something to patch
+  piecemeal inside an unrelated change.
 - `DETECTION-PERCEPTUAL-IMAGES`'s dHash is a similarity heuristic, not a
   cryptographic or collision-resistant hash — this project's "zero false
   positives" claim continues to apply exclusively to the exact,
