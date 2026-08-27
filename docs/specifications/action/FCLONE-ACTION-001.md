@@ -1,5 +1,5 @@
 # FCLONE-ACTION-001 — Duplicate Action Layer
-- Version: 0.5.0
+- Version: 0.6.0
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`
@@ -56,6 +56,10 @@ nature.
   file in another ("kept"), for a `FolderMatch` (`FCLONE-DETECTION-001`
   FR-010) rather than one `DuplicateGroup` (`folder_action::plan_folder`/
   `apply_folder`, ADR-0023).
+- **Protected/reference path**: a path under any caller-supplied
+  `reference_paths` entry (prefix match). Never planned or acted on, and
+  always the one kept in any group it appears in, regardless of `Rule` or
+  a caller-chosen `keep` (`ACTION-REFERENCE-FOLDERS`, ADR-0025).
 
 ## Requirements
 
@@ -131,6 +135,28 @@ nature.
   read at all — toward the earliest path in `group.paths`' existing sorted
   order, so it degrades to `AlphabeticallyFirst`'s exact choice whenever it
   can't actually distinguish two paths.
+- `FCLONE-ACTION-001-FR-015`: Given a non-empty `reference_paths` list,
+  `select::choose_keep` SHALL return a protected path (one under any
+  entry in `reference_paths`) as the kept path if `group` contains one,
+  with the reason `"in a protected/reference folder"`, taking priority
+  over `rule` regardless of which `Rule` was requested. If `group`
+  contains no protected path, behavior SHALL be identical to FR-014.
+- `FCLONE-ACTION-001-FR-016`: `plan_with_keep`/`plan` SHALL NOT place a
+  protected path (per `reference_paths`) in `ActionPlan::actions`, even
+  when a caller-supplied `keep` argument names a different, unprotected
+  path — the caller's explicit `keep` SHALL be overridden to a protected
+  path found in `group`, and every other protected path present SHALL
+  still be filtered out of `actions` independently. Passing an empty
+  `reference_paths` slice SHALL be identical to no guardrail (FR-001/
+  FR-013's existing behavior, unchanged).
+- `FCLONE-ACTION-001-FR-017`: `folder_action::plan_folder` SHALL exclude
+  any file under `removed` that is protected (per `reference_paths`) from
+  `FolderActionPlan::pairs`, and SHALL count it in
+  `FolderActionPlan::protected_files_skipped` rather than silently
+  omitting it. `folder_action::apply_folder` SHALL NOT prune the
+  `removed` directory tree when `protected_files_skipped` is nonzero,
+  even if every planned pair in `pairs` succeeds — pruning would delete
+  the protected file(s) still left inside `removed`.
 
 ## Architecture and interfaces
 
@@ -144,14 +170,16 @@ pub struct ActionPlan { pub size: u64, pub kept: PathBuf,
 pub struct ApplyReport { pub succeeded: Vec<PathBuf>, pub failed: Vec<FileError>,
                           pub bytes_reclaimed: u64 }
 
-pub fn plan(group: &DuplicateGroup, kind: ActionKind) -> ActionPlan;
-pub fn plan_with_keep(group: &DuplicateGroup, keep: &Path, kind: ActionKind) -> ActionPlan;
+pub fn plan(group: &DuplicateGroup, kind: ActionKind, reference_paths: &[PathBuf]) -> ActionPlan;
+pub fn plan_with_keep(group: &DuplicateGroup, keep: &Path, kind: ActionKind,
+                       reference_paths: &[PathBuf]) -> ActionPlan;
 pub fn apply(plan: &ActionPlan) -> ApplyReport;
 ```
 
 `Reflink` uses the `reflink-copy` crate's strict `reflink` function (not
 `reflink_or_copy`) — see ADR-0014. `Trash` uses the `trash` crate's
-`trash::delete` — see ADR-0024.
+`trash::delete` — see ADR-0024. `reference_paths` is the protected/
+reference-folder guardrail — see ADR-0025; pass `&[]` for no guardrail.
 
 Folder-level public API (`crates/rusty_fclone-core/src/folder_action.rs`,
 ADR-0023), reusing `action::apply` internally rather than duplicating it:
@@ -159,28 +187,33 @@ ADR-0023), reusing `action::apply` internally rather than duplicating it:
 ```rust
 pub struct FolderFilePair { pub remove: PathBuf, pub keep: PathBuf, pub size: u64 }
 pub struct FolderActionPlan { pub kind: ActionKind, pub kept: PathBuf, pub removed: PathBuf,
-                               pub pairs: Vec<FolderFilePair>, pub bytes_reclaimed: u64 }
+                               pub pairs: Vec<FolderFilePair>, pub bytes_reclaimed: u64,
+                               pub protected_files_skipped: u64 }
 pub struct FolderApplyReport { pub succeeded: Vec<PathBuf>, pub failed: Vec<FileError>,
                                 pub bytes_reclaimed: u64, pub directory_removed: bool }
 
 pub fn plan_folder(removed: &Path, kept: &Path, groups: &[DuplicateGroup],
-                    options: &ScanOptions, kind: ActionKind) -> Result<FolderActionPlan, FolderActionError>;
+                    options: &ScanOptions, kind: ActionKind,
+                    reference_paths: &[PathBuf]) -> Result<FolderActionPlan, FolderActionError>;
 pub fn apply_folder(plan: &FolderActionPlan) -> FolderApplyReport;
 ```
 
 Selection public API (`crates/rusty_fclone-core/src/select.rs`,
-`SELECTION-RULES`):
+`SELECTION-RULES`, `ACTION-REFERENCE-FOLDERS`):
 
 ```rust
 pub enum Rule { AlphabeticallyFirst, Newest, Oldest, ShortestPath, LongestPath }
-pub fn choose_keep(group: &DuplicateGroup, rule: Rule) -> (Arc<Path>, String);
+pub fn choose_keep(group: &DuplicateGroup, rule: Rule,
+                    reference_paths: &[PathBuf]) -> (Arc<Path>, String);
+pub fn is_protected(path: &Path, reference_paths: &[PathBuf]) -> bool;
 ```
 
 CLI (`rusty_fclone-cli`): `--action <report|delete|trash|hardlink|reflink>`
 (default `report`), `--keep-rule <alphabetical|newest|oldest|shortest-path|
-longest-path>` (default `alphabetical`), and `--apply` (bool). The CLI's
-`Action` enum is a thin wrapper adding `Report` — kept CLI-side rather than
-in core, since core stays CLI-agnostic (ADR-0005).
+longest-path>` (default `alphabetical`), `--reference <path>` (repeatable,
+default none), and `--apply` (bool). The CLI's `Action` enum is a thin
+wrapper adding `Report` — kept CLI-side rather than in core, since core
+stays CLI-agnostic (ADR-0005).
 
 ## Data/state and invariants
 
@@ -195,6 +228,16 @@ in core, since core stays CLI-agnostic (ADR-0005).
   originating `DuplicateGroup` recorded — the two are required to match
   as part of confirming the pairing (FR-009), but `bytes_reclaimed` and
   each pair's `size` reflect what's on disk right now.
+- A protected path (FR-015 through FR-017) is never present in
+  `ActionPlan::actions` or a `FolderFilePair`, in any of `pairs`, under
+  any `Rule` or caller-chosen `keep` — this holds even when a group
+  contains more than one protected path (several reference folders each
+  holding a copy): all but the one chosen as `keep` are filtered out of
+  `actions` independently of the override.
+  `FolderActionPlan::protected_files_skipped` is the folder-level
+  counterpart of that same guarantee, and is what tells `apply_folder`
+  the directory can't safely be pruned even after every *planned* pair
+  succeeds.
 
 ## Errors, failure, recovery, and observability
 
@@ -226,6 +269,18 @@ in core, since core stays CLI-agnostic (ADR-0005).
   re-verification (FR-009) is the primary safeguard against acting on a
   folder whose contents changed, or were never actually confirmed
   duplicates, since whatever computed the `FolderMatch` this plan is for.
+- The reference-folder guardrail (FR-015 through FR-017, ADR-0025) is
+  designed as a hard block, not a dismissible warning: a protected path
+  can never end up in `actions`/`pairs` regardless of caller intent
+  (rule, manual keep choice, or a stale/incorrect `keep` argument), and
+  the folder-level directory-prune step is constrained by the same
+  guardrail rather than only the file-level plan — pruning `removed`
+  after every *planned* pair succeeds would otherwise still delete a
+  protected file that was deliberately left unplanned inside it. A
+  reference path is matched as a literal path prefix, not resolved
+  through symlinks or canonicalized — consistent with how every other
+  configured path in this codebase (`exclude_paths`, `--reference`'s own
+  CLI value) is already treated.
 
 ## Acceptance criteria
 
@@ -250,6 +305,15 @@ in core, since core stays CLI-agnostic (ADR-0005).
   files in place without touching the folder; a per-file failure
   (the file vanishes between plan and apply) reported without pruning
   the directory. No CLI/GUI wiring exists yet — see Open questions.
+- FR-015 through FR-017 (reference-folder guardrail) are exercised by
+  `select::tests::*` (protected path wins over every `Rule`, prefix
+  matching, empty `reference_paths` returning `None`),
+  `action::tests::*` (a caller-supplied `keep` overridden when a
+  different path is protected; a protected path never in `actions` even
+  when not `keep`; `apply` never touching a protected path), and
+  `folder_action::tests::*` (a protected file excluded from `pairs` and
+  counted in `protected_files_skipped`; `apply_folder` never pruning the
+  directory when a protected file was skipped).
 
 ## Verification plan
 
@@ -278,6 +342,23 @@ nonexistent `removed`) and `apply_folder`'s three outcomes (successful
 delete with directory pruning, successful hardlink without pruning, a
 per-file failure without pruning).
 
+Unit tests in `select::tests`, `action::tests`, and `folder_action::tests`
+(core crate) cover the reference-folder guardrail (FR-015 through FR-017):
+a protected path winning as `keep` over every `Rule`; prefix matching;
+`plan`/`plan_with_keep` overriding an explicit `keep` and filtering every
+protected path out of `actions`; `plan_folder` excluding a protected file
+from `pairs` and counting it; `apply_folder` refusing to prune the
+directory when a protected file was skipped. `main::tests` (CLI crate)
+cover the same guarantee end-to-end through `--reference`, at both the
+file level and combined with `--find-duplicate-folders`. Additionally
+manually smoke-tested against a real filesystem in this environment: a
+real two-file duplicate pair where the unprotected copy would normally be
+kept under alphabetical ordering confirmed `--action trash --reference
+<dir> --apply` kept the protected file instead and trashed the other; a
+real `--find-duplicate-folders --action delete --reference <dir> --apply`
+run against a subset folder containing a protected file confirmed the
+file survived and the folder was not pruned.
+
 ## Traceability
 
 See `docs/traceability/TRACEABILITY.md`.
@@ -301,9 +382,32 @@ See `docs/traceability/TRACEABILITY.md`.
   deterministically would need real concurrency, not attempted here; the
   `directory_removed: false` outcome it would produce is still a defined,
   handled result, just not exercised by a test.
+- `reference_paths` matching is a literal path-prefix comparison, not
+  canonicalized or symlink-resolved — a reference path given as a
+  relative path, or one reached through a symlink not itself under the
+  configured prefix, won't match. Consistent with how `exclude_paths`
+  already behaves, and not treated as a gap unless a real user hits it.
 
 ## Change history
 
+- 0.6.0 (2026-08-27): Added the protected/reference-folder guardrail
+  (`FR-015` through `FR-017`, `ACTION-REFERENCE-FOLDERS`, first unit of
+  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2). A new
+  `reference_paths: &[PathBuf]` parameter on `select::choose_keep`,
+  `action::plan`/`plan_with_keep`, and `folder_action::plan_folder`: a
+  path under any configured reference folder always wins as `keep`
+  (overriding `Rule` and any caller-supplied `keep`) and is never placed
+  in `actions`/a `FolderFilePair`, regardless of which. New
+  `FolderActionPlan::protected_files_skipped` field; `apply_folder`'s
+  directory-prune step (ADR-0023) now also requires it to be zero, so a
+  protected file left inside `removed` after every planned pair succeeds
+  is never deleted by the prune itself — caught during implementation as
+  a real gap in the original plan text, not just a tidiness fix. CLI
+  gained a repeatable `--reference <path>`; GUI gained a "Protected
+  folders" field on Scan Setup, threaded into `run_action`, `choose_keep`,
+  and `run_folder_action` (not the detection-only commands). ADR-0025 —
+  extends ADR-0009's safety model, an architecture-level decision per
+  `AGENTS.md`.
 - 0.5.0 (2026-08-26): Reversed the "configurable keep-strategy" v1
   non-goal (`SELECTION-RULES`, third and final Phase 1 unit of
   `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`). New `select` module

@@ -1,5 +1,5 @@
 # CLI-UX-001 — CLI Output, Progress, and Confirmation
-- Version: 0.3.2
+- Version: 0.3.3
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -143,6 +143,14 @@ confirmation prompt as a second safety layer on top of `--apply`.
   `action::plan` for every group when `--action` is set. `--keep-rule`
   SHALL have no effect in the default `report` mode, which does not
   designate a kept file at all (`SELECTION-RULES`).
+- `CLI-UX-001-FR-016`: The CLI SHALL expose `FCLONE-ACTION-001`'s
+  reference-folder guardrail as a repeatable `--reference <PATH>` flag,
+  default none, passed to `select::choose_keep`, `action::plan_with_keep`,
+  and (when `--find-duplicate-folders` is also set) `folder_action::
+  plan_folder` for every group/folder pair acted on. `--reference` SHALL
+  have no effect in the default `report` mode, and an empty
+  `--reference` list SHALL be identical to no guardrail
+  (`ACTION-REFERENCE-FOLDERS`).
 
 ## Architecture and interfaces
 
@@ -268,6 +276,19 @@ action totals `run()` already tracks.
   reappear silently. Manual smoke test additionally confirmed real
   filesystem state (`find`, before/after) and the exact text/NDJSON
   output shapes for both a preview and a real `--apply`'d run.
+- FR-016 (`--reference`) is exercised by
+  `main::tests::reference_path_overrides_keep_rule_and_is_never_acted_on`
+  (a protected file that would lose to an unprotected one under the
+  default alphabetical `--keep-rule` is kept instead) and
+  `find_duplicate_folders_with_reference_protects_a_file_and_blocks_the_prune`
+  (combined with `--find-duplicate-folders`: the protected file survives
+  and the subset directory is not pruned). Manual smoke test against a
+  real filesystem confirmed both: a file-level `--action trash --reference
+  <dir> --apply` run kept the protected copy and trashed the other
+  despite alphabetical ordering favoring the unprotected one; a
+  folder-level `--find-duplicate-folders --action delete --reference
+  <dir> --apply` run against a subset folder containing a protected file
+  left the file and the folder itself untouched.
 
 ## Verification plan
 
@@ -315,6 +336,12 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.3 (2026-08-27): Added `--reference` (FR-016), the CLI surface for
+  `FCLONE-ACTION-001`'s reference-folder guardrail
+  (`ACTION-REFERENCE-FOLDERS`, first unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2). Repeatable, threaded
+  through both the per-file and (combined with
+  `--find-duplicate-folders`) folder-level action paths. ADR-0025.
 - 0.3.2 (2026-08-26): Added `--keep-rule` (FR-015), the CLI surface for
   `FCLONE-ACTION-001` 0.5.0's new `select::Rule`/`choose_keep`
   (`SELECTION-RULES`, third and final Phase 1 unit of

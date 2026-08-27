@@ -12,6 +12,7 @@ use file_id::get_file_id;
 
 use crate::error::FileError;
 use crate::model::DuplicateGroup;
+use crate::select;
 
 /// What to do with every redundant copy in a group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,29 +78,52 @@ pub struct ApplyReport {
 
 /// Plans `kind` for every redundant copy in `group`, without touching the
 /// filesystem. The kept path is `group.paths[0]` (already the
-/// alphabetically-first path per [`DuplicateGroup`]'s sort invariant).
+/// alphabetically-first path per [`DuplicateGroup`]'s sort invariant),
+/// unless `reference_paths` overrides it — see [`plan_with_keep`].
 ///
 /// A path whose current on-disk identity can't be determined (e.g. it
 /// vanished since the scan) is still included in the plan — `apply` will
 /// surface that as a per-file failure rather than `plan` silently dropping
 /// it, keeping the plan an honest preview of what `apply` will attempt.
-pub fn plan(group: &DuplicateGroup, kind: ActionKind) -> ActionPlan {
-    plan_with_keep(group, &group.paths[0], kind)
+pub fn plan(group: &DuplicateGroup, kind: ActionKind, reference_paths: &[PathBuf]) -> ActionPlan {
+    plan_with_keep(group, &group.paths[0], kind, reference_paths)
 }
 
-/// Like [`plan`], but the kept path is `keep` instead of always
+/// Like [`plan`], but the caller proposes `keep` instead of always
 /// `group.paths[0]` — the entry point for rule-driven bulk selection
 /// (`SELECTION-RULES`, `crate::select::choose_keep`). `keep` is expected to
 /// be one of `group.paths` (every caller in this codebase gets it from
 /// there); passing a path that isn't just means every real path in
 /// `group.paths` ends up planned, since none of them equals `keep`.
-pub fn plan_with_keep(group: &DuplicateGroup, keep: &Path, kind: ActionKind) -> ActionPlan {
+///
+/// `reference_paths` (`ACTION-REFERENCE-FOLDERS`, ADR-0025) is a hard,
+/// fails-closed guardrail on top of that proposal: if `group` contains a
+/// path under any of them, that path is used as the *actual* kept path
+/// instead of the caller's `keep` — a reference folder's contents are
+/// never the ones flagged for removal, so this can't be bypassed by an
+/// upstream caller (a manual GUI keep-choice click included) proposing a
+/// different, unprotected path. Independently, any other protected path
+/// still present in `group` (a group can contain more than one, if
+/// several reference folders each hold a copy) is filtered out of
+/// `actions` too, exactly like an existing hardlink alias of the kept
+/// file — never placed in `actions`, regardless of `keep`.
+pub fn plan_with_keep(
+    group: &DuplicateGroup,
+    keep: &Path,
+    kind: ActionKind,
+    reference_paths: &[PathBuf],
+) -> ActionPlan {
+    let keep: &Path = match select::protected_member(group, reference_paths) {
+        Some(protected) => protected.as_ref(),
+        None => keep,
+    };
     let keep_id = get_file_id(keep).ok();
 
     let actions: Vec<FileAction> = group
         .paths
         .iter()
         .filter(|path| path.as_ref() != keep)
+        .filter(|path| !select::is_protected(path, reference_paths))
         .filter(|path| {
             let same_file = keep_id
                 .as_ref()
@@ -219,6 +243,7 @@ mod tests {
         let plan = plan(
             &group(3, vec![a.clone(), b.clone(), c.clone()]),
             ActionKind::Delete,
+            &[],
         );
         assert_eq!(plan.kept, a);
         let planned: Vec<&PathBuf> = plan.actions.iter().map(|a| &a.path).collect();
@@ -240,6 +265,7 @@ mod tests {
             &group(3, vec![a.clone(), b.clone(), c.clone()]),
             &b,
             ActionKind::Delete,
+            &[],
         );
         assert_eq!(plan.kept, b);
         let planned: Vec<&PathBuf> = plan.actions.iter().map(|a| &a.path).collect();
@@ -260,6 +286,7 @@ mod tests {
         let plan = plan(
             &group(3, vec![a.clone(), alias.clone(), c.clone()]),
             ActionKind::Hardlink,
+            &[],
         );
         // alias already shares a's inode -- nothing to reclaim there.
         assert_eq!(plan.actions.len(), 1);
@@ -275,7 +302,11 @@ mod tests {
         fs::write(&a, b"dup").unwrap();
         fs::write(&b, b"dup").unwrap();
 
-        let plan = plan(&group(3, vec![a.clone(), b.clone()]), ActionKind::Delete);
+        let plan = plan(
+            &group(3, vec![a.clone(), b.clone()]),
+            ActionKind::Delete,
+            &[],
+        );
         let report = apply(&plan);
 
         assert_eq!(report.succeeded, vec![b.clone()]);
@@ -293,7 +324,11 @@ mod tests {
         fs::write(&a, b"dup").unwrap();
         fs::write(&b, b"dup").unwrap();
 
-        let plan = plan(&group(3, vec![a.clone(), b.clone()]), ActionKind::Trash);
+        let plan = plan(
+            &group(3, vec![a.clone(), b.clone()]),
+            ActionKind::Trash,
+            &[],
+        );
         let report = apply(&plan);
 
         assert_eq!(report.succeeded, vec![b.clone()]);
@@ -314,7 +349,11 @@ mod tests {
         fs::write(&a, b"dup").unwrap();
         fs::write(&b, b"dup").unwrap();
 
-        let plan = plan(&group(3, vec![a.clone(), b.clone()]), ActionKind::Hardlink);
+        let plan = plan(
+            &group(3, vec![a.clone(), b.clone()]),
+            ActionKind::Hardlink,
+            &[],
+        );
         let report = apply(&plan);
 
         assert_eq!(report.succeeded, vec![b.clone()]);
@@ -340,7 +379,11 @@ mod tests {
         fs::write(&a, b"dup").unwrap();
         fs::write(&b, b"dup").unwrap();
 
-        let plan = plan(&group(3, vec![a.clone(), b.clone()]), ActionKind::Reflink);
+        let plan = plan(
+            &group(3, vec![a.clone(), b.clone()]),
+            ActionKind::Reflink,
+            &[],
+        );
         let report = apply(&plan);
 
         assert!(a.exists(), "the kept file must survive either way");
@@ -389,6 +432,7 @@ mod tests {
         let plan = plan(
             &group(3, vec![a.clone(), missing.clone(), b.clone()]),
             ActionKind::Delete,
+            &[],
         );
         let report = apply(&plan);
 
@@ -406,8 +450,93 @@ mod tests {
         fs::write(&a, b"dup").unwrap();
         fs::hard_link(&a, &alias).unwrap();
 
-        let plan = plan(&group(3, vec![a, alias]), ActionKind::Delete);
+        let plan = plan(&group(3, vec![a, alias]), ActionKind::Delete, &[]);
         assert!(plan.actions.is_empty());
         assert_eq!(plan.bytes_reclaimed, 0);
+    }
+
+    #[test]
+    fn plan_overrides_an_explicit_keep_when_a_different_path_is_protected() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("reference");
+        fs::create_dir_all(&reference).unwrap();
+        let protected = reference.join("original.txt");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&protected, b"dup").unwrap();
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        // `plan_with_keep` is asked to keep `a` -- alphabetically first,
+        // and not the protected path -- but the guardrail must win anyway.
+        let plan = plan_with_keep(
+            &group(3, vec![a.clone(), b.clone(), protected.clone()]),
+            &a,
+            ActionKind::Delete,
+            &[reference],
+        );
+        assert_eq!(
+            plan.kept, protected,
+            "the protected path must be kept even though a different path was requested"
+        );
+        let planned: Vec<&PathBuf> = plan.actions.iter().map(|a| &a.path).collect();
+        assert_eq!(
+            planned,
+            vec![&a, &b],
+            "every unprotected copy is still planned for removal"
+        );
+        assert_eq!(plan.bytes_reclaimed, 6);
+    }
+
+    #[test]
+    fn plan_never_includes_a_protected_path_in_actions_even_when_it_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference_one = dir.path().join("reference-one");
+        let reference_two = dir.path().join("reference-two");
+        fs::create_dir_all(&reference_one).unwrap();
+        fs::create_dir_all(&reference_two).unwrap();
+        let protected_one = reference_one.join("a.txt");
+        let protected_two = reference_two.join("b.txt");
+        fs::write(&protected_one, b"dup").unwrap();
+        fs::write(&protected_two, b"dup").unwrap();
+
+        // Two reference folders each hold a copy of the same content --
+        // whichever one `select::protected_member` picks as kept, the
+        // *other* protected path must still never be planned, exactly
+        // like an existing hardlink alias of the kept file.
+        let plan = plan(
+            &group(3, vec![protected_one.clone(), protected_two.clone()]),
+            ActionKind::Delete,
+            &[reference_one, reference_two],
+        );
+        assert_eq!(plan.kept, protected_one);
+        assert!(
+            plan.actions.is_empty(),
+            "the second protected path must not be planned for removal either"
+        );
+        assert_eq!(plan.bytes_reclaimed, 0);
+    }
+
+    #[test]
+    fn apply_never_touches_a_protected_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("reference");
+        fs::create_dir_all(&reference).unwrap();
+        let protected = reference.join("original.txt");
+        let redundant = dir.path().join("copy.txt");
+        fs::write(&protected, b"dup").unwrap();
+        fs::write(&redundant, b"dup").unwrap();
+
+        let plan = plan_with_keep(
+            &group(3, vec![redundant.clone(), protected.clone()]),
+            &redundant,
+            ActionKind::Delete,
+            &[reference],
+        );
+        let report = apply(&plan);
+
+        assert_eq!(report.succeeded, vec![redundant.clone()]);
+        assert!(protected.exists(), "the protected file must survive");
+        assert!(!redundant.exists(), "its unprotected duplicate is removed");
     }
 }

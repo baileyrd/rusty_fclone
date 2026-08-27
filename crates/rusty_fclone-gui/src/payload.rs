@@ -42,6 +42,17 @@ pub struct ScanOptionsPayload {
     pub exclude_paths: Vec<String>,
 }
 
+/// Turns a frontend-supplied list of path strings into normalized
+/// [`PathBuf`]s -- shared by the reference-folder list
+/// (`ACTION-REFERENCE-FOLDERS`) and `ScanOptionsPayload::exclude_paths`'s
+/// existing `From` impl below.
+pub fn normalize_path_list(paths: &[String]) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .map(|s| PathBuf::from(normalize_path_input(s)))
+        .collect()
+}
+
 impl From<ScanOptionsPayload> for ScanOptions {
     fn from(p: ScanOptionsPayload) -> Self {
         let defaults = ScanOptions::default();
@@ -70,11 +81,7 @@ impl From<ScanOptionsPayload> for ScanOptions {
             max_size: p.max_size,
             include_extensions: p.include_extensions,
             exclude_extensions: p.exclude_extensions,
-            exclude_paths: p
-                .exclude_paths
-                .iter()
-                .map(|s| PathBuf::from(normalize_path_input(s)))
-                .collect(),
+            exclude_paths: normalize_path_list(&p.exclude_paths),
         }
     }
 }
@@ -622,6 +629,7 @@ mod tests {
             removed: PathBuf::from("/small"),
             pairs: vec![],
             bytes_reclaimed: 42,
+            protected_files_skipped: 0,
         };
         let payload = FolderActionPlanPayload::from(&plan);
         let json = serde_json::to_value(&payload).unwrap();

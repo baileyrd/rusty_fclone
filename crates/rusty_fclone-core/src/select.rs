@@ -22,8 +22,15 @@
 //! matching), so a size-based rule could never distinguish anything —
 //! unlike competitors whose "keep the largest" rules make sense because
 //! their matches aren't guaranteed byte-identical.
+//!
+//! Also home to the reference/protected-folder guardrail
+//! (`ACTION-REFERENCE-FOLDERS`, ADR-0025): a path under a reference folder
+//! always wins as the kept path, regardless of `Rule` — a reference
+//! folder's contents are never the ones flagged for removal, so if one is
+//! present in a group it must be the survivor for that group's duplicates
+//! elsewhere to actually get cleared.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::model::DuplicateGroup;
@@ -50,7 +57,24 @@ pub enum Rule {
 /// chosen path and a one-line, human-readable reason for the choice — a
 /// cheap "why this one" explanation, without needing any ranking model to
 /// justify it.
-pub fn choose_keep(group: &DuplicateGroup, rule: Rule) -> (Arc<Path>, String) {
+///
+/// `reference_paths` (`ACTION-REFERENCE-FOLDERS`) takes priority over
+/// `rule`: if the group contains a path under any of them, that path is
+/// always the one returned, regardless of what `rule` would otherwise
+/// pick. Pass an empty slice for "no reference folders configured", the
+/// same as every other caller in this codebase that doesn't need the
+/// guardrail.
+pub fn choose_keep(
+    group: &DuplicateGroup,
+    rule: Rule,
+    reference_paths: &[PathBuf],
+) -> (Arc<Path>, String) {
+    if let Some(protected) = protected_member(group, reference_paths) {
+        return (
+            protected.clone(),
+            "in a protected/reference folder".to_string(),
+        );
+    }
     match rule {
         Rule::AlphabeticallyFirst => (group.paths[0].clone(), "alphabetically first".to_string()),
         Rule::Newest => by_modified(group, true),
@@ -58,6 +82,33 @@ pub fn choose_keep(group: &DuplicateGroup, rule: Rule) -> (Arc<Path>, String) {
         Rule::ShortestPath => by_depth(group, true),
         Rule::LongestPath => by_depth(group, false),
     }
+}
+
+/// `true` if `path` lies at or under any of `reference_paths` — a literal
+/// path-prefix match, the same convention `ScanOptions::exclude_paths`
+/// uses (`DETECTION-SCAN-FILTERS`).
+pub(crate) fn is_protected(path: &Path, reference_paths: &[PathBuf]) -> bool {
+    reference_paths.iter().any(|r| path.starts_with(r))
+}
+
+/// The first path in `group.paths` that's protected, if any. `group.paths`'
+/// existing sorted order makes this deterministic when a group somehow
+/// contains more than one protected path (every one of them is safe from
+/// removal regardless of which is picked as the nominal "kept" path — see
+/// `action::plan_with_keep`'s own `is_protected` filter for the case where
+/// this returns the first and a later one must still be excluded from
+/// `actions`).
+pub(crate) fn protected_member<'a>(
+    group: &'a DuplicateGroup,
+    reference_paths: &[PathBuf],
+) -> Option<&'a Arc<Path>> {
+    if reference_paths.is_empty() {
+        return None;
+    }
+    group
+        .paths
+        .iter()
+        .find(|p| is_protected(p, reference_paths))
 }
 
 /// Picks the path with the newest (or oldest) modification time, skipping
@@ -144,7 +195,8 @@ mod tests {
         fs::write(&a, b"dup").unwrap();
         fs::write(&b, b"dup").unwrap();
 
-        let (keep, reason) = choose_keep(&group(vec![a.clone(), b]), Rule::AlphabeticallyFirst);
+        let (keep, reason) =
+            choose_keep(&group(vec![a.clone(), b]), Rule::AlphabeticallyFirst, &[]);
         assert_eq!(keep.as_ref(), a.as_path());
         assert_eq!(reason, "alphabetically first");
     }
@@ -158,7 +210,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         fs::write(&b, b"dup").unwrap();
 
-        let (keep, reason) = choose_keep(&group(vec![a, b.clone()]), Rule::Newest);
+        let (keep, reason) = choose_keep(&group(vec![a, b.clone()]), Rule::Newest, &[]);
         assert_eq!(keep.as_ref(), b.as_path());
         assert_eq!(reason, "most recent modification time");
     }
@@ -172,7 +224,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         fs::write(&b, b"dup").unwrap();
 
-        let (keep, reason) = choose_keep(&group(vec![a.clone(), b]), Rule::Oldest);
+        let (keep, reason) = choose_keep(&group(vec![a.clone(), b]), Rule::Oldest, &[]);
         assert_eq!(keep.as_ref(), a.as_path());
         assert_eq!(reason, "oldest modification time");
     }
@@ -182,7 +234,11 @@ mod tests {
         let missing_a = PathBuf::from("/definitely/does/not/exist/a.txt");
         let missing_b = PathBuf::from("/definitely/does/not/exist/b.txt");
 
-        let (keep, reason) = choose_keep(&group(vec![missing_a.clone(), missing_b]), Rule::Newest);
+        let (keep, reason) = choose_keep(
+            &group(vec![missing_a.clone(), missing_b]),
+            Rule::Newest,
+            &[],
+        );
         assert_eq!(keep.as_ref(), missing_a.as_path());
         assert!(reason.contains("alphabetically first"));
     }
@@ -196,7 +252,8 @@ mod tests {
         fs::write(&deep, b"dup").unwrap();
         fs::write(&shallow, b"dup").unwrap();
 
-        let (keep, reason) = choose_keep(&group(vec![deep, shallow.clone()]), Rule::ShortestPath);
+        let (keep, reason) =
+            choose_keep(&group(vec![deep, shallow.clone()]), Rule::ShortestPath, &[]);
         assert_eq!(keep.as_ref(), shallow.as_path());
         assert_eq!(reason, "shortest path");
     }
@@ -210,7 +267,8 @@ mod tests {
         fs::write(&deep, b"dup").unwrap();
         fs::write(&shallow, b"dup").unwrap();
 
-        let (keep, reason) = choose_keep(&group(vec![deep.clone(), shallow]), Rule::LongestPath);
+        let (keep, reason) =
+            choose_keep(&group(vec![deep.clone(), shallow]), Rule::LongestPath, &[]);
         assert_eq!(keep.as_ref(), deep.as_path());
         assert_eq!(reason, "longest path");
     }
@@ -233,12 +291,67 @@ mod tests {
             Rule::ShortestPath,
             Rule::LongestPath,
         ] {
-            let (keep, _) = choose_keep(&group(vec![a.clone(), b.clone()]), rule);
+            let (keep, _) = choose_keep(&group(vec![a.clone(), b.clone()]), rule, &[]);
             assert_eq!(
                 keep.as_ref(),
                 a.as_path(),
                 "rule {rule:?} should break a tie toward the alphabetically-first path"
             );
         }
+    }
+
+    #[test]
+    fn a_protected_path_always_wins_over_the_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("reference");
+        fs::create_dir_all(&reference).unwrap();
+        let protected = reference.join("z_last_alphabetically.txt");
+        let unprotected = dir.path().join("a_first_alphabetically.txt");
+        fs::write(&protected, b"dup").unwrap();
+        fs::write(&unprotected, b"dup").unwrap();
+
+        for rule in [
+            Rule::AlphabeticallyFirst,
+            Rule::Newest,
+            Rule::Oldest,
+            Rule::ShortestPath,
+            Rule::LongestPath,
+        ] {
+            let (keep, reason) = choose_keep(
+                &group(vec![unprotected.clone(), protected.clone()]),
+                rule,
+                std::slice::from_ref(&reference),
+            );
+            assert_eq!(
+                keep.as_ref(),
+                protected.as_path(),
+                "rule {rule:?} must not override a protected path"
+            );
+            assert_eq!(reason, "in a protected/reference folder");
+        }
+    }
+
+    #[test]
+    fn is_protected_matches_a_literal_path_prefix() {
+        let reference = PathBuf::from("/home/me/originals");
+        assert!(is_protected(
+            &reference.join("photo.jpg"),
+            std::slice::from_ref(&reference)
+        ));
+        assert!(!is_protected(
+            &PathBuf::from("/home/me/other/photo.jpg"),
+            &[reference]
+        ));
+    }
+
+    #[test]
+    fn protected_member_returns_none_when_no_reference_paths_are_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        assert_eq!(protected_member(&group(vec![a, b]), &[]), None);
     }
 }

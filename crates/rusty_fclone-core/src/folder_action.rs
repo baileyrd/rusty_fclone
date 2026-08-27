@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use crate::action::{self, ActionKind, ActionPlan, FileAction};
 use crate::error::{FileError, FolderActionError};
 use crate::model::{DuplicateGroup, ScanOptions};
+use crate::select;
 use crate::traversal;
 
 /// One file inside a folder-match's "removed" side, paired with the exact
@@ -37,6 +38,14 @@ pub struct FolderActionPlan {
     pub removed: PathBuf,
     pub pairs: Vec<FolderFilePair>,
     pub bytes_reclaimed: u64,
+    /// Count of files under `removed` that were excluded from `pairs`
+    /// because they're protected by a reference folder
+    /// (`ACTION-REFERENCE-FOLDERS`, ADR-0025). Nonzero here means
+    /// `removed` will *not* be empty even after every planned pair
+    /// succeeds — `apply_folder` never attempts to prune the directory
+    /// when this is nonzero, since doing so would delete the protected
+    /// files still sitting in it.
+    pub protected_files_skipped: u64,
 }
 
 /// The outcome of actually running a [`FolderActionPlan`].
@@ -68,12 +77,22 @@ pub struct FolderApplyReport {
 /// independently at planning time, rather than trusting a `FolderMatch`
 /// computed earlier (and potentially stale by now, if anything on disk
 /// changed since).
+///
+/// `reference_paths` (`ACTION-REFERENCE-FOLDERS`, ADR-0025) excludes any
+/// file under `removed` that's itself protected from `pairs` entirely —
+/// never planned for removal, the same hard-block guarantee
+/// `action::plan_with_keep` gives individual files. Skipped files are
+/// counted in `FolderActionPlan::protected_files_skipped` rather than
+/// silently vanishing from the plan, since that count is what tells
+/// `apply_folder` the directory can't safely be pruned even after every
+/// *planned* pair succeeds.
 pub fn plan_folder(
     removed: &Path,
     kept: &Path,
     groups: &[DuplicateGroup],
     options: &ScanOptions,
     kind: ActionKind,
+    reference_paths: &[PathBuf],
 ) -> Result<FolderActionPlan, FolderActionError> {
     if !removed.is_dir() {
         return Err(FolderActionError::NotADirectory(removed.to_path_buf()));
@@ -88,6 +107,7 @@ pub fn plan_folder(
 
     let mut pairs = Vec::new();
     let mut bytes_reclaimed = 0u64;
+    let mut protected_files_skipped = 0u64;
     let mut mismatch: Option<FolderActionError> = None;
 
     traversal::traverse(
@@ -109,6 +129,12 @@ pub fn plan_folder(
                 return;
             }
             let path = candidate.path.to_path_buf();
+
+            if select::is_protected(&path, reference_paths) {
+                protected_files_skipped += 1;
+                return;
+            }
+
             let rel = path
                 .strip_prefix(removed)
                 .expect("traversal always yields paths under `removed`");
@@ -149,6 +175,7 @@ pub fn plan_folder(
         removed: removed.to_path_buf(),
         pairs,
         bytes_reclaimed,
+        protected_files_skipped,
     })
 }
 
@@ -159,9 +186,16 @@ pub fn plan_folder(
 /// abort the rest (ADR-0004's error-tolerance contract).
 ///
 /// After a fully successful [`ActionKind::Delete`]/[`ActionKind::Trash`]
-/// (every pair succeeded), the now file-less `removed` directory tree is
-/// pruned via `fs::remove_dir_all`. A failed prune (e.g. something else was
-/// added to `removed` after this plan was made) is reported via
+/// (every pair succeeded) *and* no file under `removed` was skipped for
+/// being protected (`plan.protected_files_skipped == 0`), the now
+/// file-less `removed` directory tree is pruned via `fs::remove_dir_all`.
+/// Skipping the prune whenever a protected file was excluded from the plan
+/// is load-bearing, not just tidy: `remove_dir_all` doesn't know or care
+/// which files inside `removed` are protected — pruning anyway would
+/// delete them right along with everything else, silently defeating the
+/// entire guarantee `ACTION-REFERENCE-FOLDERS` exists to provide. A failed
+/// prune for an unrelated reason (e.g. something else was added to
+/// `removed` after this plan was made) is reported via
 /// `directory_removed: false`, not as a per-file failure — every actual
 /// file action already succeeded by that point.
 pub fn apply_folder(plan: &FolderActionPlan) -> FolderApplyReport {
@@ -183,7 +217,7 @@ pub fn apply_folder(plan: &FolderActionPlan) -> FolderApplyReport {
     }
 
     let prunes_directory = matches!(plan.kind, ActionKind::Delete | ActionKind::Trash);
-    if prunes_directory && report.failed.is_empty() {
+    if prunes_directory && plan.protected_files_skipped == 0 && report.failed.is_empty() {
         report.directory_removed = fs::remove_dir_all(&plan.removed).is_ok();
     }
 
@@ -227,6 +261,7 @@ mod tests {
             &groups,
             &ScanOptions::default(),
             ActionKind::Delete,
+            &[],
         )
         .expect("every file in small has a confirmed partner in big");
 
@@ -262,6 +297,7 @@ mod tests {
             &groups,
             &ScanOptions::default(),
             ActionKind::Delete,
+            &[],
         )
         .expect_err("2.txt has no confirmed partner in `groups`");
         assert!(matches!(
@@ -290,6 +326,7 @@ mod tests {
             &groups,
             &ScanOptions::default(),
             ActionKind::Delete,
+            &[],
         )
         .expect_err("the on-disk size no longer matches the recorded group size");
         assert!(matches!(
@@ -306,6 +343,7 @@ mod tests {
             &[],
             &ScanOptions::default(),
             ActionKind::Delete,
+            &[],
         )
         .expect_err("a nonexistent removed folder must be rejected");
         assert!(matches!(err, FolderActionError::NotADirectory(_)));
@@ -328,6 +366,7 @@ mod tests {
             &groups,
             &ScanOptions::default(),
             ActionKind::Delete,
+            &[],
         )
         .unwrap();
         let report = apply_folder(&plan);
@@ -360,6 +399,7 @@ mod tests {
             &groups,
             &ScanOptions::default(),
             ActionKind::Trash,
+            &[],
         )
         .unwrap();
         let report = apply_folder(&plan);
@@ -395,6 +435,7 @@ mod tests {
             &groups,
             &ScanOptions::default(),
             ActionKind::Hardlink,
+            &[],
         )
         .unwrap();
         let report = apply_folder(&plan);
@@ -425,6 +466,7 @@ mod tests {
             &groups,
             &ScanOptions::default(),
             ActionKind::Delete,
+            &[],
         )
         .unwrap();
         // Remove the file out from under the plan before applying it, so
@@ -438,6 +480,86 @@ mod tests {
         assert!(
             !report.directory_removed,
             "a failed action must not prune the directory"
+        );
+    }
+
+    #[test]
+    fn plan_folder_excludes_a_protected_file_from_pairs_and_counts_it_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"one").unwrap();
+        fs::write(big.join("1.txt"), b"one").unwrap();
+        fs::write(small.join("2.txt"), b"two").unwrap();
+        fs::write(big.join("2.txt"), b"two").unwrap();
+
+        let groups = vec![
+            group(3, &[&small.join("1.txt"), &big.join("1.txt")]),
+            group(3, &[&small.join("2.txt"), &big.join("2.txt")]),
+        ];
+
+        // Protect 1.txt specifically (not the whole `small` folder) --
+        // only that one file should be excluded from the plan.
+        let plan = plan_folder(
+            &small,
+            &big,
+            &groups,
+            &ScanOptions::default(),
+            ActionKind::Delete,
+            &[small.join("1.txt")],
+        )
+        .unwrap();
+
+        assert_eq!(plan.pairs.len(), 1);
+        assert_eq!(plan.pairs[0].remove, small.join("2.txt"));
+        assert_eq!(plan.protected_files_skipped, 1);
+        assert_eq!(plan.bytes_reclaimed, 3);
+    }
+
+    #[test]
+    fn apply_folder_never_prunes_the_directory_when_a_protected_file_was_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"one").unwrap();
+        fs::write(big.join("1.txt"), b"one").unwrap();
+        fs::write(small.join("2.txt"), b"two").unwrap();
+        fs::write(big.join("2.txt"), b"two").unwrap();
+
+        let groups = vec![
+            group(3, &[&small.join("1.txt"), &big.join("1.txt")]),
+            group(3, &[&small.join("2.txt"), &big.join("2.txt")]),
+        ];
+
+        let plan = plan_folder(
+            &small,
+            &big,
+            &groups,
+            &ScanOptions::default(),
+            ActionKind::Delete,
+            &[small.join("1.txt")],
+        )
+        .unwrap();
+        let report = apply_folder(&plan);
+
+        assert_eq!(report.succeeded, vec![small.join("2.txt")]);
+        assert!(report.failed.is_empty());
+        assert!(
+            !report.directory_removed,
+            "the directory must never be pruned while a protected file still lives in it -- \
+             remove_dir_all cannot tell protected files from anything else"
+        );
+        assert!(
+            small.exists() && small.join("1.txt").exists(),
+            "the protected file, and the directory holding it, must survive"
+        );
+        assert!(
+            !small.join("2.txt").exists(),
+            "the unprotected duplicate is still removed"
         );
     }
 }

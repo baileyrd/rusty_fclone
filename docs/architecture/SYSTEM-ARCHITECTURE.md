@@ -113,7 +113,11 @@ DuplicateGroup ──action::plan(kind)──► ActionPlan (no filesystem mutat
   `plan_with_keep` generalizes this to an explicit, caller-chosen kept
   path; `select::choose_keep` picks one by a named rule (newest, oldest,
   shortest/longest path) instead of always alphabetically-first
-  (`SELECTION-RULES`).
+  (`SELECTION-RULES`). A caller-supplied `reference_paths` list overrides
+  both: a path under a configured reference folder always wins as kept,
+  and is never placed in `actions`, regardless of `Rule` or an explicit
+  `keep` argument — a hard block, not a dismissible warning
+  (`ACTION-REFERENCE-FOLDERS`, ADR-0025).
 - `apply`'s hardlink action never leaves a path momentarily missing: it
   links the kept file to a temporary sibling name, then renames that over
   the target path.
