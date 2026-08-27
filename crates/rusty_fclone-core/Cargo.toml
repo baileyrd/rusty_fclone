@@ -21,6 +21,7 @@ redb.workspace = true
 sled.workspace = true
 bincode.workspace = true
 serde.workspace = true
+image.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

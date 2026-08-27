@@ -16,6 +16,7 @@ pub fn run() {
             commands::list_scan_profiles,
             commands::save_scan_profile,
             commands::delete_scan_profile,
+            commands::find_similar_images,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

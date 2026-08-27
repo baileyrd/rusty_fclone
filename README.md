@@ -16,8 +16,10 @@ preview for image and audio duplicates and persisted, named scan
 profiles, an opt-in incremental hash cache, opt-in SQLite scan-history
 with per-action audit detail and a `history` query subcommand, opt-in
 import of an existing fclones hash cache, opt-in folder-level duplicate
-detection, and include/exclude scan filters (min/max size, extension,
-excluded paths) are all implemented. See
+detection, opt-in perceptual image similarity (visually-similar-but-not-
+identical images, kept deliberately separate from exact detection), and
+include/exclude scan filters (min/max size, extension, excluded paths)
+are all implemented. See
 [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
 checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
 what's planned.
@@ -94,6 +96,15 @@ Options:
           After the scan completes, also look for folders whose entire
           recursive file content duplicates -- or is a subset of --
           another folder's. Off by default
+      --find-similar-images
+          After the scan completes, also look for visually similar
+          images (dHash perceptual comparison) -- always separate from
+          the byte-identical results above. Off by default, report-only,
+          no --action/--apply interaction
+      --similarity-threshold <N>
+          Maximum dHash Hamming distance (0-64) for two images to be
+          reported as similar under --find-similar-images. Lower is more
+          conservative [default: 10]
       --action <ACTION>
           What to do with redundant copies once a group is confirmed:
           report (default, just print groups), delete (permanent, no
@@ -210,6 +221,15 @@ rusty-fclone --find-duplicate-folders /path/to/scan
 # their folder is already covered by a folder match; unrelated duplicate
 # pairs outside any folder match are still acted on normally.
 rusty-fclone --find-duplicate-folders --action delete --apply /path/to/scan
+
+# Also look for visually similar (not byte-identical) images -- a resave
+# at a different quality, a resize, a re-export. Report-only, always
+# separate from the exact results above; no --action interaction.
+rusty-fclone --find-similar-images /path/to/scan
+
+# Same, but stricter -- only report images whose perceptual hashes are
+# nearly identical (closer than the default threshold).
+rusty-fclone --find-similar-images --similarity-threshold 4 /path/to/scan
 ```
 
 ### Querying scan history
@@ -247,7 +267,11 @@ show an inline thumbnail for supported image files and a playable audio
 control for supported audio files, instead of just a filename — falling
 back to a generic file icon for unsupported types, oversized files, or
 video. Scan Setup's directory and options can be saved as a named,
-persisted profile and reloaded on a later launch. Light and dark themes.
+persisted profile and reloaded on a later launch. Scan Setup's "Similar
+content" option runs an opt-in perceptual-similarity pass alongside the
+exact scan, surfacing visually-similar (not byte-identical) images in
+Duplicate Review as their own read-only clusters — never an action
+target. Light and dark themes.
 
 ```sh
 cargo run -p rusty_fclone-gui

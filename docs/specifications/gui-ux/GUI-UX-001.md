@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.3.8
+- Version: 0.3.9
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -37,9 +37,19 @@ semantics, which are unchanged.
   current (confirmation-dialog) mechanism.
 - Scanning more than one root directory in a single scan — matches
   `rusty_fclone_core::scan`'s one-root contract exactly (ADR-0022).
-- Near-duplicate/fuzzy matching ("Similar content" in the UI) — an
-  explicit `FCLONE-DETECTION-001` non-goal; the control is shown but
-  disabled, not silently ignored (ADR-0022).
+- Near-duplicate/fuzzy matching of anything other than images — "Similar
+  content" now runs `find_similar_images` for images specifically
+  (FR-028, `DETECTION-PERCEPTUAL-IMAGES`, ADR-0030), reversing the prior
+  disabled-control state (ADR-0022); other media types remain out of
+  scope for it.
+- Any similarity-threshold control for "Similar content" in the GUI — it
+  always uses `PerceptualOptions::default()` (10/64); a narrower surface
+  than the CLI's `--similarity-threshold`, worth widening later if real
+  usage wants it (FR-028).
+- Any action (delete/trash/hardlink/reflink/move/copy) on a "Similar
+  content" cluster — a `SimilarGroup` is report-only everywhere in this
+  project, matching `FCLONE-DETECTION-001`'s own "no `--action`
+  interaction" scoping decision (ADR-0030).
 - Batch actions across multiple folder matches at once, or across every
   pair within one `Exact` cluster in a single `invoke` call — the
   frontend loops `run_folder_action` once per `removed`/`kept` pair
@@ -271,6 +281,17 @@ semantics, which are unchanged.
   successful save/delete response SHALL be the full, current profile
   list, which the frontend SHALL use to replace `state.scanProfiles`
   wholesale (`SCAN-PROFILES`, ADR-0029).
+- `GUI-UX-001-FR-028`: Scan Setup's previously-disabled "Similar content"
+  match-sensitivity option SHALL be selectable. Selecting it SHALL NOT
+  replace the exact scan — after a scan's `Finished` event (independent
+  of whether any `DuplicateGroup` was found, unlike the folder-dedup
+  pass), the frontend SHALL additionally invoke a `find_similar_images`
+  command with the scan root and options, and merge the resulting
+  `SimilarGroup`s into the Duplicate Review list as their own,
+  visually-distinct, read-only item kind — no keep-choice control, no
+  `run_action`/`run_folder_action` call of any kind, ever. Every card for
+  a `SimilarGroup` SHALL visibly state that its images are not confirmed
+  identical (`DETECTION-PERCEPTUAL-IMAGES`, ADR-0030).
 
 ## Architecture and interfaces
 
@@ -298,6 +319,9 @@ fn list_scan_profiles() -> Result<Vec<ScanProfilePayload>, String>;
 fn save_scan_profile(name: String, root: String, options: ScanOptionsPayload) -> Result<Vec<ScanProfilePayload>, String>;
 #[tauri::command]
 fn delete_scan_profile(name: String) -> Result<Vec<ScanProfilePayload>, String>;
+#[tauri::command]
+fn find_similar_images(root: String, options: ScanOptionsPayload,
+                        max_hamming_distance: Option<u32>) -> Result<Vec<SimilarGroupPayload>, String>;
 
 // src/payload.rs — serde DTOs, kept out of rusty_fclone-core (ADR-0020)
 struct ScanOptionsPayload { /* mirrors ScanOptions, all fields optional; also the persisted shape a ScanProfilePayload stores */ }
@@ -309,6 +333,7 @@ enum FolderMatchPayload { Exact { folders: Vec<String>, fileCount: u64, bytes: u
 struct FolderActionResultPayload { plan: FolderActionPlanPayload, applied: Option<FolderApplyReportPayload> }
 struct PreviewPayload { data_url: String }
 struct ScanProfilePayload { name: String, root: String, options: ScanOptionsPayload }
+struct SimilarGroupPayload { paths: Vec<String>, maxDistance: u32 }
 
 // src/preview.rs (ADR-0028) — no serde/core involvement
 fn build_data_url(path: &Path) -> Result<String, String>; // "data:<mime>;base64,<...>"
@@ -320,6 +345,10 @@ fn upsert(dir: &Path, profile: ScanProfilePayload) -> Result<Vec<ScanProfilePayl
 fn remove(dir: &Path, name: &str) -> Result<Vec<ScanProfilePayload>, String>;
 ```
 
+`find_similar_images` (the command) calls `rusty_fclone_core::find_similar_images`
+fully-qualified rather than via a `use` import, to avoid a name collision
+with the local command function of the same name.
+
 Frontend (`ui/app.js`): `folderMatchPairs(item)` mirrors the CLI's
 `folder_match_pairs` — a `Contained` match always yields the single
 `[{removed: subset, kept: superset}]` pair; an `Exact` cluster yields one
@@ -330,6 +359,19 @@ uses for file groups, keyed the same way (`item.key`). `applyFolderAction`
 loops one `run_folder_action` call per pair sequentially, summing
 `bytesReclaimed`/`failed` across calls for the single post-action message
 (FR-018's one-call-per-pair contract).
+
+`reviewItems()` (FR-028) concatenates a third item kind, `"similar"`,
+built from `state.similarGroups` (populated by `onScanFinished` calling
+`find_similar_images` whenever `state.matchMode === "similar"`,
+independent of whether `state.groups` is empty — unlike the folder-dedup
+call, which only runs when there's at least one exact group to build a
+picture from). `groupListRow`/`reviewMain` dispatch on this third kind
+alongside the existing `"file"`/`"folder"` ones; `similarReviewMain`
+renders each cluster as a read-only card list (reusing `ensurePreview`
+for photo thumbnails the same way `fileReviewMain` does) with a
+`var(--warning)`-tinted banner stating the images aren't confirmed
+identical, and only a "Skip" button — no keep-choice badge, no action
+bar, no `run_action`/`run_folder_action` call anywhere in this code path.
 
 Frontend (`ui/`, plain HTML/CSS/JS, no bundler, no framework —
 `tauri.conf.json`'s `app.withGlobalTauri: true`; rebuilt in 0.2.0 against
@@ -543,10 +585,20 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   (`profilesCard`/`loadScanProfiles`/`saveScanProfile`/`applyScanProfile`/
   `deleteScanProfile`) has no automated coverage (same standing gap as the
   rest of `app.js`) and no manual Xvfb/`xdotool` pass this session.
+- FR-028 ("Similar content" wiring) is exercised by
+  `commands::tests::find_similar_images_groups_a_real_near_identical_pair`
+  and `find_similar_images_rejects_a_nonexistent_root` (IPC-level, real
+  synthetic image files), plus `payload::tests::similar_group_converts_with_camel_case_fields`
+  and the underlying `rusty_fclone_core::perceptual` unit tests
+  (`FCLONE-DETECTION-001` FR-015 through FR-017). `app.js`'s enabled
+  "Similar content" toggle, `similarReviewMain`, and the extended
+  `reviewItems()`/`groupListRow` dispatch have no automated coverage
+  (same standing gap as the rest of `app.js`) and no manual Xvfb/
+  `xdotool` pass this session.
 
 ## Verification plan
 
-Unit/IPC tests in `rusty_fclone-gui` (56 tests: 17 in `payload::tests`, 25
+Unit/IPC tests in `rusty_fclone-gui` (59 tests: 18 in `payload::tests`, 27
 in `commands::tests`, 7 in `preview::tests`, 7 in `profiles::tests`), run
 as part of `cargo test --workspace`. Manual
 end-to-end verification of the redesigned frontend (this environment has
@@ -643,9 +695,29 @@ See `docs/traceability/TRACEABILITY.md`.
   file itself — narrow enough that renaming today means save-under-a-
   new-name then delete-the-old-one, not tracked as a real gap unless a
   user reports wanting one directly.
+- "Similar content" has no similarity-threshold control in the GUI (Non-
+  goals) — always `PerceptualOptions::default()` (10/64). Worth adding a
+  slider/input if real usage wants it tunable without dropping to the
+  CLI's `--similarity-threshold`.
+- A `SimilarGroup` cluster never gets a keep-choice, action bar, or any
+  path to `run_action`/`run_folder_action` (Non-goals, ADR-0030) — this
+  is a deliberate, considered scoping decision for this project's
+  destructive-action safety model, not an oversight to close later
+  without a fresh decision.
 
 ## Change history
 
+- 0.3.9 (2026-08-27): Enabled the previously-disabled "Similar content"
+  match-sensitivity option (FR-028, `DETECTION-PERCEPTUAL-IMAGES`, third
+  and final unit of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s
+  Phase 3, reversing the corresponding Non-goal from ADR-0022). New
+  `find_similar_images` command wraps
+  `rusty_fclone_core::find_similar_images`; selecting it runs the pass
+  alongside (not instead of) the exact scan, and Duplicate Review shows
+  each `SimilarGroup` as its own, visually distinct, read-only card list
+  — no keep-choice, no action bar, no `run_action`/`run_folder_action`
+  interaction of any kind, since "similar" is explicitly not this
+  project's byte-identical guarantee. ADR-0030.
 - 0.3.8 (2026-08-27): Added persisted scan profiles (FR-027,
   `SCAN-PROFILES`, second unit of `docs/roadmap/
   DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 3). New `list_scan_profiles`/

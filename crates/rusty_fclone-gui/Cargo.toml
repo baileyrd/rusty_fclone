@@ -29,3 +29,7 @@ dirs = "6"
 [dev-dependencies]
 tempfile = { workspace = true }
 tauri = { version = "2", features = ["test"] }
+# Test-only: constructs real synthetic image files for
+# `find_similar_images` IPC tests. Production GUI code never touches
+# `image` directly -- only `rusty_fclone_core::find_similar_images` does.
+image = { workspace = true }

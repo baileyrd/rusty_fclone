@@ -16,9 +16,12 @@ covers all three.
   jdupes.
 - **Platforms**: cross-platform from v1 (Linux, macOS, Windows) via a
   portable blocking-I/O model — see ADR-0002.
-- **Non-goals for v1**: near-duplicate/fuzzy matching, network-filesystem-
-  specific handling. (A GUI was a v1 non-goal too, until ADR-0020
-  reversed it — see the Crate boundaries section below.)
+- **Non-goals for v1**: network-filesystem-specific handling. (A GUI was
+  a v1 non-goal too, until ADR-0020 reversed it, and near-duplicate/fuzzy
+  matching of images specifically was too, until ADR-0030's opt-in
+  `find_similar_images` reversed it — both marked reversible here from
+  the start; see the Crate boundaries section below. Fuzzy matching of
+  anything other than images remains a non-goal.)
 
 ## Detection pipeline
 
@@ -64,6 +67,17 @@ on `(path, size, mtime)` — a hit reuses the stored hash and skips the real
 read entirely; a miss falls through to hashing as drawn. Both are off by
 default and never change what gets reported, only whether a file gets
 re-read.
+
+Deliberately not shown above at all: `find_similar_images` (ADR-0030,
+`perceptual` module) is not a stage of this pipeline and never runs as
+part of it — it's a wholly separate, opt-in entry point with its own
+traversal, decoding real image pixel content (via the `image` crate) and
+clustering by perceptual (dHash) similarity rather than exact-hash
+grouping. Its output (`SimilarGroup`) never enters this diagram's
+`DuplicateGroup`/`ScanEvent` flow at any point — the architectural
+separation the plan behind ADR-0030 required is enforced by keeping it
+structurally outside this pipeline, not just documented as a caveat on
+top of it.
 
 ## Concurrency model (ADR-0002)
 

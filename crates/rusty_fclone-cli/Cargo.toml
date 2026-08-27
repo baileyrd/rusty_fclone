@@ -22,3 +22,7 @@ rusqlite.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Test-only: constructs real synthetic image files for
+# `--find-similar-images` CLI tests. Production CLI code never touches
+# `image` directly -- only `rusty_fclone_core::find_similar_images` does.
+image.workspace = true
