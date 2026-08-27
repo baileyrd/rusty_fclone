@@ -373,13 +373,20 @@ function recentScansCard() {
         { style: "display:flex;gap:8px" },
         el(
           "button",
-          { className: "btn btn-ghost", disabled: true, title: "Reading saved scan history isn't wired into the GUI yet -- see the CLI's --history flag" },
+          { className: "btn btn-ghost", disabled: true, title: "Reading a CLI --history SQLite database needs a real filesystem path from a native file picker, which isn't wired into the GUI yet (blocked on Tauri's dialog/fs plugin work)" },
           icon("dashboard", 13),
           "Import history",
         ),
         el(
           "button",
-          { className: "btn btn-ghost", disabled: true, title: "Exporting to a file needs a native save dialog, not wired into the GUI yet" },
+          {
+            className: "btn btn-ghost",
+            disabled: state.scanHistory.length === 0,
+            title: state.scanHistory.length === 0
+              ? "No scans run yet this session"
+              : "Download this session's scan history as a JSON file",
+            onClick: exportScanHistoryJson,
+          },
           icon("dashboard", 13),
           "Export (JSON)",
         ),
@@ -1204,6 +1211,26 @@ listen("scan-event", (event) => {
       break;
   }
 });
+
+// Dashboard's "Export (JSON)" button (`CLI-HISTORY-AUDIT`): downloads this
+// session's in-memory `state.scanHistory` (already tracked for the Recent
+// Scans table) as a JSON file, via the standard `<a download>` + object-URL
+// technique -- a real webview download, not a native save dialog, so it
+// needed no new Tauri plugin/permission. Session-scoped only, the same
+// caveat the Recent Scans table already carries: the CLI's `--history`
+// (persisted SQLite, survives across launches) is the durable option.
+function exportScanHistoryJson() {
+  const json = JSON.stringify(state.scanHistory, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `rusty-fclone-scan-history-${Date.now()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 async function onScanFinished(summary) {
   const reclaimEstimate = state.groups.reduce((sum, g) => sum + g.size * Math.max(g.paths.length - 1, 0), 0);

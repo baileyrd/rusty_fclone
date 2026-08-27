@@ -1,8 +1,9 @@
 # Project Status
-- Last verified main commit: `43c3bb6` — merged `ACTION-REFERENCE-FOLDERS`
-  (PR #40), Phase 2's first unit of `docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch (`action-move-copy`)
-  implements that plan's Phase 2, second unit: `ACTION-MOVE-COPY`.
+- Last verified main commit: `78edda7` — merged `ACTION-MOVE-COPY` (PR
+  #41), Phase 2's second unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch (`cli-history-audit`)
+  implements that plan's Phase 2, third and final unit:
+  `CLI-HISTORY-AUDIT` — once this merges, Phase 2 is complete.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -12,9 +13,10 @@
   environment); everything merged since `v0.1.0` will be tagged once that
   happens.
 - Verified at: 2026-08-27
-- Current milestone: `ACTION-MOVE-COPY` (Phase 2 of
-  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, second of three independent units) —
-  implemented, validated, not yet merged. See `docs/roadmap/ROADMAP.md`.
+- Current milestone: `CLI-HISTORY-AUDIT` (Phase 2 of
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, third of three independent units,
+  completing the phase) — implemented, validated, not yet merged. See
+  `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace (three crates) builds, lints, and tests clean
   on the pinned toolchain
 
@@ -484,24 +486,77 @@
   ran. The GUI's new field is not yet manually verified through the
   rendered UI — same standing gap as `ACTION-REFERENCE-FOLDERS`.
 
+- `CLI-HISTORY-AUDIT`: third and final unit of `DEDUP-GAP-IMPLEMENTATION-
+  PLAN.md`'s Phase 2, completing the phase. Closes the two gaps
+  `CLI-SCAN-HISTORY` (ADR-0017) deliberately deferred. New `actions`
+  SQLite table: one row per file/pair an *applied* action actually acted
+  on (path, kind, bytes, success/failure, error text), FK'd to its
+  `scans` row and written in the same transaction — scoped to applied
+  actions only, since a preview plans but runs nothing real to audit yet.
+  `handle_group`/`report_folder_matches` both record through one shared
+  `record_action_outcomes` helper, correlating each planned action
+  against its real `ApplyReport`/`FolderApplyReport` outcome, `CLI-UX-001`
+  0.3.5 (FR-018). New `rusty-fclone history <list|stats>` command reads
+  an existing `--history` database — `list [--limit N]` (newest first),
+  `stats [--since TS] [--until TS]` (raw Unix timestamps, no new
+  date-parsing dependency) — both supporting `--format text|json`.
+  `history` is a reserved top-level keyword, dispatched manually in
+  `main` via `args[1] == "history"` before `Cli::parse` runs, rather than
+  a `#[command(subcommand)]` on `Cli` itself — `Cli::root`'s required
+  positional argument makes that combination ambiguous for clap without
+  restructuring every existing scan invocation into a breaking
+  `rusty-fclone scan <ROOT> ...` shape, which this unit's scope didn't
+  call for. Every existing `rusty-fclone <ROOT> ...` invocation is
+  unaffected; the cost is a real directory literally named `history`
+  needing `./history` to disambiguate. GUI's Dashboard "Export (JSON)"
+  button is wired for real via a plain `<a download>`/object-URL
+  (downloads the session's in-memory scan history, no new Tauri plugin
+  needed); "Import history" stays an explicit disabled placeholder, its
+  tooltip now naming the specific blocker (needs Tauri's `dialog`/`fs`
+  plugin for a real filesystem path — already tracked as a separate
+  prerequisite for the GUI's root-path picker), `GUI-UX-001` 0.3.6
+  (FR-025). ADR-0027. Implemented, tested (185/185 workspace tests — 8
+  new core-independent CLI tests: `history` module gained 7 new tests
+  (11 total, from 4), `main` module gained 6 new tests), `cargo fmt`/
+  `clippy -D warnings`/`bench --no-run`/`doc` all pass. Manually
+  smoke-tested against a real filesystem in this environment: two real
+  scans (one `report`-only, one `--action trash --apply` across 3
+  redundant files) against a `--history` database, followed by
+  `history list` (`--format text` and `--format json`) and `history
+  stats`, confirmed the exact row counts, per-action detail (right path/
+  kind/bytes/succeeded), and aggregate totals (12 bytes reclaimed across
+  3 files) matched what actually happened on disk; direct inspection of
+  the `actions` table confirmed each row's `scan_id` correctly pointed to
+  the trash-and-apply scan, not the report-only one; a plain
+  `rusty-fclone <ROOT>` invocation against a real directory confirmed
+  unaffected by the new keyword dispatch. The GUI's Export button is not
+  yet manually verified through a rendered window — same standing gap as
+  every prior GUI surface this session.
+
 ## In progress
-- None — `ACTION-MOVE-COPY` above is implemented and validated on branch
-  `action-move-copy`, not yet merged.
+- None — `CLI-HISTORY-AUDIT` above is implemented and validated on
+  branch `cli-history-audit`, not yet merged. Once it merges, Phase 2 of
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md` is complete in full.
 
 ## Blocked
 - None.
 
 ## Next
-- Phase 2 of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` continues
-  once `ACTION-MOVE-COPY` merges. Its remaining unit, `CLI-HISTORY-AUDIT`,
-  is independent and can start next.
+- Phase 2 of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` is complete
+  once `CLI-HISTORY-AUDIT` merges. Phase 3 (`docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md` §4) is a set of larger, separately-
+  scoped bets (`GUI-MEDIA-PREVIEW`, `DETECTION-PERCEPTUAL-IMAGES`,
+  `SCAN-PROFILES`, a Dashboard chart upgrade) not yet greenlit into
+  `ROADMAP.md` — needs an explicit decision on which, if any, to start
+  next.
 - Follow-on units intentionally left open by earlier scoping decisions
   (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
   proper (full pipeline overlap, needs a `ScanEvent` finality-contract
   decision first), `DETECTION-LINUX-FASTPATH` proper (io_uring/FIEMAP,
-  needs an async runtime and unsafe FFI, its own ADR), and — if wanted —
-  a query/report surface over `--history`'s accumulated data (explicitly
-  out of scope for `CLI-SCAN-HISTORY` itself).
+  needs an async runtime and unsafe FFI, its own ADR).
+- A GUI-side SQLite reader for `CLI-SCAN-HISTORY`/`CLI-HISTORY-AUDIT`'s
+  persisted history (Dashboard's "Import history"), blocked on the same
+  Tauri `dialog`/`fs` plugin prerequisite as the GUI's root-path picker.
 - `GUI-RELEASE-BUNDLES`: packaged, installable GUI distribution via
   `tauri build`'s bundler, needing per-platform prerequisites beyond
   CI's current build-and-test install step, plus real (non-placeholder)
@@ -509,18 +564,28 @@
 - A native file/directory picker for the GUI's root-path field (currently
   a plain text input) — deferred pending a look at Tauri's `dialog`
   plugin's own permission/capability shape (`GUI-UX-001`'s open
-  questions).
-- A GUI-side reader for `CLI-SCAN-HISTORY`'s persisted SQLite history,
-  and a real file-export path for the Dashboard's "Import history"/
-  "Export (JSON)" buttons — both need new backend work; they ship
-  disabled with an explanatory tooltip in `GUI-REDESIGN`.
+  questions); the same plugin work `CLI-HISTORY-AUDIT` left "Import
+  history" blocked on above.
 
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-27)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-27)
-- `cargo test --workspace`: pass, 172/172 (2026-08-27)
+- `cargo test --workspace`: pass, 185/185 (2026-08-27)
 - `cargo bench --workspace --no-run`: pass (2026-08-27)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-27)
+- Manual CLI smoke test, `CLI-HISTORY-AUDIT` (2026-08-27): two real scans
+  against `/tmp/history-smoke` (one report-only, one `--action trash
+  --apply` across 3 redundant files) recorded against a `--history`
+  database. `history list` (both `--format text` and `--format json`)
+  showed both scans newest first with the correct per-scan fields;
+  `history stats` reported "2 scans, 6 files scanned (24 bytes), 2
+  duplicate groups (6 files), 12 bytes reclaimed across 3 files" —
+  matching the two runs exactly. Direct inspection of the `actions` table
+  confirmed 3 rows, each `scan_id`-linked to the trash-and-apply scan
+  (not the report-only one), with the right path/kind/bytes/succeeded
+  per row. A plain `rusty-fclone <ROOT>` scan against an unrelated real
+  directory confirmed the new `history` keyword dispatch doesn't affect
+  normal invocations.
 - Manual CLI smoke test, `ACTION-MOVE-COPY` (2026-08-27): a real two-file
   duplicate pair (`photos/img.jpg`, `backup/img.jpg`) confirmed `--action
   move --archive-dir <dir> --apply` relocated the redundant copy to its
@@ -598,6 +663,21 @@
   light-theme toggle. Every screen rendered correctly in both themes.
 
 ## Risks and decisions needed
+- `CLI-HISTORY-AUDIT`'s `history` keyword reservation means a real
+  directory literally named `history` at a scan root now needs
+  `rusty-fclone ./history` (or an absolute path) to disambiguate from the
+  subcommand — narrow, documented in ADR-0027, not expected to matter in
+  practice, but worth knowing if a user ever reports a confusing "unknown
+  argument" error for a `history`-named directory.
+- `CLI-HISTORY-AUDIT`'s GUI surface (`exportScanHistoryJson`'s `<a
+  download>`/object-URL mechanism) has no automated test coverage (no JS
+  test harness in this project) and no Xvfb/`xdotool` end-to-end pass
+  confirming a real download actually completes through Tauri's webview
+  — this technique is standard in ordinary browsers, but hasn't been
+  confirmed specifically against this project's Tauri v2 webview
+  configuration in this environment (no display available). If a real
+  session reports the button doing nothing, this is the first place to
+  check.
 - `ACTION-MOVE-COPY`'s GUI surface (the conditional "Archive folder"
   field, and the `"copy"`-specific reclaim-text rewrite) has IPC-level
   test coverage for `run_action`/`run_folder_action`'s new `archiveDir`

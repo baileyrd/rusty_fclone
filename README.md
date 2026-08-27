@@ -12,12 +12,13 @@ workloads — see below), an action layer (delete/trash/hardlink/reflink/
 move/copy, dry-run by default, rule-based keep selection, a protected/
 reference-folder guardrail), richer CLI output (JSON, progress reporting,
 an interactive confirmation prompt), a desktop GUI, an opt-in incremental
-hash cache, opt-in SQLite scan-history, opt-in import of an existing
-fclones hash cache, opt-in folder-level duplicate detection, and
-include/exclude scan filters (min/max size, extension, excluded paths) are
-all implemented. See [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md)
-for the current checkpoint and
-[`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for what's planned.
+hash cache, opt-in SQLite scan-history with per-action audit detail and a
+`history` query subcommand, opt-in import of an existing fclones hash
+cache, opt-in folder-level duplicate detection, and include/exclude scan
+filters (min/max size, extension, excluded paths) are all implemented. See
+[`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
+checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
+what's planned.
 
 **By default, this tool only reports — it never deletes, trashes, links,
 moves, or copies anything unless you pass both `--action
@@ -68,7 +69,9 @@ Options:
           Path to a SQLite scan-history database (created if it doesn't
           exist). When set, a summary of this scan (files/bytes scanned,
           duplicate groups/files, and any action's result) is appended as
-          one row after the scan completes. Off by default
+          one row after the scan completes, plus one row per file/pair an
+          applied action actually acted on. Off by default. Query it back
+          with `rusty-fclone history <list|stats>` -- see below
       --min-size <BYTES>
           Skip files smaller than this size (bytes). Applied during
           traversal, before any hashing
@@ -205,6 +208,28 @@ rusty-fclone --find-duplicate-folders /path/to/scan
 # their folder is already covered by a folder match; unrelated duplicate
 # pairs outside any folder match are still acted on normally.
 rusty-fclone --find-duplicate-folders --action delete --apply /path/to/scan
+```
+
+### Querying scan history
+
+`--history <path>` records to a SQLite database; `rusty-fclone history
+<SUBCOMMAND>` reads it back. `history` is a reserved top-level command --
+`rusty-fclone <root>` still works exactly as before for any other first
+argument, a real directory named `history` just needs `./history` or an
+absolute path to disambiguate.
+
+```sh
+# The 20 most recent scans, newest first.
+rusty-fclone history --db ~/.local/share/rusty-fclone/history.sqlite list
+
+# Aggregate totals (scans, bytes reclaimed, files acted on, ...) across
+# every scan started in a given window (Unix timestamps).
+rusty-fclone history --db ~/.local/share/rusty-fclone/history.sqlite \
+  stats --since 1735689600 --until 1738368000
+
+# Machine-readable, same convention as the main command's --format json.
+rusty-fclone history --db ~/.local/share/rusty-fclone/history.sqlite \
+  --format json list --limit 5 | jq .
 ```
 
 ## GUI
