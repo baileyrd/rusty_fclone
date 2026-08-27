@@ -6,7 +6,7 @@
 //! output (`rusty_fclone-cli/src/main.rs`, ADR-0015 / `CLI-UX-001`), so a
 //! reader who knows one already knows the other.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -252,12 +252,22 @@ pub fn normalize_path_input(s: &str) -> String {
     unquoted.trim().to_string()
 }
 
-pub fn parse_action_kind(kind: &str) -> Result<ActionKind, String> {
+/// `archive_dir` is only consulted for `"move"`/`"copy"` (required there,
+/// ignored otherwise) -- the archive-folder destination those two kinds
+/// carry as part of `ActionKind` itself, not a separate parameter
+/// (`ACTION-MOVE-COPY`, ADR-0026).
+pub fn parse_action_kind(kind: &str, archive_dir: Option<&Path>) -> Result<ActionKind, String> {
     match kind {
         "delete" => Ok(ActionKind::Delete),
         "trash" => Ok(ActionKind::Trash),
         "hardlink" => Ok(ActionKind::Hardlink),
         "reflink" => Ok(ActionKind::Reflink),
+        "move" => archive_dir
+            .map(|dir| ActionKind::Move(dir.to_path_buf()))
+            .ok_or_else(|| "action kind \"move\" requires an archive directory".to_string()),
+        "copy" => archive_dir
+            .map(|dir| ActionKind::Copy(dir.to_path_buf()))
+            .ok_or_else(|| "action kind \"copy\" requires an archive directory".to_string()),
         other => Err(format!("unknown action kind: {other}")),
     }
 }
@@ -540,11 +550,29 @@ mod tests {
 
     #[test]
     fn parse_action_kind_accepts_the_four_known_words_and_rejects_others() {
-        assert_eq!(parse_action_kind("delete"), Ok(ActionKind::Delete));
-        assert_eq!(parse_action_kind("trash"), Ok(ActionKind::Trash));
-        assert_eq!(parse_action_kind("hardlink"), Ok(ActionKind::Hardlink));
-        assert_eq!(parse_action_kind("reflink"), Ok(ActionKind::Reflink));
-        assert!(parse_action_kind("frobnicate").is_err());
+        assert_eq!(parse_action_kind("delete", None), Ok(ActionKind::Delete));
+        assert_eq!(parse_action_kind("trash", None), Ok(ActionKind::Trash));
+        assert_eq!(
+            parse_action_kind("hardlink", None),
+            Ok(ActionKind::Hardlink)
+        );
+        assert_eq!(parse_action_kind("reflink", None), Ok(ActionKind::Reflink));
+        assert!(parse_action_kind("frobnicate", None).is_err());
+    }
+
+    #[test]
+    fn parse_action_kind_move_and_copy_require_an_archive_directory() {
+        let archive = Path::new("/archive");
+        assert_eq!(
+            parse_action_kind("move", Some(archive)),
+            Ok(ActionKind::Move(archive.to_path_buf()))
+        );
+        assert_eq!(
+            parse_action_kind("copy", Some(archive)),
+            Ok(ActionKind::Copy(archive.to_path_buf()))
+        );
+        assert!(parse_action_kind("move", None).is_err());
+        assert!(parse_action_kind("copy", None).is_err());
     }
 
     #[test]

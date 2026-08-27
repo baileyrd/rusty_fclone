@@ -15,7 +15,15 @@ const ACTION_KINDS = [
   { id: "delete", label: "Delete" },
   { id: "hardlink", label: "Hardlink" },
   { id: "reflink", label: "Reflink" },
+  { id: "move", label: "Move" },
+  { id: "copy", label: "Copy" },
 ];
+
+// "move"/"copy" (ACTION-MOVE-COPY, ADR-0026) are the only two kinds that
+// need a destination folder -- shown as an extra field in the review
+// action bar only when one of them is selected, and required before Apply
+// is enabled for either.
+const ARCHIVE_KINDS = new Set(["move", "copy"]);
 
 const KIND_COLOR = {
   photo: "var(--accent)",
@@ -122,6 +130,9 @@ const state = {
   // `find_duplicate_folders`) doesn't take it, only the action commands do.
   referencePaths: "",
   actionKind: "trash",
+  // Destination folder for "move"/"copy" (ACTION-MOVE-COPY, ADR-0026) --
+  // only meaningful, and required, when actionKind is one of those two.
+  archiveDir: "",
   sessionBytesReclaimed: 0,
   actionMessage: null,
   rules: [
@@ -793,7 +804,9 @@ function fileReviewMain(item) {
     );
   });
 
-  const actionVerb = { delete: "removed", trash: "trashed", hardlink: "hardlinked", reflink: "reflinked" }[state.actionKind];
+  const actionVerb = { delete: "removed", trash: "trashed", hardlink: "hardlinked", reflink: "reflinked", move: "moved", copy: "copied" }[state.actionKind];
+  const needsArchiveDir = ARCHIVE_KINDS.has(state.actionKind);
+  const archiveDirMissing = needsArchiveDir && !state.archiveDir.trim();
 
   return el(
     "div",
@@ -807,7 +820,7 @@ function fileReviewMain(item) {
         { className: "review-action-left" },
         el(
           "div",
-          { className: "seg", style: "width:260px" },
+          { className: "seg", style: "width:380px" },
           ...ACTION_KINDS.map((k) =>
             el(
               "button",
@@ -816,11 +829,22 @@ function fileReviewMain(item) {
             ),
           ),
         ),
+        needsArchiveDir
+          ? el(
+              "div",
+              { style: "margin-top:8px;max-width:380px" },
+              pathInput("Archive folder (required) -- e.g. /home/me/duplicates-archive", state.archiveDir, (v) => { state.archiveDir = v; }),
+            )
+          : null,
         el(
           "div",
           { className: "reclaim-note" },
-          `${others} file${others === 1 ? "" : "s"} will be ${actionVerb} · reclaims `,
-          el("span", { className: "reclaim-amount" }, bytesHuman(group.size * others)),
+          state.actionKind === "copy"
+            ? `${others} file${others === 1 ? "" : "s"} will be copied to the archive folder -- originals stay in place, nothing reclaimed`
+            : [
+                `${others} file${others === 1 ? "" : "s"} will be ${actionVerb} · reclaims `,
+                el("span", { className: "reclaim-amount" }, bytesHuman(group.size * others)),
+              ],
         ),
       ),
       el(
@@ -829,7 +853,7 @@ function fileReviewMain(item) {
         el("button", { className: "btn btn-ghost", onClick: nextGroup }, "Skip"),
         el(
           "button",
-          { className: "btn btn-danger", disabled: others === 0, onClick: () => applyAction(item, keepPath, keepReason) },
+          { className: "btn btn-danger", disabled: others === 0 || archiveDirMissing, onClick: () => applyAction(item, keepPath, keepReason) },
           `Apply ${ACTION_KINDS.find((k) => k.id === state.actionKind).label}`,
         ),
       ),
@@ -890,8 +914,10 @@ function folderReviewMain(item) {
   const removedCount = pairs.length;
   const totalFiles = removedCount * match.fileCount;
   const totalBytes = removedCount * match.bytes;
-  const actionVerb = { delete: "removed", trash: "trashed", hardlink: "hardlinked", reflink: "reflinked" }[state.actionKind];
+  const actionVerb = { delete: "removed", trash: "trashed", hardlink: "hardlinked", reflink: "reflinked", move: "moved", copy: "copied" }[state.actionKind];
   const actionLabel = ACTION_KINDS.find((k) => k.id === state.actionKind).label;
+  const needsArchiveDir = ARCHIVE_KINDS.has(state.actionKind);
+  const archiveDirMissing = needsArchiveDir && !state.archiveDir.trim();
 
   return el(
     "div",
@@ -905,7 +931,7 @@ function folderReviewMain(item) {
         { className: "review-action-left" },
         el(
           "div",
-          { className: "seg", style: "width:260px" },
+          { className: "seg", style: "width:380px" },
           ...ACTION_KINDS.map((k) =>
             el(
               "button",
@@ -915,11 +941,22 @@ function folderReviewMain(item) {
           ),
         ),
         el("span", { className: "badge match-badge" }, isExact ? "Exact folder match" : "Contained folder match"),
+        needsArchiveDir
+          ? el(
+              "div",
+              { style: "margin-top:8px;max-width:380px" },
+              pathInput("Archive folder (required) -- e.g. /home/me/duplicates-archive", state.archiveDir, (v) => { state.archiveDir = v; }),
+            )
+          : null,
         el(
           "div",
           { className: "reclaim-note" },
-          `${removedCount} folder${removedCount === 1 ? "" : "s"}, ${totalFiles} file${totalFiles === 1 ? "" : "s"} will be ${actionVerb} · reclaims `,
-          el("span", { className: "reclaim-amount" }, bytesHuman(totalBytes)),
+          state.actionKind === "copy"
+            ? `${removedCount} folder${removedCount === 1 ? "" : "s"}, ${totalFiles} file${totalFiles === 1 ? "" : "s"} will be copied to the archive folder -- originals stay in place, nothing reclaimed`
+            : [
+                `${removedCount} folder${removedCount === 1 ? "" : "s"}, ${totalFiles} file${totalFiles === 1 ? "" : "s"} will be ${actionVerb} · reclaims `,
+                el("span", { className: "reclaim-amount" }, bytesHuman(totalBytes)),
+              ],
         ),
       ),
       el(
@@ -928,7 +965,7 @@ function folderReviewMain(item) {
         el("button", { className: "btn btn-ghost", onClick: nextGroup }, "Skip"),
         el(
           "button",
-          { className: "btn btn-danger", disabled: removedCount === 0, onClick: () => applyFolderAction(item) },
+          { className: "btn btn-danger", disabled: removedCount === 0 || archiveDirMissing, onClick: () => applyFolderAction(item) },
           `${actionLabel} Duplicate Folder${removedCount === 1 ? "" : "s"}`,
         ),
       ),
@@ -945,7 +982,9 @@ function nextGroup() {
 async function applyAction(item, keepPath, keepReason) {
   const group = item.group;
   const ordered = [keepPath, ...group.paths.filter((p) => p !== keepPath)];
-  const message = `This will ${state.actionKind} ${ordered.length - 1} file(s), reclaiming ${bytesHuman(group.size * (ordered.length - 1))}. Continue?`;
+  const message = state.actionKind === "copy"
+    ? `This will copy ${ordered.length - 1} file(s) to the archive folder. Originals stay in place -- nothing is reclaimed. Continue?`
+    : `This will ${state.actionKind} ${ordered.length - 1} file(s), reclaiming ${bytesHuman(group.size * (ordered.length - 1))}. Continue?`;
   if (!window.confirm(message)) return;
 
   try {
@@ -955,6 +994,7 @@ async function applyAction(item, keepPath, keepReason) {
       keepReason,
       apply: true,
       referencePaths: referencePathsList(),
+      archiveDir: state.archiveDir.trim() || null,
     });
     const reclaimed = result.applied ? result.applied.bytesReclaimed : 0;
     const failed = result.applied ? result.applied.failed.length : 0;
@@ -974,7 +1014,9 @@ async function applyFolderAction(item) {
   const pairs = folderMatchPairs(item);
   const totalFiles = pairs.length * item.match.fileCount;
   const totalBytes = pairs.length * item.match.bytes;
-  const message = `This will ${state.actionKind} ${totalFiles} file(s) across ${pairs.length} folder${pairs.length === 1 ? "" : "s"}, reclaiming ${bytesHuman(totalBytes)}. Continue?`;
+  const message = state.actionKind === "copy"
+    ? `This will copy ${totalFiles} file(s) across ${pairs.length} folder${pairs.length === 1 ? "" : "s"} to the archive folder. Originals stay in place -- nothing is reclaimed. Continue?`
+    : `This will ${state.actionKind} ${totalFiles} file(s) across ${pairs.length} folder${pairs.length === 1 ? "" : "s"}, reclaiming ${bytesHuman(totalBytes)}. Continue?`;
   if (!window.confirm(message)) return;
 
   let reclaimed = 0;
@@ -990,6 +1032,7 @@ async function applyFolderAction(item) {
         kind: state.actionKind,
         apply: true,
         referencePaths: referencePathsList(),
+        archiveDir: state.archiveDir.trim() || null,
       });
       reclaimed += result.applied ? result.applied.bytesReclaimed : 0;
       failed += result.applied ? result.applied.failed.length : 0;

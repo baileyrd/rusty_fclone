@@ -1,5 +1,5 @@
 # FCLONE-ACTION-001 — Duplicate Action Layer
-- Version: 0.6.0
+- Version: 0.7.0
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`
@@ -24,8 +24,6 @@ nature.
   size-based rule could never distinguish anything.
 - An interactive confirmation prompt — v1's safety model is the two-flag
   (`--action` + `--apply`) CLI requirement instead (ADR-0009).
-- Moving files (as opposed to deleting or hardlinking) — not requested,
-  not implemented.
 - Choosing which folder to keep in a `FolderMatch::Exact` cluster of 3+
   mutually-identical folders beyond the alphabetically-first convention
   `plan`/`FR-001` already establish for files — `folder_action::plan_folder`
@@ -157,13 +155,34 @@ nature.
   `removed` directory tree when `protected_files_skipped` is nonzero,
   even if every planned pair in `pairs` succeeds — pruning would delete
   the protected file(s) still left inside `removed`.
+- `FCLONE-ACTION-001-FR-018`: `apply` with `ActionKind::Move(archive_dir)`
+  SHALL relocate every planned path into `archive_dir`, mirroring the
+  path's original components underneath it (every component except a
+  root/prefix/`.`/`..` preserved, so two files with the same name from
+  different original directories never collide), and SHALL leave the
+  kept file untouched. The redundant copy SHALL be gone from its
+  original path afterward, same as `ActionKind::Delete`/`Trash`. A
+  destination that already exists (e.g. an earlier `Move` already
+  archived a file at that mirrored path) SHALL be a per-file failure
+  (FR-005), never a silent overwrite. `folder_action::apply_folder`'s
+  directory-prune step (FR-011) SHALL also fire for `ActionKind::Move`,
+  alongside `Delete`/`Trash`.
+- `FCLONE-ACTION-001-FR-019`: `apply` with `ActionKind::Copy(archive_dir)`
+  SHALL copy every planned path into `archive_dir` (same path-mirroring
+  scheme as FR-018) and SHALL leave the original path untouched. A
+  successful `Copy` action SHALL NOT be counted in `ApplyReport::
+  bytes_reclaimed`/`FolderApplyReport::bytes_reclaimed` — nothing is
+  freed at the original location. The same already-exists guard as
+  FR-018 applies. `folder_action::apply_folder`'s directory-prune step
+  SHALL NOT fire for `ActionKind::Copy` — every original file stays in
+  place.
 
 ## Architecture and interfaces
 
 Public API (`crates/rusty_fclone-core/src/action.rs`):
 
 ```rust
-pub enum ActionKind { Delete, Trash, Hardlink, Reflink }
+pub enum ActionKind { Delete, Trash, Hardlink, Reflink, Move(PathBuf), Copy(PathBuf) }
 pub struct FileAction { pub path: PathBuf, pub kind: ActionKind }
 pub struct ActionPlan { pub size: u64, pub kept: PathBuf,
                          pub actions: Vec<FileAction>, pub bytes_reclaimed: u64 }
@@ -180,6 +199,8 @@ pub fn apply(plan: &ActionPlan) -> ApplyReport;
 `reflink_or_copy`) — see ADR-0014. `Trash` uses the `trash` crate's
 `trash::delete` — see ADR-0024. `reference_paths` is the protected/
 reference-folder guardrail — see ADR-0025; pass `&[]` for no guardrail.
+`Move`/`Copy` carry their archive destination as part of the variant
+itself, not a separate parameter — see ADR-0026.
 
 Folder-level public API (`crates/rusty_fclone-core/src/folder_action.rs`,
 ADR-0023), reusing `action::apply` internally rather than duplicating it:
@@ -208,12 +229,14 @@ pub fn choose_keep(group: &DuplicateGroup, rule: Rule,
 pub fn is_protected(path: &Path, reference_paths: &[PathBuf]) -> bool;
 ```
 
-CLI (`rusty_fclone-cli`): `--action <report|delete|trash|hardlink|reflink>`
-(default `report`), `--keep-rule <alphabetical|newest|oldest|shortest-path|
-longest-path>` (default `alphabetical`), `--reference <path>` (repeatable,
-default none), and `--apply` (bool). The CLI's `Action` enum is a thin
-wrapper adding `Report` — kept CLI-side rather than in core, since core
-stays CLI-agnostic (ADR-0005).
+CLI (`rusty_fclone-cli`): `--action
+<report|delete|trash|hardlink|reflink|move|copy>` (default `report`),
+`--keep-rule <alphabetical|newest|oldest|shortest-path|longest-path>`
+(default `alphabetical`), `--reference <path>` (repeatable, default
+none), `--archive-dir <path>` (required by, and only meaningful with,
+`--action move`/`copy`), and `--apply` (bool). The CLI's `Action` enum is
+a thin wrapper adding `Report` — kept CLI-side rather than in core, since
+core stays CLI-agnostic (ADR-0005).
 
 ## Data/state and invariants
 
@@ -238,6 +261,11 @@ stays CLI-agnostic (ADR-0005).
   counterpart of that same guarantee, and is what tells `apply_folder`
   the directory can't safely be pruned even after every *planned* pair
   succeeds.
+- A successful `ActionKind::Copy` action contributes `0` to
+  `ApplyReport::bytes_reclaimed`/`FolderApplyReport::bytes_reclaimed`,
+  unlike every other kind — deliberate (FR-019): the original is left in
+  place, so nothing at the scanned location was actually freed
+  (ADR-0026).
 
 ## Errors, failure, recovery, and observability
 
@@ -281,6 +309,16 @@ stays CLI-agnostic (ADR-0005).
   through symlinks or canonicalized — consistent with how every other
   configured path in this codebase (`exclude_paths`, `--reference`'s own
   CLI value) is already treated.
+- `Move` is hard-to-reverse in the same sense `Delete` isn't destructive:
+  the file survives, but at a caller-chosen archive path the user must
+  know to look in. `Move` never falls back to a cross-filesystem
+  copy-then-remove on a `rename` failure (FR-018) — it fails per-file
+  instead, matching Reflink's own "fail loud on a filesystem limitation"
+  posture (ADR-0014/ADR-0026) rather than adding fallback behavior found
+  nowhere else in this module. A `Move`/`Copy` destination that already
+  exists is always a per-file failure, never a silent overwrite —
+  protects an earlier archive run's files from a later one clobbering
+  them by coincidence of matching mirrored paths.
 
 ## Acceptance criteria
 
@@ -314,6 +352,16 @@ stays CLI-agnostic (ADR-0005).
   `folder_action::tests::*` (a protected file excluded from `pairs` and
   counted in `protected_files_skipped`; `apply_folder` never pruning the
   directory when a protected file was skipped).
+- FR-018/FR-019 (`Move`/`Copy`) are exercised by `action::tests::*`
+  (`Move` relocating a file into its mirrored archive path with
+  `bytes_reclaimed` counted; `Copy` leaving the original in place with
+  `bytes_reclaimed` at `0`; a `Move` failing cleanly, without clobbering,
+  against a pre-existing archive destination; `archived_path`'s
+  collision-safety directly), `folder_action::tests::*` (`Move` pruning
+  the emptied folder same as `Delete`/`Trash`; `Copy` leaving every
+  original file and the folder itself in place), and `main::tests`/
+  `commands::tests` (CLI and GUI) covering the same guarantees end-to-end
+  plus the `--archive-dir`-required validation error.
 
 ## Verification plan
 
@@ -359,6 +407,17 @@ real `--find-duplicate-folders --action delete --reference <dir> --apply`
 run against a subset folder containing a protected file confirmed the
 file survived and the folder was not pruned.
 
+Additionally manually smoke-tested against a real filesystem for FR-018/
+FR-019: `--action move --archive-dir <dir> --apply` against a real
+duplicate pair relocated the redundant copy to its mirrored archive path
+and left the kept file untouched; `--action copy --archive-dir <dir>
+--apply` archived a copy while leaving both originals in place and
+reported `0` bytes reclaimed; repeating the same `copy` run against the
+same tree failed cleanly on the already-archived destination (confirmed
+via `find`) without touching either original or the first run's archived
+file; `--action move` without `--archive-dir` was rejected before any
+scan ran.
+
 ## Traceability
 
 See `docs/traceability/TRACEABILITY.md`.
@@ -387,9 +446,37 @@ See `docs/traceability/TRACEABILITY.md`.
   relative path, or one reached through a symlink not itself under the
   configured prefix, won't match. Consistent with how `exclude_paths`
   already behaves, and not treated as a gap unless a real user hits it.
+- No automated test exercises a genuine cross-filesystem `Move` failure
+  (would need a second mounted filesystem in the test environment, the
+  same limitation FR-005's cross-device hardlink note already records);
+  the "never clobber an existing destination" failure path is what's
+  actually tested for `Move`/`Copy` instead.
 
 ## Change history
 
+- 0.7.0 (2026-08-27): Added archive-folder actions (`FR-018`/`FR-019`,
+  `ActionKind::Move`/`Copy`, `ACTION-MOVE-COPY`, second unit of
+  `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2). Reverses
+  the "moving files ... not implemented" v1 non-goal, the same way
+  `SELECTION-RULES` reversed its own predecessor non-goal. `Move`
+  relocates a redundant copy into a caller-chosen archive directory,
+  mirroring its original path underneath it (collision-safe); `Copy`
+  does the same but leaves the original untouched and reclaims no space
+  — a consolidate-for-review action, not a cleanup one. Both carry their
+  archive destination as data on the `ActionKind` variant itself
+  (`Move(PathBuf)`/`Copy(PathBuf)`) rather than a new threaded parameter,
+  which is why `ActionKind` no longer derives `Copy` (the trait) — every
+  existing call site relying on that implicit copy now clones or borrows
+  explicitly instead, with no behavior change for the four pre-existing
+  variants. `folder_action::apply_folder`'s directory-prune gate (FR-011)
+  now also fires for `Move`. CLI gained `--action move`/`copy` plus a new
+  `--archive-dir <path>` (required by, and only meaningful with, those
+  two, validated explicitly rather than via clap's generic
+  required-if machinery so the error names the specific action). GUI
+  gained a conditional "Archive folder" field in the Review action bar,
+  threaded into `run_action`/`run_folder_action`. ADR-0026 — extends the
+  action-layer's data model, an architecture-level decision per
+  `AGENTS.md`.
 - 0.6.0 (2026-08-27): Added the protected/reference-folder guardrail
   (`FR-015` through `FR-017`, `ACTION-REFERENCE-FOLDERS`, first unit of
   `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2). A new

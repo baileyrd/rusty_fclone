@@ -38,16 +38,35 @@ enum Action {
     /// XFS with reflink, APFS, some ZFS setups) -- fails per-file,
     /// reported as a warning, wherever it isn't.
     Reflink,
+    /// Relocate every redundant copy into `--archive-dir`, mirroring its
+    /// original path underneath it. The redundant copy is gone from its
+    /// original location afterward (like `delete`/`trash`) but survives at
+    /// its new archived path. Requires `--archive-dir`.
+    Move,
+    /// Copy every redundant copy into `--archive-dir` (same path-mirroring
+    /// scheme as `move`), leaving the original untouched. Reclaims no
+    /// space -- a consolidate-for-review step, not a cleanup one. Requires
+    /// `--archive-dir`.
+    Copy,
 }
 
 impl Action {
-    fn as_core_kind(self) -> Option<ActionKind> {
+    /// `archive_dir` is required for `move`/`copy` and ignored otherwise --
+    /// enforced here rather than via clap's own required-if machinery, so
+    /// the error names the specific action that needs it (`ACTION-MOVE-COPY`).
+    fn as_core_kind(self, archive_dir: Option<&Path>) -> Result<Option<ActionKind>, String> {
         match self {
-            Action::Report => None,
-            Action::Delete => Some(ActionKind::Delete),
-            Action::Trash => Some(ActionKind::Trash),
-            Action::Hardlink => Some(ActionKind::Hardlink),
-            Action::Reflink => Some(ActionKind::Reflink),
+            Action::Report => Ok(None),
+            Action::Delete => Ok(Some(ActionKind::Delete)),
+            Action::Trash => Ok(Some(ActionKind::Trash)),
+            Action::Hardlink => Ok(Some(ActionKind::Hardlink)),
+            Action::Reflink => Ok(Some(ActionKind::Reflink)),
+            Action::Move => archive_dir
+                .map(|dir| Some(ActionKind::Move(dir.to_path_buf())))
+                .ok_or_else(|| "--action move requires --archive-dir <PATH>".to_string()),
+            Action::Copy => archive_dir
+                .map(|dir| Some(ActionKind::Copy(dir.to_path_buf())))
+                .ok_or_else(|| "--action copy requires --archive-dir <PATH>".to_string()),
         }
     }
 }
@@ -184,9 +203,9 @@ struct Cli {
     #[arg(long = "exclude-path")]
     exclude_paths: Vec<PathBuf>,
 
-    /// What to do with redundant copies once a group is confirmed.
-    /// Without --apply, delete/hardlink/reflink only preview what would
-    /// happen.
+    /// What to do with redundant copies once a group is confirmed. Without
+    /// --apply, delete/trash/hardlink/reflink/move/copy only preview what
+    /// would happen. move/copy also require --archive-dir.
     #[arg(long, value_enum, default_value_t = Action::Report)]
     action: Action,
 
@@ -206,6 +225,15 @@ struct Cli {
     /// (`ACTION-REFERENCE-FOLDERS`). No effect in the default Report mode.
     #[arg(long = "reference")]
     reference_paths: Vec<PathBuf>,
+
+    /// Destination folder for `--action move`/`--action copy`. Every
+    /// redundant copy is relocated (`move`) or duplicated (`copy`)
+    /// underneath this directory, mirroring its original path so files
+    /// with the same name from different directories never collide.
+    /// Required by, and only meaningful with, `--action move`/`copy`
+    /// (`ACTION-MOVE-COPY`).
+    #[arg(long)]
+    archive_dir: Option<PathBuf>,
 
     /// Actually perform --action's effect. Without this flag, delete,
     /// hardlink, and reflink only print a preview and touch nothing — a
@@ -272,9 +300,15 @@ fn init_tracing(verbose: u8) {
 /// `Cli` directly (bypassing real process argv) and assert on filesystem
 /// side effects and the exit code.
 fn run(cli: Cli) -> ExitCode {
-    let action_kind = cli.action.as_core_kind();
+    let action_kind = match cli.action.as_core_kind(cli.archive_dir.as_deref()) {
+        Ok(kind) => kind,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
 
-    if let Some(kind) = action_kind {
+    if let Some(kind) = &action_kind {
         if cli.apply && !cli.yes && !confirm_apply(&cli.root, kind, cli.find_duplicate_folders) {
             eprintln!("aborted");
             return ExitCode::SUCCESS;
@@ -338,7 +372,7 @@ fn run(cli: Cli) -> ExitCode {
                 } else {
                     had_errors |= handle_group(
                         &group,
-                        action_kind,
+                        action_kind.clone(),
                         cli.keep_rule.as_core_rule(),
                         &cli.reference_paths,
                         cli.apply,
@@ -382,7 +416,7 @@ fn run(cli: Cli) -> ExitCode {
             &folder_matches,
             &collected_groups,
             &options,
-            action_kind,
+            action_kind.as_ref(),
             &cli.reference_paths,
             cli.apply,
             &mut total_bytes_reclaimed,
@@ -404,7 +438,7 @@ fn run(cli: Cli) -> ExitCode {
             }
             had_errors |= handle_group(
                 group,
-                action_kind,
+                action_kind.clone(),
                 cli.keep_rule.as_core_rule(),
                 &cli.reference_paths,
                 cli.apply,
@@ -418,7 +452,7 @@ fn run(cli: Cli) -> ExitCode {
     // Printed after the folder-dedup pass above (not right after the scan
     // loop) so the total reflects both file-level group actions and any
     // folder-level ones -- one true grand total, not an undercount.
-    if let Some(kind) = action_kind {
+    if let Some(kind) = &action_kind {
         report_action_summary(
             cli.format,
             kind,
@@ -436,10 +470,10 @@ fn run(cli: Cli) -> ExitCode {
             bytes_scanned: final_summary.bytes_scanned,
             duplicate_groups: final_summary.duplicate_groups,
             duplicate_files: final_summary.duplicate_files,
-            action_kind: action_kind.map(action_word),
-            action_applied: action_kind.map(|_| cli.apply),
-            bytes_reclaimed: action_kind.map(|_| total_bytes_reclaimed),
-            files_acted_on: action_kind.map(|_| total_files_acted_on),
+            action_kind: action_kind.as_ref().map(action_word),
+            action_applied: action_kind.as_ref().map(|_| cli.apply),
+            bytes_reclaimed: action_kind.as_ref().map(|_| total_bytes_reclaimed),
+            files_acted_on: action_kind.as_ref().map(|_| total_files_acted_on),
         };
         if let Err(err) = history::record_scan(history_path, &record) {
             eprintln!("warning: failed to record scan history: {err}");
@@ -468,7 +502,7 @@ fn unix_timestamp_now() -> i64 {
 /// hasn't run yet, and groups/actions are applied incrementally as they're
 /// found (ADR-0004's streaming design) -- so this is a general warning
 /// naming the root and action, not a precise preview (ADR-0015).
-fn confirm_apply(root: &Path, kind: ActionKind, find_duplicate_folders: bool) -> bool {
+fn confirm_apply(root: &Path, kind: &ActionKind, find_duplicate_folders: bool) -> bool {
     let folders_note = if find_duplicate_folders {
         ", including whole duplicate folders,"
     } else {
@@ -575,7 +609,7 @@ fn report_finished(format: Format, summary: &ScanSummary) {
 
 fn report_action_summary(
     format: Format,
-    kind: ActionKind,
+    kind: &ActionKind,
     applied: bool,
     bytes_reclaimed: u64,
     files: u64,
@@ -619,7 +653,7 @@ fn handle_group(
     };
 
     let (keep, keep_reason) = select::choose_keep(group, keep_rule, reference_paths);
-    let plan = action::plan_with_keep(group, &keep, kind, reference_paths);
+    let plan = action::plan_with_keep(group, &keep, kind.clone(), reference_paths);
     if plan.actions.is_empty() {
         print_group(format, group, None);
         return false;
@@ -681,7 +715,7 @@ fn print_group_text(
     };
     println!("  keep: {} ({keep_reason})", plan.kept.display());
     for file_action in &plan.actions {
-        println!("  {}: {}", action_word(kind), file_action.path.display());
+        println!("  {}: {}", action_word(&kind), file_action.path.display());
     }
 }
 
@@ -702,7 +736,7 @@ fn print_group_json(
             None => (Vec::new(), Vec::new()),
         };
         JsonAction {
-            kind: action_word(kind),
+            kind: action_word(&kind),
             kept: plan.kept.display().to_string(),
             keep_reason: keep_reason.to_string(),
             applied,
@@ -801,7 +835,7 @@ fn report_folder_matches(
     matches: &[FolderMatch],
     groups: &[DuplicateGroup],
     options: &ScanOptions,
-    action_kind: Option<ActionKind>,
+    action_kind: Option<&ActionKind>,
     reference_paths: &[PathBuf],
     apply: bool,
     total_bytes_reclaimed: &mut u64,
@@ -817,7 +851,7 @@ fn report_folder_matches(
                     kept,
                     groups,
                     options,
-                    kind,
+                    kind.clone(),
                     reference_paths,
                 ) {
                     Ok(plan) => {
@@ -840,7 +874,7 @@ fn report_folder_matches(
                             }
                         }
                         outcomes.push(FolderPairOutcome {
-                            kind,
+                            kind: kind.clone(),
                             removed: removed.to_path_buf(),
                             kept: kept.to_path_buf(),
                             file_count: plan.pairs.len() as u64,
@@ -892,7 +926,7 @@ fn print_folder_match_text(m: &FolderMatch, outcomes: &[FolderPairOutcome]) {
         println!("  keep folder: {}", o.kept.display());
         let mut line = format!(
             "  {} folder: {} ({} files, {} bytes)",
-            action_word(o.kind),
+            action_word(&o.kind),
             o.removed.display(),
             o.file_count,
             o.bytes
@@ -915,7 +949,7 @@ fn print_folder_match_json(m: &FolderMatch, outcomes: &[FolderPairOutcome]) {
     let action: Vec<FolderPairActionJson> = outcomes
         .iter()
         .map(|o| FolderPairActionJson {
-            kind: action_word(o.kind),
+            kind: action_word(&o.kind),
             kept: o.kept.display().to_string(),
             removed: o.removed.display().to_string(),
             applied: o.applied,
@@ -1040,12 +1074,14 @@ struct FolderPairActionJson {
     failed: u64,
 }
 
-fn action_word(kind: ActionKind) -> &'static str {
+fn action_word(kind: &ActionKind) -> &'static str {
     match kind {
         ActionKind::Delete => "delete",
         ActionKind::Trash => "trash",
         ActionKind::Hardlink => "hardlink",
         ActionKind::Reflink => "reflink",
+        ActionKind::Move(_) => "move",
+        ActionKind::Copy(_) => "copy",
     }
 }
 
@@ -1074,6 +1110,7 @@ mod tests {
             action: Action::Report,
             keep_rule: KeepRule::Alphabetical,
             reference_paths: Vec::new(),
+            archive_dir: None,
             apply: false,
             yes: false,
             find_duplicate_folders: false,
@@ -1161,6 +1198,82 @@ mod tests {
             !b.exists(),
             "the redundant copy must be gone from its original path"
         );
+    }
+
+    #[test]
+    fn action_with_apply_actually_moves_into_the_archive_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.action = Action::Move;
+        cli.archive_dir = Some(archive.clone());
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert!(a.exists(), "the kept file must survive");
+        assert!(!b.exists(), "the redundant copy is gone from its path");
+        // The archived layout mirrors b's original absolute path
+        // underneath `archive` (collision-safe across different original
+        // directories) -- not a flat `archive/b.txt`.
+        assert!(
+            archive.join(b.strip_prefix("/").unwrap()).exists(),
+            "the redundant copy must survive at its archived path"
+        );
+    }
+
+    #[test]
+    fn action_with_apply_actually_copies_into_the_archive_directory_and_keeps_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.action = Action::Copy;
+        cli.archive_dir = Some(archive.clone());
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert!(a.exists());
+        assert!(b.exists(), "Copy must not touch the original");
+        assert!(
+            archive.join(b.strip_prefix("/").unwrap()).exists(),
+            "an archived copy must exist alongside the untouched original"
+        );
+    }
+
+    #[test]
+    fn action_move_without_archive_dir_fails_before_touching_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.action = Action::Move;
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+
+        assert_eq!(
+            exit,
+            ExitCode::FAILURE,
+            "--action move without --archive-dir must be rejected"
+        );
+        assert!(a.exists());
+        assert!(b.exists(), "a rejected run must not touch the filesystem");
     }
 
     #[test]

@@ -2,26 +2,26 @@
 
 A duplicate-file finder — a spiritual successor to
 [fclones](https://github.com/pkolaczk/fclones): a fast detection engine
-plus an action layer to delete, trash, hardlink, or reflink what it finds,
-usable from either a CLI or a desktop GUI.
+plus an action layer to delete, trash, hardlink, reflink, move, or copy
+what it finds, usable from either a CLI or a desktop GUI.
 
 ## Status
 
 Detection (staged hashing, benchmarked faster than fclones on most
-workloads — see below), an action layer (delete/trash/hardlink/reflink,
-dry-run by default, rule-based keep selection, a protected/reference-folder
-guardrail), richer CLI output (JSON, progress reporting, an interactive
-confirmation prompt), a desktop GUI, an opt-in incremental hash cache,
-opt-in SQLite scan-history, opt-in import of an existing fclones hash
-cache, opt-in folder-level duplicate detection, and include/exclude scan
-filters (min/max size, extension, excluded paths) are all implemented. See
-[`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
-checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
-what's planned.
+workloads — see below), an action layer (delete/trash/hardlink/reflink/
+move/copy, dry-run by default, rule-based keep selection, a protected/
+reference-folder guardrail), richer CLI output (JSON, progress reporting,
+an interactive confirmation prompt), a desktop GUI, an opt-in incremental
+hash cache, opt-in SQLite scan-history, opt-in import of an existing
+fclones hash cache, opt-in folder-level duplicate detection, and
+include/exclude scan filters (min/max size, extension, excluded paths) are
+all implemented. See [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md)
+for the current checkpoint and
+[`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for what's planned.
 
-**By default, this tool only reports — it never deletes, trashes, or links
-anything unless you pass both `--action <delete|trash|hardlink|reflink>`
-and `--apply`.**
+**By default, this tool only reports — it never deletes, trashes, links,
+moves, or copies anything unless you pass both `--action
+<delete|trash|hardlink|reflink|move|copy>` and `--apply`.**
 
 ## Usage
 
@@ -94,13 +94,16 @@ Options:
           report (default, just print groups), delete (permanent, no
           recovery path -- prefer trash unless this is specifically
           wanted), trash (move to the OS trash/recycle bin, recoverable),
-          hardlink, or reflink (copy-on-write clone, CoW-capable
-          filesystems only). Without --apply, delete/trash/hardlink/
-          reflink only preview what would happen.
+          hardlink, reflink (copy-on-write clone, CoW-capable filesystems
+          only), move (relocate into --archive-dir, mirroring its
+          original path), or copy (archive into --archive-dir, leaving
+          the original untouched -- reclaims nothing). Without --apply,
+          delete/trash/hardlink/reflink/move/copy only preview what
+          would happen. move/copy also require --archive-dir.
       --apply
           Actually perform --action's effect (required in addition to
-          --action delete/trash/hardlink/reflink — a two-flag confirmation
-          so a single typo can't cause data loss)
+          --action delete/trash/hardlink/reflink/move/copy — a two-flag
+          confirmation so a single typo can't cause data loss)
       --keep-rule <RULE>
           Which copy to keep in each group when --action is set: alphabetical
           (default), newest, oldest, shortest-path, or longest-path. Applied
@@ -112,6 +115,12 @@ Options:
           protected path always keeps it, and every other protected copy is
           excluded from the action too. A hard guardrail, not a suggestion --
           can't be bypassed by --keep-rule or path sort order
+      --archive-dir <PATH>
+          Destination folder for --action move/copy. Every redundant copy is
+          relocated (move) or duplicated (copy) underneath this directory,
+          mirroring its original path so files with the same name from
+          different directories never collide. Required by, and only
+          meaningful with, --action move/copy
   -y, --yes
           Skip the interactive confirmation prompt normally shown before
           --apply mutates anything
@@ -155,6 +164,16 @@ rusty-fclone --action hardlink --apply /path/to/scan
 # Same, but as a copy-on-write clone instead of a hardlink (CoW-capable
 # filesystems only -- Btrfs, XFS with reflink, APFS, some ZFS setups).
 rusty-fclone --action reflink --apply /path/to/scan
+
+# Consolidate redundant copies into one folder instead of deleting them --
+# relocated, not destroyed, and reclaims space at the scanned location
+# just like delete/trash.
+rusty-fclone --action move --archive-dir ~/duplicates-archive --apply /path/to/scan
+
+# Cautious two-step cleanup: archive a copy of every redundant file first
+# (originals untouched, nothing reclaimed yet), review the archive, then
+# run a second --action delete/trash pass once you trust it's complete.
+rusty-fclone --action copy --archive-dir ~/duplicates-archive --apply /path/to/scan
 
 # Machine-readable NDJSON output, for piping into another tool.
 rusty-fclone --format json /path/to/scan | jq .

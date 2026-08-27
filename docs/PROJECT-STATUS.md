@@ -1,9 +1,8 @@
 # Project Status
-- Last verified main commit: `d6f17b4` — merged `SELECTION-RULES` (PR
-  #39), completing Phase 1 of `docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch
-  (`action-reference-folders`) implements that plan's Phase 2, first
-  unit: `ACTION-REFERENCE-FOLDERS`.
+- Last verified main commit: `43c3bb6` — merged `ACTION-REFERENCE-FOLDERS`
+  (PR #40), Phase 2's first unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch (`action-move-copy`)
+  implements that plan's Phase 2, second unit: `ACTION-MOVE-COPY`.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -13,8 +12,8 @@
   environment); everything merged since `v0.1.0` will be tagged once that
   happens.
 - Verified at: 2026-08-27
-- Current milestone: `ACTION-REFERENCE-FOLDERS` (Phase 2 of
-  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, first of three independent units) —
+- Current milestone: `ACTION-MOVE-COPY` (Phase 2 of
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, second of three independent units) —
   implemented, validated, not yet merged. See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace (three crates) builds, lints, and tests clean
   on the pinned toolchain
@@ -441,18 +440,61 @@
   standing gap `DETECTION-SCAN-FILTERS`/`ACTION-TRASH`/`SELECTION-RULES`
   already left open for their own GUI surfaces).
 
+- `ACTION-MOVE-COPY`: second unit of `DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s
+  Phase 2 — archive-folder actions. New `ActionKind::Move(PathBuf)`/
+  `Copy(PathBuf)`: `Move` relocates a redundant copy into a caller-chosen
+  archive directory, mirroring its original path underneath it
+  (collision-safe across files with the same name from different
+  original directories) and reclaiming space at the scanned location
+  like `Delete`/`Trash`; `Copy` does the same but leaves the original
+  untouched and reclaims nothing — a consolidate-for-review step, not a
+  cleanup one. `FCLONE-ACTION-001` 0.7.0 (FR-018/FR-019), reversing the
+  "moving files ... not implemented" v1 non-goal. The archive destination
+  is carried as data on the `ActionKind` variant itself rather than a new
+  threaded parameter, so `ActionKind` no longer derives `Copy` (the
+  trait) — every call site relying on that implicit copy now clones or
+  borrows explicitly, with no behavior change for the four pre-existing
+  variants (146 tests across the workspace confirmed unaffected before
+  any new test was added). A destination that already exists is always a
+  per-file failure, never a silent overwrite; `Move` never falls back to
+  copy-then-remove on a cross-device `rename` failure, matching ADR-0014's
+  own choice for reflink. `folder_action::apply_folder`'s directory-prune
+  gate (ADR-0023) now also fires for `Move`. CLI gained `--action
+  move`/`copy` plus a required `--archive-dir <path>` (validated
+  explicitly, not via clap's generic required-if, so the error names the
+  specific action needing it), `CLI-UX-001` 0.3.4 (FR-017). GUI gained a
+  conditional "Archive folder" field in the Duplicate Review and
+  folder-review action bars, shown only for `move`/`copy`, with Apply
+  disabled until it's filled in; `Copy`'s reclaim-estimate text is
+  rewritten rather than showing a byte figure that would never actually
+  be freed, `GUI-UX-001` 0.3.5 (FR-024). ADR-0026 — extends the
+  action-layer's data model, an architecture-level decision per
+  `AGENTS.md`. Implemented, tested (172/172 workspace tests — 4 new core
+  `action` tests, 2 new core `folder_action` tests, 3 new CLI tests, 5
+  new GUI tests), `cargo fmt`/`clippy -D warnings`/`bench --no-run`/`doc`
+  all pass. Manually smoke-tested against real filesystems in this
+  environment: `--action move --archive-dir <dir> --apply` relocated a
+  redundant file to its mirrored archive path and left the kept file
+  untouched; `--action copy --archive-dir <dir> --apply` archived a copy
+  while leaving both originals in place and reported 0 bytes reclaimed;
+  repeating that same `copy` run against the same tree failed cleanly on
+  the already-archived destination (confirmed via `find`) without
+  touching either original or the first run's archived file;
+  `--action move` without `--archive-dir` was rejected before any scan
+  ran. The GUI's new field is not yet manually verified through the
+  rendered UI — same standing gap as `ACTION-REFERENCE-FOLDERS`.
+
 ## In progress
-- None — `ACTION-REFERENCE-FOLDERS` above is implemented and validated on
-  branch `action-reference-folders`, not yet merged.
+- None — `ACTION-MOVE-COPY` above is implemented and validated on branch
+  `action-move-copy`, not yet merged.
 
 ## Blocked
 - None.
 
 ## Next
 - Phase 2 of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` continues
-  once `ACTION-REFERENCE-FOLDERS` merges. Its remaining two units
-  (`ACTION-MOVE-COPY`, `CLI-HISTORY-AUDIT`) are independent of each other
-  and can start in any order.
+  once `ACTION-MOVE-COPY` merges. Its remaining unit, `CLI-HISTORY-AUDIT`,
+  is independent and can start next.
 - Follow-on units intentionally left open by earlier scoping decisions
   (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
   proper (full pipeline overlap, needs a `ScanEvent` finality-contract
@@ -476,9 +518,21 @@
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-27)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-27)
-- `cargo test --workspace`: pass, 158/158 (2026-08-27)
+- `cargo test --workspace`: pass, 172/172 (2026-08-27)
 - `cargo bench --workspace --no-run`: pass (2026-08-27)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-27)
+- Manual CLI smoke test, `ACTION-MOVE-COPY` (2026-08-27): a real two-file
+  duplicate pair (`photos/img.jpg`, `backup/img.jpg`) confirmed `--action
+  move --archive-dir <dir> --apply` relocated the redundant copy to its
+  mirrored archive path (`<dir>/<original-path-components>/img.jpg`) and
+  left the kept file untouched. A second real pair confirmed `--action
+  copy --archive-dir <dir> --apply` archived a copy while leaving both
+  originals in place, reporting "reclaimed 0 bytes" — then a repeated
+  `copy` run against the same tree failed cleanly (`archive destination
+  already exists`) without touching either original or the first run's
+  archived file, confirmed via `find` before/after. `--action move`
+  without `--archive-dir` was rejected with a clear error before any scan
+  ran.
 - Manual CLI smoke test, `ACTION-REFERENCE-FOLDERS` (2026-08-27): a real
   two-file tree (`reference/z_protected.txt`, `other/a.txt`, both
   duplicates) confirmed `--action trash --reference reference --apply`
@@ -544,6 +598,25 @@
   light-theme toggle. Every screen rendered correctly in both themes.
 
 ## Risks and decisions needed
+- `ACTION-MOVE-COPY`'s GUI surface (the conditional "Archive folder"
+  field, and the `"copy"`-specific reclaim-text rewrite) has IPC-level
+  test coverage for `run_action`/`run_folder_action`'s new `archiveDir`
+  parameter, but no Xvfb/`xdotool` end-to-end pass confirmed the field
+  actually appears/disappears correctly as the action-kind selector
+  changes, or that Apply's disabled state reacts to it, through the
+  rendered UI — `xdotool` isn't installed in this environment. The
+  underlying core logic is fully unit-tested and additionally confirmed
+  via real CLI smoke tests against a real filesystem (see Validation
+  above), so the residual risk is UI wiring specifically, same shape as
+  the other GUI surfaces below.
+- `ActionKind` no longer derives `Copy` (the Rust trait) as of
+  `ACTION-MOVE-COPY` — every call site that used to rely on an implicit
+  copy was updated to clone or borrow explicitly, verified by the full
+  existing test suite passing unmodified for the four pre-existing
+  variants. Worth a second look if a future `ActionKind`-touching change
+  reintroduces an implicit-copy assumption the compiler won't always
+  catch as cleanly as it did here (most sites were straightforward
+  borrow-checker errors, not silent behavior changes).
 - `ACTION-REFERENCE-FOLDERS`'s GUI surface (the new "Protected folders"
   field) has IPC-level test coverage for `run_action`/`choose_keep`/
   `run_folder_action`'s new `referencePaths` parameter, but no Xvfb/

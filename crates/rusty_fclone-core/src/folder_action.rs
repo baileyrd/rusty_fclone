@@ -206,7 +206,7 @@ pub fn apply_folder(plan: &FolderActionPlan) -> FolderApplyReport {
             kept: pair.keep.clone(),
             actions: vec![FileAction {
                 path: pair.remove.clone(),
-                kind: plan.kind,
+                kind: plan.kind.clone(),
             }],
             bytes_reclaimed: pair.size,
         };
@@ -216,7 +216,10 @@ pub fn apply_folder(plan: &FolderActionPlan) -> FolderApplyReport {
         report.bytes_reclaimed += sub_report.bytes_reclaimed;
     }
 
-    let prunes_directory = matches!(plan.kind, ActionKind::Delete | ActionKind::Trash);
+    let prunes_directory = matches!(
+        &plan.kind,
+        ActionKind::Delete | ActionKind::Trash | ActionKind::Move(_)
+    );
     if prunes_directory && plan.protected_files_skipped == 0 && report.failed.is_empty() {
         report.directory_removed = fs::remove_dir_all(&plan.removed).is_ok();
     }
@@ -561,5 +564,79 @@ mod tests {
             !small.join("2.txt").exists(),
             "the unprotected duplicate is still removed"
         );
+    }
+
+    #[test]
+    fn apply_folder_move_relocates_every_file_and_prunes_the_empty_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        let archive = dir.path().join("archive");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"one").unwrap();
+        fs::write(big.join("1.txt"), b"one").unwrap();
+
+        let groups = vec![group(3, &[&small.join("1.txt"), &big.join("1.txt")])];
+        let plan = plan_folder(
+            &small,
+            &big,
+            &groups,
+            &ScanOptions::default(),
+            ActionKind::Move(archive),
+            &[],
+        )
+        .unwrap();
+        let report = apply_folder(&plan);
+
+        assert_eq!(report.succeeded, vec![small.join("1.txt")]);
+        assert!(report.failed.is_empty());
+        assert_eq!(report.bytes_reclaimed, 3, "Move prunes like Delete/Trash");
+        assert!(
+            report.directory_removed,
+            "Move leaves `removed` empty just like Delete/Trash, so it prunes too"
+        );
+        assert!(!small.exists());
+        assert!(
+            big.join("1.txt").exists(),
+            "the kept side must be untouched"
+        );
+    }
+
+    #[test]
+    fn apply_folder_copy_leaves_every_file_and_the_directory_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        let archive = dir.path().join("archive");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"one").unwrap();
+        fs::write(big.join("1.txt"), b"one").unwrap();
+
+        let groups = vec![group(3, &[&small.join("1.txt"), &big.join("1.txt")])];
+        let plan = plan_folder(
+            &small,
+            &big,
+            &groups,
+            &ScanOptions::default(),
+            ActionKind::Copy(archive),
+            &[],
+        )
+        .unwrap();
+        let report = apply_folder(&plan);
+
+        assert_eq!(report.succeeded, vec![small.join("1.txt")]);
+        assert!(report.failed.is_empty());
+        assert_eq!(report.bytes_reclaimed, 0, "Copy reclaims nothing");
+        assert!(
+            !report.directory_removed,
+            "Copy leaves every original file in place -- nothing to prune"
+        );
+        assert!(
+            small.join("1.txt").exists(),
+            "Copy must not touch the original"
+        );
+        assert!(big.join("1.txt").exists());
     }
 }

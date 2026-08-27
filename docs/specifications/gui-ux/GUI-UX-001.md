@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.3.4
+- Version: 0.3.5
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -229,6 +229,14 @@ semantics, which are unchanged.
   default `"alphabetical"` rule, so the "keeping this file" badge
   reflects the guardrail before Apply rather than only after
   (`ACTION-REFERENCE-FOLDERS`, ADR-0025).
+- `GUI-UX-001-FR-024`: The Duplicate Review and folder-review action bars
+  SHALL show an "Archive folder" field whenever `"move"`/`"copy"` is the
+  selected action kind (not otherwise), sent as `archiveDir` to
+  `run_action`/`run_folder_action`. Apply SHALL be disabled for those two
+  kinds until the field is non-empty. The reclaim-estimate text SHALL
+  read "will be copied to the archive folder -- nothing reclaimed" for
+  `"copy"` specifically, rather than showing a byte figure that would
+  never actually be freed (`ACTION-MOVE-COPY`, ADR-0026).
 
 ## Architecture and interfaces
 
@@ -240,14 +248,14 @@ semantics, which are unchanged.
 fn start_scan<R: Runtime>(app: AppHandle<R>, root: String, options: ScanOptionsPayload) -> Result<(), String>;
 #[tauri::command]
 fn run_action(group: GroupPayload, kind: String, keep_reason: Option<String>, apply: bool,
-              reference_paths: Vec<String>) -> Result<ActionResultPayload, String>;
+              reference_paths: Vec<String>, archive_dir: Option<String>) -> Result<ActionResultPayload, String>;
 #[tauri::command]
 fn choose_keep(group: GroupPayload, rule: String, reference_paths: Vec<String>) -> Result<ChooseKeepPayload, String>;
 #[tauri::command]
 fn find_duplicate_folders(root: String, groups: Vec<GroupPayload>, options: ScanOptionsPayload) -> Result<Vec<FolderMatchPayload>, String>;
 #[tauri::command]
 fn run_folder_action(removed: String, kept: String, groups: Vec<GroupPayload>, options: ScanOptionsPayload, kind: String, apply: bool,
-                      reference_paths: Vec<String>) -> Result<FolderActionResultPayload, String>;
+                      reference_paths: Vec<String>, archive_dir: Option<String>) -> Result<FolderActionResultPayload, String>;
 
 // src/payload.rs — serde DTOs, kept out of rusty_fclone-core (ADR-0020)
 struct ScanOptionsPayload { /* mirrors ScanOptions, all fields optional */ }
@@ -437,10 +445,22 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   `xdotool` pass this session — `xdotool` isn't installed in this
   environment, so this requirement, like FR-020 through FR-022 before it,
   has IPC-level verification only.
+- FR-024 (archive-folder field) is exercised by
+  `commands::tests::run_action_move_relocates_the_redundant_copy_into_the_archive_directory`,
+  `commands::tests::run_action_copy_leaves_the_original_in_place`,
+  `commands::tests::run_action_move_without_archive_dir_is_rejected`, and
+  `commands::tests::run_folder_action_move_relocates_every_file_and_prunes_the_folder`
+  — all IPC-level, asserting on real filesystem state (a moved file
+  landing at its mirrored archive path, a copy leaving the original
+  place, the required-archive-dir rejection, and folder-level pruning
+  firing for `move`). The conditional field itself and the `"copy"`-
+  specific reclaim-text rewrite in `app.js` have no automated coverage
+  and no manual Xvfb/`xdotool` pass this session, the same standing gap
+  as FR-020 through FR-023.
 
 ## Verification plan
 
-Unit/IPC tests in `rusty_fclone-gui` (32 tests: 16 in `payload::tests`, 16
+Unit/IPC tests in `rusty_fclone-gui` (37 tests: 17 in `payload::tests`, 20
 in `commands::tests`), run as part of `cargo test --workspace`. Manual
 end-to-end verification of the redesigned frontend (this environment has
 no display, so via Xvfb): a built binary was launched, screenshotted at
@@ -525,6 +545,16 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.5 (2026-08-27): Added the archive-folder actions' GUI surface
+  (FR-024, `ACTION-MOVE-COPY`, second unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2). `ACTION_KINDS` gained
+  `"move"`/`"copy"`; the Duplicate Review and folder-review action bars
+  show a conditional "Archive folder" field for those two kinds, sent as
+  `archiveDir` to `run_action`/`run_folder_action` (both gained the
+  parameter). Apply stays disabled until it's filled in. The
+  reclaim-estimate text is rewritten for `"copy"` specifically, since it
+  reclaims nothing (the original is left in place) — showing a byte
+  figure there would be actively misleading. ADR-0026.
 - 0.3.4 (2026-08-27): Added the reference-folder guardrail's GUI surface
   (FR-023, `ACTION-REFERENCE-FOLDERS`, first unit of `docs/roadmap/
   DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2). A new "Protected folders"

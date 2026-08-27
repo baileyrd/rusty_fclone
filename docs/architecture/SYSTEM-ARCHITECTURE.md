@@ -121,6 +121,16 @@ DuplicateGroup ──action::plan(kind)──► ActionPlan (no filesystem mutat
 - `apply`'s hardlink action never leaves a path momentarily missing: it
   links the kept file to a temporary sibling name, then renames that over
   the target path.
+- `ActionKind::Move(archive_dir)`/`Copy(archive_dir)` carry their archive
+  destination as data on the variant itself, not a separate parameter —
+  every function taking `kind: ActionKind` already had one, so this adds
+  zero new parameters to the API surface. `Move` relocates a redundant
+  copy into `archive_dir` (mirroring its original path, so same-named
+  files from different directories never collide) and reclaims space at
+  the scanned location like `Delete`/`Trash`; `Copy` does the same but
+  leaves the original untouched and reclaims nothing — a
+  consolidate-for-review action, not a cleanup one (`ACTION-MOVE-COPY`,
+  ADR-0026).
 - The CLI is the only place a decision to actually mutate the filesystem
   gets made — `--action <kind>` alone only previews; `--apply` is required
   in addition. `rusty_fclone-core::action` itself has no concept of "dry
