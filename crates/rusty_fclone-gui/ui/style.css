@@ -507,6 +507,22 @@ button {
   padding: 14px 4px;
 }
 
+.profile-list {
+  display: flex;
+  flex-direction: column;
+}
+.profile-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 4px;
+  border-top: 1px solid var(--border-strong);
+}
+.profile-row-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
 /* ---- scan setup ---- */
 
 .scan-layout {

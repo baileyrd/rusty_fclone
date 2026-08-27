@@ -110,6 +110,13 @@ const state = {
   },
   matchMode: "exact",
   typeFilter: new Set(TYPE_FILTERS.map((t) => t.id)),
+  // Saved scan profiles (SCAN-PROFILES, ADR-0029) -- loaded once at
+  // startup from the backend's persisted JSON file (`list_scan_profiles`)
+  // and kept in sync with every save/delete's response, so this is always
+  // the full current list rather than something re-fetched per render.
+  scanProfiles: [],
+  profileNameInput: "",
+  profileError: null,
   scanning: false,
   scanError: null,
   progress: { filesScanned: 0, bytesScanned: 0 },
@@ -455,6 +462,7 @@ function scanView() {
         el("div", { className: "view-subtitle" }, "Choose a location and matching options."),
       ),
     ),
+    profilesCard(),
     el(
       "div",
       { className: "scan-layout" },
@@ -613,6 +621,65 @@ function scanView() {
         state.scanning ? "Scanning..." : "Start Scan",
       ),
     ),
+  );
+}
+
+// Saved scan profiles (SCAN-PROFILES, ADR-0029): the current root + scan
+// options, saved under a name and re-loadable across launches -- upgrades
+// the prior session-only "Recent scans" list (still shown on Dashboard,
+// unrelated) into something persisted. Placed above the scan-layout grid so
+// it's the first thing seen on Scan Setup, the same way `recentScansCard`
+// leads the Dashboard.
+function profilesCard() {
+  return el(
+    "div",
+    { className: "card" },
+    el(
+      "div",
+      { className: "card-header-row" },
+      el("div", { className: "card-title" }, "Saved scan profiles"),
+    ),
+    el("div", { className: "hint", style: "margin-bottom:14px" }, "Save the current directory and options as a named preset, re-runnable across launches."),
+    el(
+      "div",
+      { className: "field-row" },
+      el(
+        "div",
+        { className: "field-col" },
+        el("div", { className: "field-label" }, "Profile name"),
+        pathInput("e.g. Downloads cleanup", state.profileNameInput, (v) => { state.profileNameInput = v; }),
+      ),
+      el(
+        "div",
+        { style: "display:flex;align-items:flex-end" },
+        el("button", { className: "btn btn-ghost", onClick: saveScanProfile }, "Save current setup"),
+      ),
+    ),
+    state.profileError && el("div", { className: "hint error-text" }, state.profileError),
+    state.scanProfiles.length === 0
+      ? el("div", { className: "empty-note" }, "No saved profiles yet.")
+      : el(
+          "div",
+          { className: "profile-list" },
+          ...state.scanProfiles.map((p) =>
+            el(
+              "div",
+              { className: "profile-row" },
+              el(
+                "div",
+                null,
+                el("div", { className: "profile-row-name" }, p.name),
+                el("div", { className: "hint" }, p.root),
+              ),
+              el(
+                "div",
+                { style: "display:flex;gap:8px" },
+                el("button", { className: "btn btn-ghost", onClick: () => applyScanProfile(p) }, "Load"),
+                el("button", { className: "btn btn-danger", onClick: () => deleteScanProfile(p.name) }, "Delete"),
+              ),
+            ),
+          ),
+        ),
   );
 }
 
@@ -1232,6 +1299,73 @@ function scanOptionsPayload() {
   };
 }
 
+// ---- scan profiles (SCAN-PROFILES, ADR-0029) ------------------------------
+
+// Fetched once at startup (see the bottom of this file) and refreshed from
+// each save/delete response -- never re-fetched per render.
+async function loadScanProfiles() {
+  try {
+    const profiles = await invoke("list_scan_profiles");
+    setState({ scanProfiles: profiles });
+  } catch (err) {
+    // Best-effort: if the OS config directory can't be resolved, saved
+    // profiles just won't be listed this session -- not worth blocking the
+    // rest of the app over.
+  }
+}
+
+async function saveScanProfile() {
+  const name = state.profileNameInput.trim();
+  if (!name) {
+    setState({ profileError: "Enter a name for this profile first." });
+    return;
+  }
+  try {
+    const profiles = await invoke("save_scan_profile", {
+      name,
+      root: state.scanRoot,
+      options: scanOptionsPayload(),
+    });
+    setState({ scanProfiles: profiles, profileNameInput: "", profileError: null });
+  } catch (err) {
+    setState({ profileError: String(err) });
+  }
+}
+
+// Reverse of `scanOptionsPayload` -- turns a saved profile's parsed
+// options back into `state.options`'s string-based form fields (numbers
+// and arrays become the same comma-joined/plain-text strings the Scan
+// Setup inputs display and re-parse on save).
+function applyScanProfile(profile) {
+  const o = profile.options || {};
+  setState({
+    scanRoot: profile.root,
+    profileError: null,
+    options: {
+      followSymlinks: !!o.followSymlinks,
+      crossFilesystems: !!o.crossFilesystems,
+      verifyMatches: !!o.verifyMatches,
+      ioThreads: o.ioThreads ?? null,
+      cachePath: o.cachePath || "",
+      fclonesImportPath: o.fclonesImportPath || "",
+      minSize: o.minSize != null ? String(o.minSize) : "",
+      maxSize: o.maxSize != null ? String(o.maxSize) : "",
+      includeExtensions: (o.includeExtensions || []).join(", "),
+      excludeExtensions: (o.excludeExtensions || []).join(", "),
+      excludePaths: (o.excludePaths || []).join(", "),
+    },
+  });
+}
+
+async function deleteScanProfile(name) {
+  try {
+    const profiles = await invoke("delete_scan_profile", { name });
+    setState({ scanProfiles: profiles });
+  } catch (err) {
+    setState({ profileError: String(err) });
+  }
+}
+
 listen("scan-event", (event) => {
   const payload = event.payload;
   switch (payload.type) {
@@ -1304,3 +1438,4 @@ async function onScanFinished(summary) {
 }
 
 render();
+loadScanProfiles();
