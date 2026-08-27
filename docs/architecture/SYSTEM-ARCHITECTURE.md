@@ -171,6 +171,7 @@ DuplicateGroup ──action::plan(kind)──► ActionPlan (no filesystem mutat
 - Decisions: `docs/decisions/` (ADR-0001 onward).
 - Specs: `docs/specifications/detection/FCLONE-DETECTION-001.md`,
   `docs/specifications/action/FCLONE-ACTION-001.md`,
+  `docs/specifications/cli-ux/CLI-UX-001.md`,
   `docs/specifications/gui-ux/GUI-UX-001.md`.
 - What's built vs. planned: `docs/roadmap/ROADMAP.md`,
   `docs/PROJECT-STATUS.md`.
