@@ -191,7 +191,12 @@ function el(tag, props, ...children) {
   for (const [key, value] of Object.entries(props)) {
     if (value == null || value === false) continue;
     if (key === "className") node.className = value;
-    else if (key === "onClick") node.addEventListener("click", value);
+    else if (key.startsWith("on") && key.length > 2 && typeof value === "function") {
+      // Generic DOM event wiring -- onClick, onMouseEnter, onFocus, etc. --
+      // so a new interaction (e.g. a chart segment's hover tooltip) doesn't
+      // need a bespoke branch here every time one is needed.
+      node.addEventListener(key.slice(2).toLowerCase(), value);
+    }
     else if (key === "disabled") node.disabled = true;
     else if (key === "type") node.type = value;
     else if (key === "placeholder") node.placeholder = value;
@@ -210,6 +215,31 @@ function el(tag, props, ...children) {
 // ---- root -------------------------------------------------------------
 
 const app = document.getElementById("app");
+
+// A single shared hover/focus tooltip for chart segments (e.g. the
+// Dashboard's storage-breakdown bar) -- appended to <body>, a sibling of
+// #app, so it survives `render()`'s wholesale rebuild of #app's children
+// instead of needing to be recreated (and re-shown) on every state change.
+// Positioned and shown/hidden imperatively, the same "bypass render() for
+// something that shouldn't trigger a full rebuild" precedent `pathInput`
+// already established for keystroke input.
+const chartTooltip = el("div", { className: "chart-tooltip" });
+document.body.appendChild(chartTooltip);
+
+function showChartTooltip(target, primaryText, secondaryText) {
+  chartTooltip.replaceChildren(
+    el("div", { className: "chart-tooltip-value" }, primaryText),
+    el("div", { className: "chart-tooltip-label" }, secondaryText),
+  );
+  const rect = target.getBoundingClientRect();
+  chartTooltip.style.left = `${rect.left + rect.width / 2}px`;
+  chartTooltip.style.top = `${rect.top}px`;
+  chartTooltip.classList.add("visible");
+}
+
+function hideChartTooltip() {
+  chartTooltip.classList.remove("visible");
+}
 
 function render() {
   document.documentElement.setAttribute("data-theme", state.theme);
@@ -337,7 +367,17 @@ function dashboardView() {
       el(
         "div",
         { className: "breakdown-bar", style: "margin-top:14px" },
-        ...breakdown.map((b) => el("div", { style: `width:${b.pct}%;background:${b.color}` })),
+        ...breakdown.map((b) =>
+          el("button", {
+            className: "breakdown-segment",
+            style: `width:${b.pct}%;background:${b.color}`,
+            "aria-label": `${b.label}, ${bytesHuman(b.bytes)}, ${b.pct} percent`,
+            onMouseEnter: (e) => showChartTooltip(e.currentTarget, bytesHuman(b.bytes), `${b.label} · ${b.pct}%`),
+            onFocus: (e) => showChartTooltip(e.currentTarget, bytesHuman(b.bytes), `${b.label} · ${b.pct}%`),
+            onMouseLeave: hideChartTooltip,
+            onBlur: hideChartTooltip,
+          }),
+        ),
       ),
       el(
         "div",
@@ -348,7 +388,7 @@ function dashboardView() {
                 "div",
                 { className: "breakdown-legend-item" },
                 el("div", { className: "legend-dot", style: `background:${b.color}` }),
-                `${b.label} ${b.pct}%`,
+                `${b.label} · ${bytesHuman(b.bytes)} (${b.pct}%)`,
               ),
             )
           : [el("div", { className: "breakdown-legend-item" }, "No duplicate files yet.")]),
@@ -374,6 +414,7 @@ function storageBreakdown() {
     .sort((a, b) => b[1] - a[1])
     .map(([cat, bytes]) => ({
       label: labels[cat] || "Other",
+      bytes,
       pct: Math.round((bytes / total) * 100),
       color: KIND_COLOR[cat] || KIND_COLOR.other,
     }));

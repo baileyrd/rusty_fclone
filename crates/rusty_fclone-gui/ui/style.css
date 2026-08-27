@@ -436,10 +436,32 @@ button {
 
 .breakdown-bar {
   display: flex;
+  gap: 2px;
   height: 10px;
-  border-radius: 99px;
-  overflow: hidden;
   background: var(--surface2);
+  border-radius: 5px;
+}
+/* Each segment is a real <button> -- native tab focus and keyboard
+   activation for free, so the hover tooltip (dataviz skill: "same details
+   on keyboard focus as on hover") works without any bespoke ARIA. */
+.breakdown-segment {
+  border: none;
+  padding: 0;
+  min-width: 4px;
+  cursor: default;
+  font: inherit;
+}
+.breakdown-segment:first-child {
+  border-top-left-radius: 5px;
+  border-bottom-left-radius: 5px;
+}
+.breakdown-segment:last-child {
+  border-top-right-radius: 5px;
+  border-bottom-right-radius: 5px;
+}
+.breakdown-segment:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 2px;
 }
 .breakdown-legend {
   display: flex;
@@ -459,6 +481,36 @@ button {
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
+}
+
+/* Shared hover/focus tooltip for chart segments (see app.js's
+   `showChartTooltip`) -- one instance, positioned per-target, never part
+   of the render() tree it floats above. */
+.chart-tooltip {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, calc(-100% - 8px));
+  transition: opacity 0.1s ease;
+  background: var(--surface2);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+.chart-tooltip.visible {
+  opacity: 1;
+}
+.chart-tooltip-value {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.chart-tooltip-label {
+  color: var(--text-secondary);
+  margin-top: 2px;
 }
 
 .card-header-row {
