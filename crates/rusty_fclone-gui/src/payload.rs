@@ -456,6 +456,22 @@ impl From<&SimilarGroup> for SimilarGroupPayload {
     }
 }
 
+/// One real subdirectory entry, for the Scan Setup "Browse…" folder picker
+/// and the Duplicate Review file-system panel (`GUI-FS-BROWSE`). A real,
+/// on-demand directory read (`commands::list_directory`) rather than the
+/// design handoff's static mocked tree — its own README flags that mock as
+/// a forward-looking affordance needing a real decision (`docs/decisions/
+/// ADR-0022`'s "no fabricated capability" precedent settles it the same
+/// way here). `has_children` lets the frontend draw an expand chevron
+/// without a second round-trip for every leaf directory.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirEntryPayload {
+    pub name: String,
+    pub path: String,
+    pub has_children: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

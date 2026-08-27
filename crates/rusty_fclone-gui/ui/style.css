@@ -95,6 +95,23 @@ button {
   flex-direction: column;
   justify-content: space-between;
   padding: 18px 12px;
+  transition: width 0.15s;
+}
+
+/* A 64px icon-only rail (GUI-REVIEW-PANELS) -- frees width for Duplicate
+   Review's three side-by-side panels. Every row inside centers its icon
+   instead of left-aligning label text that no longer renders. */
+.sidebar.collapsed {
+  width: 64px;
+  padding: 18px 10px;
+}
+.sidebar.collapsed .brand,
+.sidebar.collapsed .nav-item,
+.sidebar.collapsed .theme-toggle,
+.sidebar.collapsed .sidebar-collapse-btn {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 .brand {
@@ -204,6 +221,26 @@ button {
   font-weight: 800;
   color: var(--success);
   margin-top: 4px;
+}
+
+.sidebar-collapse-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  font: inherit;
+  width: 100%;
+  text-align: left;
+  margin-top: 8px;
+}
+.sidebar-collapse-btn span {
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .content {
@@ -637,36 +674,162 @@ button {
   opacity: 0.4;
 }
 
-.review-layout {
+/* Three independently-collapsible panels (GUI-REVIEW-PANELS): a real
+   file-system tree (panel 1), a nested duplicate-group tree grouped by
+   real path hierarchy (panel 2), and the compare/action panel (panel 3,
+   `.review-main-panel`). Replaces the single flat `.group-list`. */
+.review-3col {
   display: flex;
-  gap: 20px;
+  gap: 14px;
   flex: 1;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   min-height: 0;
 }
-.group-list {
-  width: 210px;
-  flex-shrink: 0;
+
+.fs-panel,
+.dup-tree-panel {
+  flex: 1 1 220px;
+  min-width: 220px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: 12px;
-  padding: 8px;
+  padding: 10px;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
-.group-row {
+.fs-panel.collapsed,
+.dup-tree-panel.collapsed {
+  flex: 0 0 34px;
+  min-width: 34px;
+  padding: 10px 4px;
+  overflow: hidden;
+  align-items: center;
+}
+
+.panel-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 0 8px;
+}
+.panel-toggle-btn {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 8px;
-  border-radius: 9px;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
   cursor: pointer;
-  margin-bottom: 2px;
-  border: 1px solid transparent;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
   background: transparent;
+  border: none;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.tree-chevron {
+  width: 9px;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  text-align: center;
+}
+.tree-row-label {
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.fs-row.active {
+  background: var(--accent-tint);
+  border-color: var(--accent);
+}
+.fs-row.tier-direct .tree-row-label,
+.fs-row.tier-direct svg {
+  color: var(--accent);
+  font-weight: 700;
+}
+.fs-row.tier-ancestor .tree-row-label {
+  color: var(--text-primary);
+}
+.fs-row.tier-none .tree-row-label,
+.fs-row.tier-none svg {
+  color: var(--text-tertiary);
+}
+.fs-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-tint);
+  padding: 1px 6px;
+  border-radius: 99px;
+  flex-shrink: 0;
+}
+
+.dup-folder-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+}
+.dup-filter-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 10px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.review-main-panel {
+  flex: 2 1 480px;
+  min-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.breadcrumb svg {
+  flex-shrink: 0;
+}
+
+.group-row {
   width: 100%;
   text-align: left;
   font: inherit;
   color: inherit;
+  background: transparent;
 }
 .group-row.active {
   background: var(--accent-tint);
@@ -699,6 +862,7 @@ button {
   flex-direction: column;
   gap: 14px;
   min-width: 0;
+  min-height: 0;
 }
 .compare-row {
   flex: 1;
@@ -908,4 +1072,36 @@ button {
 }
 .empty-state svg {
   color: var(--text-tertiary);
+}
+
+/* ---- browse modal (GUI-FS-BROWSE) ---- */
+
+.modal-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 10;
+}
+.modal-card {
+  width: 420px;
+  max-height: min(460px, 100%);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+.browse-tree {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 8px;
+  min-height: 120px;
 }
