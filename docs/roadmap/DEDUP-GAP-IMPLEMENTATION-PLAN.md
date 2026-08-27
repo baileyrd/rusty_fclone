@@ -7,13 +7,15 @@ codebase and `docs/` on 2026-08-26 (main at `078320c`). Every "current state"
 claim below is grounded in a specific file/module, not assumed from the
 playbook's category list.
 
-**Status of this document:** a proposal, not a commitment. Nothing here is
-added to `docs/roadmap/ROADMAP.md` yet — that file is what `WORKFLOW.md`'s
-`next` step reads to auto-select the next unit to implement, so it should
-only contain units the project owner has actually greenlit. Once specific
-phases/units below are approved, fold the chosen rows into `ROADMAP.md` (same
-table shape, reused directly from this doc) and this plan can be trimmed to a
-changelog note or removed.
+**Status of this document:** originally a proposal, not a commitment — that
+status is now closed out. Every unit across all three phases below was
+approved, implemented, tested, and merged to `main`, and every row has its
+own `Done` entry in `docs/roadmap/ROADMAP.md` (same table shape, reused
+directly from this doc, per the instruction this paragraph used to give).
+Kept here in full, rather than trimmed to a changelog note, as the research
+record (the competitive analysis and rationale behind each unit) that
+`ROADMAP.md`'s terser per-unit rows don't carry. See `docs/PROJECT-STATUS.md`
+for the current state of the repo overall.
 
 ---
 
