@@ -1,14 +1,16 @@
 # Project Status
-- Last verified main commit: `616285e` — merged `DETECTION-PERCEPTUAL-
-  IMAGES` (PR #45), Phase 3's third and final unit of `docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md` — completing the plan's three
-  phases. This branch (`dashboard-chart-upgrade`) implements the one
-  item the plan left explicitly deferred rather than done as its own
-  Phase 3 unit: the "Visual chart confirmation/upgrade" line item,
-  called out in the plan itself as small/cheap enough to fold into
-  whichever future unit next touches the Dashboard. The user asked for
-  it directly after `DETECTION-PERCEPTUAL-IMAGES` merged; once this
-  merges, every item `DEDUP-GAP-IMPLEMENTATION-PLAN.md` lists is done.
+- Last verified main commit: `4e34dae` — merged `DASHBOARD-CHART-UPGRADE`
+  (PR #46), the last remaining item of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. **The plan is now fully implemented
+  in its entirety** — all three phases, every listed unit. This branch
+  (`gui-scan-layout-fix`) is a follow-up, not a plan item: the user asked
+  to see a real screenshot tour of the GUI, which meant installing
+  `xdotool` in this environment (not present all session) and actually
+  driving the compiled binary under Xvfb for the first time since
+  `FOLDER-ACTION`. That pass found and fixed a real, previously-
+  undiscovered layout bug on Scan Setup (see the Completed entry below)
+  and re-verified several units' GUI surfaces that had only ever had
+  IPC-level coverage.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -18,9 +20,9 @@
   environment); everything merged since `v0.1.0` will be tagged once that
   happens.
 - Verified at: 2026-08-27
-- Current milestone: `DASHBOARD-CHART-UPGRADE` (the last remaining item
-  of `DEDUP-GAP-IMPLEMENTATION-PLAN.md`) — implemented, validated, not
-  yet merged. See `docs/roadmap/ROADMAP.md`.
+- Current milestone: a Scan Setup layout bug fix + a real Xvfb/`xdotool`
+  GUI verification pass (not a `DEDUP-GAP-IMPLEMENTATION-PLAN.md` item —
+  that plan is fully done) — implemented, validated, not yet merged.
 - Health: green — workspace (three crates) builds, lints, and tests clean
   on the pinned toolchain
 
@@ -718,13 +720,60 @@
   silently ignored. Pure `app.js`/`style.css` change — no Rust code
   touched, so `cargo fmt`/`clippy -D warnings`/`test`/`bench --no-run`/
   `doc` were re-run and confirmed unaffected (221/221 tests, unchanged
-  count). Not yet manually verified through a rendered window in this
-  environment (no display/`xdotool`) — the same standing gap every
-  GUI-facing unit this session has carried.
+  count). **Update (2026-08-27, post-merge):** manually verified through
+  a rendered window after all — `xdotool` was installed in this
+  environment specifically for a follow-up screenshot pass (see the
+  `GUI-SCAN-LAYOUT-FIX` entry below); the chart's gaps, rounded ends,
+  byte-value legend, and hover tooltip all confirmed correct against
+  real scan data.
+
+- `GUI-SCAN-LAYOUT-FIX`: not a `DEDUP-GAP-IMPLEMENTATION-PLAN.md` item —
+  that plan is fully done as of `DASHBOARD-CHART-UPGRADE` above — but a
+  real bug found and fixed while giving the user a real screenshot tour
+  of the GUI. `xdotool` (absent all session — every prior GUI unit's
+  "not yet manually verified" note was because of this) was installed
+  in this environment via `apt-get`, unlocking the first actual Xvfb +
+  `xdotool` interactive pass since `FOLDER-ACTION`. That pass surfaced a
+  real, previously-undiscovered layout bug on Scan Setup:
+  `.scan-layout`'s `flex: 1; min-height: 0` — correct when it was
+  `GUI-REDESIGN`'s (0.2.0) last element on the screen, stale once
+  `DETECTION-SCAN-FILTERS`/`ACTION-REFERENCE-FOLDERS`/`SCAN-PROFILES`
+  each appended another card after it without revisiting that sizing
+  rule — caused the side column's now-taller content (three cards'
+  worth) to overflow its flex-allocated height and visually spill onto
+  the cards below it, invisible until someone actually rendered the
+  fully-evolved screen (nobody had, since every unit that touched it
+  after `GUI-REDESIGN` individually documented "not yet manually
+  verified" rather than compounding into a real check). Fixed by
+  removing `flex: 1; min-height: 0` from `.scan-layout`, letting it (and
+  every card after it) size to natural content height, with `.content`'s
+  existing `overflow-y: auto` handling the now-taller page — confirmed
+  fixed via a real screenshot (every card in its own space, full scroll
+  to the "Start Scan" footer, no overlap). `GUI-UX-001` 0.4.0 → 0.4.1.
+  No ADR — bug fix, not new behavior. That same pass also re-verified,
+  for the first time through a rendered window, several units whose GUI
+  surfaces previously had only IPC-level coverage: `SCAN-PROFILES`'s
+  "Saved scan profiles" card renders correctly (save/load/delete
+  interaction itself not exercised); `GUI-MEDIA-PREVIEW`'s photo
+  thumbnail renders a real decoded image (audio path not exercised, no
+  audio file in the demo tree); `DETECTION-PERCEPTUAL-IMAGES`'s
+  "Similar content" toggle, scan, and read-only similar-images card all
+  work end-to-end against a real near-duplicate image pair, correctly
+  shown separately from an exact-duplicate pair in the same review list.
+  Light theme confirmed correct on Scan Setup; the Dashboard's content
+  region specifically didn't repaint on the theme toggle itself in this
+  sandboxed environment (only after a subsequent navigation) — traced to
+  this environment's software GL fallback under bare Xvfb (an EGL
+  warning on launch confirms no accelerated rendering), not an app bug,
+  since `render()` fully replaces the relevant DOM subtree on every
+  state change, which any standards-compliant engine repaints
+  deterministically. Pure `app.js`/`style.css` change (the CSS fix) —
+  221/221 workspace tests unaffected, confirmed via `cargo fmt`/
+  `clippy -D warnings`/`test`/`bench --no-run`/`doc`.
 
 ## In progress
-- None — `DASHBOARD-CHART-UPGRADE` above is implemented and validated
-  on branch `dashboard-chart-upgrade`, not yet merged.
+- None — `GUI-SCAN-LAYOUT-FIX` above is implemented and validated on
+  branch `gui-scan-layout-fix`, not yet merged.
 
 ## Blocked
 - None.
@@ -753,6 +802,33 @@
   history" blocked on above.
 
 ## Validation
+- `GUI-SCAN-LAYOUT-FIX` verification (2026-08-27): a real Xvfb + `xdotool`
+  pass (`xdotool` newly installed via `apt-get` in this environment) —
+  built the GUI binary, generated a real demo tree (`image` crate: an
+  exact-duplicate JPEG pair, a separate near-duplicate PNG pair with a
+  uniform +6 brightness shift, an exact-duplicate text-file pair, and a
+  unique file), launched it under Xvfb, and drove it with `xdotool`
+  through Dashboard → Scan Setup (confirmed the `.scan-layout` fix: every
+  card renders in its own space, no overlap, full scroll to the footer)
+  → a real scan with "Similar content" enabled → Duplicate Review (4
+  items: 2 exact-duplicate entries, 2 similar-images entries — the
+  near-duplicate pair correctly clustered by `find_similar_images`, and
+  the exact-duplicate image pair correctly *also* appearing as a
+  trivially-distance-0 similar match, since the perceptual pass runs
+  blind to exact results by design) → clicked into a similar-images
+  entry (read-only warning-banner card, both thumbnails resolved via
+  `read_preview`, no action bar) → Dashboard again (real populated
+  stats, the upgraded storage-breakdown chart's gaps/legend/hover
+  tooltip all confirmed via screenshot) → Rules screen → light-theme
+  toggle (correct on Scan Setup; Dashboard's content region needed a
+  subsequent navigation to repaint in this sandboxed environment — see
+  the `GUI-SCAN-LAYOUT-FIX` Completed entry above for why this isn't
+  treated as an app bug). `cargo fmt --all --check`, `cargo test
+  --workspace` (221/221, unchanged — pure CSS fix), `cargo clippy
+  --workspace --all-targets --all-features -- -D warnings`, `cargo bench
+  --workspace --no-run`, and `cargo doc --workspace --all-features
+  --no-deps` all re-confirmed clean. Screenshots sent to the user;
+  scratch demo-generator project and generated files removed afterward.
 - `cargo fmt --all --check`: pass (2026-08-27)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-27)
 - `cargo test --workspace`: pass, 221/221 (2026-08-27)
@@ -962,20 +1038,21 @@
 - The GUI's "Similar content" wiring (the enabled seg-option,
   `similarReviewMain`, the extended `reviewItems`/`groupListRow`
   dispatch) has IPC-level test coverage for the underlying
-  `find_similar_images` command, but no Xvfb/`xdotool` end-to-end pass
-  confirmed selecting it, the resulting cards rendering correctly with
-  the "not confirmed identical" banner, or thumbnails resolving — same
-  standing gap every GUI surface this session has carried. No
+  `find_similar_images` command, and was confirmed end-to-end through a
+  real rendered window in `GUI-SCAN-LAYOUT-FIX`'s Xvfb + `xdotool` pass
+  (2026-08-27) — selecting it, running a real scan, and the resulting
+  card (banner, thumbnails, no action bar) all worked as designed. No
   similarity-threshold control is exposed in the GUI yet (always the
   10/64 default); the CLI's `--similarity-threshold` is the only tunable
   surface today.
-- `SCAN-PROFILES`'s "Saved scan profiles" card (save/list/load/delete) has
-  hermetic unit-test coverage for the underlying storage logic and
-  IPC-level coverage for `save_scan_profile`'s name validation, but no
-  Xvfb/`xdotool` end-to-end pass confirmed saving, listing, loading, or
-  deleting a profile actually works through the rendered UI — `xdotool`
-  isn't installed in this environment, same standing gap as every other
-  GUI surface this session. Separately, `profiles::default_profiles_dir()`
+- `SCAN-PROFILES`'s "Saved scan profiles" card was confirmed rendering
+  correctly (name field, save button, empty-state text) in
+  `GUI-SCAN-LAYOUT-FIX`'s Xvfb + `xdotool` pass (2026-08-27) — but that
+  pass didn't actually save, load, or delete a profile through the
+  rendered UI, so that specific interaction remains unverified
+  end-to-end (hermetic unit-test coverage for the underlying storage
+  logic and IPC-level coverage for `save_scan_profile`'s name validation
+  still stand in for it). Separately, `profiles::default_profiles_dir()`
   (the real OS-config-directory lookup, via the `dirs` crate) has no
   automated test by design — exercising it for real would write into the
   host machine's actual config directory rather than a hermetic tempdir —
@@ -985,14 +1062,13 @@
   resolution instead of a destructive filesystem operation.
 - `GUI-MEDIA-PREVIEW`'s rendered behavior (thumbnail/audio-player display
   in Duplicate Review's compare-cards) has IPC-level test coverage for
-  `read_preview` and payload conversion, but no Xvfb/`xdotool` end-to-end
-  pass confirmed the `<img>`/`<audio controls>` elements actually appear,
-  size correctly inside the 56x56 thumbnail slot, and play audio through
-  the rendered UI — `xdotool` isn't installed in this environment, same
-  standing gap as every prior GUI surface this session. The hand-rolled
-  base64 encoder is additionally verified via RFC 4648 test vectors and a
-  real-file round trip (see Validation above), so the residual risk here
-  is UI wiring/rendering specifically, not the encoding logic.
+  `read_preview` and payload conversion, and the photo/`<img>` path was
+  confirmed rendering a real decoded image through the rendered UI in
+  `GUI-SCAN-LAYOUT-FIX`'s Xvfb + `xdotool` pass (2026-08-27) — the audio/
+  `<audio controls>` path specifically wasn't exercised in that pass (no
+  audio file in the demo tree), so it remains unverified end-to-end. The
+  hand-rolled base64 encoder is additionally verified via RFC 4648 test
+  vectors and a real-file round trip (see Validation above).
 - `CLI-HISTORY-AUDIT`'s `history` keyword reservation means a real
   directory literally named `history` at a scan root now needs
   `rusty-fclone ./history` (or an absolute path) to disambiguate from the

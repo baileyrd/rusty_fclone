@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.4.0
+- Version: 0.4.1
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -595,7 +595,11 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   the unit-test suite against a real 69-byte PNG file, round-tripped
   byte-for-byte through a real base64 decoder. `app.js`'s `ensurePreview`/
   card-rendering changes have no automated coverage (same standing gap as
-  the rest of `app.js`) and no manual Xvfb/`xdotool` pass this session.
+  the rest of `app.js`); manually confirmed via a real Xvfb + `xdotool`
+  pass (0.4.1): a photo-category preview rendered correctly inside a
+  similar-images card's thumbnail slot against a real decoded image —
+  the audio-category path (`<audio controls>`) wasn't exercised in that
+  pass (the demo tree had no audio files).
 - FR-027 (saved scan profiles) is exercised by `profiles::tests::*` (7
   tests, hermetic against a tempdir: empty-list-when-missing, insert,
   overwrite-by-name, preserving other profiles, remove, no-op remove of an
@@ -610,24 +614,44 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   `PROJECT-STATUS.md`'s Validation entry). `app.js`'s profile card
   (`profilesCard`/`loadScanProfiles`/`saveScanProfile`/`applyScanProfile`/
   `deleteScanProfile`) has no automated coverage (same standing gap as the
-  rest of `app.js`) and no manual Xvfb/`xdotool` pass this session.
+  rest of `app.js`); manually confirmed rendering correctly via a real
+  Xvfb + `xdotool` pass (0.4.1) — the name field, "Save current setup"
+  button, and empty-state text all appeared as designed. Actually saving,
+  loading, or deleting a profile through the rendered UI wasn't exercised
+  in that pass (no profile was saved during it), so that interaction path
+  specifically remains unverified end-to-end.
 - FR-028 ("Similar content" wiring) is exercised by
   `commands::tests::find_similar_images_groups_a_real_near_identical_pair`
   and `find_similar_images_rejects_a_nonexistent_root` (IPC-level, real
   synthetic image files), plus `payload::tests::similar_group_converts_with_camel_case_fields`
   and the underlying `rusty_fclone_core::perceptual` unit tests
-  (`FCLONE-DETECTION-001` FR-015 through FR-017). `app.js`'s enabled
-  "Similar content" toggle, `similarReviewMain`, and the extended
-  `reviewItems()`/`groupListRow` dispatch have no automated coverage
-  (same standing gap as the rest of `app.js`) and no manual Xvfb/
-  `xdotool` pass this session.
+  (`FCLONE-DETECTION-001` FR-015 through FR-017). Manually confirmed
+  end-to-end via a real Xvfb + `xdotool` pass (0.4.1): selecting
+  "Similar content" on Scan Setup, running a real scan against a demo
+  tree with an exact-duplicate image pair and a separate near-duplicate
+  (perceptually similar, not byte-identical) pair, and confirming
+  Duplicate Review listed the near-duplicate pair as its own,
+  separately-labeled "similar" entry — distinct from the exact-duplicate
+  entries — rendering the "Similar images -- not confirmed identical"
+  banner, both thumbnails, and only a "Skip" button (no action bar), per
+  FR-029's `similarReviewMain`.
 - FR-029 (storage-breakdown chart upgrade) is a pure `app.js`/`style.css`
   change with no Rust surface, so it has no automated coverage (same
-  standing gap as the rest of `app.js`) and no manual Xvfb/`xdotool` pass
-  this session. The underlying categorical palette (`KIND_COLOR`) was
-  run through the `dataviz` skill's palette validator against both
-  theme surfaces as part of this change — see this requirement's Open
-  questions entry for what it found and how the chart mitigates it.
+  standing gap as the rest of `app.js`). Manually confirmed via a real
+  Xvfb + `xdotool` pass (0.4.1) against a real scan's data: segments
+  rendered with a visible gap and rounded outer ends, the legend showed
+  exact byte totals alongside percentages, and hovering a segment showed
+  the tooltip with the value leading and the category/percentage
+  secondary, exactly as designed. Keyboard-focus parity specifically
+  wasn't confirmed in that pass — this sandboxed environment's bare
+  Xvfb display has no window manager to manage input focus, a tooling
+  limitation of the test environment, not a signal about the app; the
+  same DOM event wiring (`onFocus`/`onBlur`, identical to
+  `onMouseEnter`/`onMouseLeave`) backs both paths. The underlying
+  categorical palette (`KIND_COLOR`) was run through the `dataviz`
+  skill's palette validator against both theme surfaces as part of this
+  change — see this requirement's Open questions entry for what it
+  found and how the chart mitigates it.
 
 ## Verification plan
 
@@ -663,6 +687,41 @@ switch the keep-choice, and confirmed the resulting delete removed
 drives which folder is passed to `run_folder_action`, not just its
 displayed label. Both cases confirmed via `find`/`ls` before and after,
 not just the UI's own success message.
+
+A second manual Xvfb + `xdotool` pass (0.4.1, 2026-08-27) — the first
+since `FOLDER-ACTION`'s, and the first with `xdotool` actually installed
+in this environment (added specifically for this pass) — drove the
+compiled binary against a real demo tree (an exact-duplicate image pair,
+a separate near-duplicate/perceptually-similar image pair, an
+exact-duplicate text-file pair, and a unique file) through Dashboard
+(empty state) → Scan Setup (confirmed the "Saved scan profiles" card,
+`SCAN-PROFILES`, renders correctly; selected "Similar content",
+`DETECTION-PERCEPTUAL-IMAGES`) → a real scan → Duplicate Review (4 items:
+2 exact-duplicate entries plus 2 similar-images entries — the same
+image pair correctly appearing as both an exact match and, independently,
+a trivially-distance-0 similar match, since the perceptual pass runs
+blind to exact results by design; clicked into a similar-images entry
+and confirmed the read-only warning-banner card, both thumbnails
+resolving via `read_preview`/`GUI-MEDIA-PREVIEW`, and no action bar) →
+Dashboard again (real populated stats and the upgraded storage-breakdown
+chart, `DASHBOARD-CHART-UPGRADE`: gaps between segments, byte values in
+the legend, and a working hover tooltip confirmed via screenshot) →
+Rules screen → light-theme toggle (confirmed correct on Scan Setup;
+Dashboard's content region specifically didn't repaint on the toggle
+itself in this sandboxed environment, only after a subsequent
+navigation — traced to this environment's software GL fallback under
+bare Xvfb, since `render()` fully replaces the DOM subtree on every
+state change, which any standards-compliant engine repaints
+deterministically; not treated as an app-level bug). This pass also
+found and fixed a real, previously-undiscovered layout bug (see 0.4.1's
+Change history entry): `.scan-layout`'s `flex: 1` — correct when it was
+`GUI-REDESIGN`'s last element on the screen, stale once
+`DETECTION-SCAN-FILTERS`/`ACTION-REFERENCE-FOLDERS`/`SCAN-PROFILES`
+appended more cards after it without revisiting the rule — caused the
+side column's cards to overflow their allotted height and visually spill
+onto the cards below; nobody had actually rendered the fully-evolved
+Scan Setup screen until this pass, since every unit that touched it
+since `GUI-REDESIGN` documented "not yet manually verified" individually.
 
 No automated frontend/DOM test suite exists (no JS test runner is part of
 this project's dependency set) — frontend logic (`app.js`) is covered by
@@ -759,6 +818,31 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.4.1 (2026-08-27): Fixed a real Scan Setup layout bug, found via this
+  project's first actual Xvfb + `xdotool` interactive pass this session
+  (`xdotool` was installed specifically to take a full screenshot tour of
+  the app — every prior GUI unit this session had only IPC-level tests
+  and no rendered-UI verification). `.scan-layout` (the "Folder to scan"
+  + "Match sensitivity"/"Show in review"/"Scan options" row) had
+  `flex: 1; min-height: 0`, sized to fill 100% of `.view`'s remaining
+  height — correct when it was the screen's last element (`GUI-REDESIGN`,
+  0.2.0), but every unit since (`DETECTION-SCAN-FILTERS`'s "Include/
+  exclude filters" card, `ACTION-REFERENCE-FOLDERS`'s "Protected
+  folders" card, `SCAN-PROFILES`'s "Saved scan profiles" card) appended
+  more cards *after* it without revisiting that sizing rule. The result,
+  never caught because no unit since `GUI-REDESIGN` had an actual
+  rendered-UI pass: `.scan-side`'s three cards (now taller, from later
+  additions) overflowed their flex-allocated box height and visually
+  spilled onto/behind the cards below, since `.scan-layout` had no
+  `overflow: hidden` to clip it and `.content`'s own `overflow-y: auto`
+  never got a chance to help (the sibling cards' box positions were
+  already fixed by `.scan-layout`'s own — too-small — flex height).
+  Fix: removed `flex: 1; min-height: 0` from `.scan-layout`, letting it
+  (and every card after it) size to natural content height, with
+  `.content`'s existing scroll handling the now-taller page. Confirmed
+  fixed via a real screenshot: every card renders in its own space, no
+  overlap, full scroll to the "Start Scan" footer. No requirement
+  changed — this is a bug fix, not new behavior.
 - 0.4.0 (2026-08-27): Upgraded the Dashboard's "Storage breakdown" chart
   (FR-029, `DASHBOARD-CHART-UPGRADE`, the one remaining item from `docs/
   roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`, now fully implemented). The
