@@ -1,11 +1,13 @@
 # Project Status
-- Last verified main commit: `c331061` — merged `GUI-MEDIA-PREVIEW` (PR
-  #43), Phase 3's first unit of `docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch (`scan-profiles`)
-  implements that plan's Phase 3, second unit: `SCAN-PROFILES`. Unlike
-  Phase 1/2, Phase 3 units are each individually scoped/greenlit (per the
-  plan's own §5 rationale) rather than pre-approved as a batch; the user
-  asked for `SCAN-PROFILES` directly after `GUI-MEDIA-PREVIEW` merged.
+- Last verified main commit: `9127767` — merged `SCAN-PROFILES` (PR #44),
+  Phase 3's second unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch
+  (`detection-perceptual-images`) implements that plan's Phase 3, third
+  and final unit: `DETECTION-PERCEPTUAL-IMAGES` — completing Phase 3, and
+  the plan as a whole. Unlike Phase 1/2, Phase 3 units were each
+  individually scoped/greenlit (per the plan's own §5 rationale) rather
+  than pre-approved as a batch; the user asked for
+  `DETECTION-PERCEPTUAL-IMAGES` directly after `SCAN-PROFILES` merged.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -15,9 +17,9 @@
   environment); everything merged since `v0.1.0` will be tagged once that
   happens.
 - Verified at: 2026-08-27
-- Current milestone: `SCAN-PROFILES` (Phase 3 of
-  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, second unit) — implemented,
-  validated, not yet merged. See `docs/roadmap/ROADMAP.md`.
+- Current milestone: `DETECTION-PERCEPTUAL-IMAGES` (Phase 3 of
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, third and final unit) —
+  implemented, validated, not yet merged. See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace (three crates) builds, lints, and tests clean
   on the pinned toolchain
 
@@ -611,22 +613,74 @@
   `xdotool`) — the same standing gap every GUI-facing unit this session
   has carried.
 
+- `DETECTION-PERCEPTUAL-IMAGES`: third and final unit of `DEDUP-GAP-
+  IMPLEMENTATION-PLAN.md`'s Phase 3, completing the plan. Opt-in
+  perceptual image similarity, reversing `SYSTEM-ARCHITECTURE.md`'s
+  "near-duplicate/fuzzy matching" v1 non-goal for images specifically.
+  New `rusty_fclone_core::perceptual` module and public
+  `find_similar_images(root, scan_options, perceptual_options)` — a
+  fully self-contained, deliberately separate pass from `scan()` (its
+  own traversal, no dependency on any prior scan's `DuplicateGroup`s,
+  since perceptually similar images are by definition not byte-identical
+  and would never share one). Decodes each image via the `image` crate,
+  restricted to pure-Rust codecs only (`default-features = false,
+  features = ["jpeg", "png", "gif", "bmp"]` — verified in a scratch
+  project to pull in zero C-linked/`-sys` dependencies, satisfying
+  `AGENTS.md`'s no-C-toolchain rule the same way ADR-0024's `trash`
+  precedent did), computes a hand-rolled 64-bit difference hash (dHash —
+  small, fully-specified, RFC-free but well-documented transform, same
+  "hand-roll a simple algorithm, depend on genuinely complex format
+  decoding" split ADR-0028 already drew for base64 vs. image formats),
+  and clusters images within a configurable Hamming-distance threshold
+  (default 10/64) via union-find. `SimilarGroup` shares no fields or
+  type with `DuplicateGroup` — the plan's "must stay opt-in and clearly
+  separated from the hash-verified exact engine" requirement is enforced
+  structurally, not just documented. No `--action`/`--apply`/`run_action`
+  interaction anywhere: a similarity judgment is explicitly not this
+  project's byte-identical guarantee, so building a destructive action on
+  top of it would be a materially different safety posture, not a detail
+  to bolt on later. `FCLONE-DETECTION-001` 0.2.1 → 0.3.0 (FR-015 through
+  FR-017, NFR-008). CLI gained `--find-similar-images`/
+  `--similarity-threshold <0-64>`, `CLI-UX-001` 0.3.5 → 0.3.6 (FR-019/
+  FR-020) — entirely independent of `--action`/`--apply`/`--history`.
+  GUI's previously-disabled "Similar content" match-sensitivity option
+  (shipped disabled in `GUI-REDESIGN`, ADR-0022, with exactly this
+  feature in mind) is now real, `GUI-UX-001` 0.3.8 → 0.3.9 (FR-028):
+  selecting it runs the pass *alongside*, not instead of, the exact scan
+  — a deliberate deviation from the mockup's either/or segmented-control
+  framing, recorded the same way ADR-0022 already recorded several
+  others — and Duplicate Review shows each result as its own,
+  `var(--warning)`-tinted, read-only card ("not confirmed identical"),
+  no keep-choice, no action bar beyond "Skip." ADR-0030. Implemented,
+  tested (221/221 workspace tests — 11 new `perceptual` module tests, 3
+  new CLI tests, 3 new GUI tests), `cargo fmt`/`clippy -D warnings`/
+  `bench --no-run`/`doc` all pass. Manually verified end-to-end in this
+  environment: real synthetic JPEG/PNG photos (a base image, a
+  brightness-shifted "re-export," and a resized thumbnail — genuinely
+  different byte content throughout) correctly clustered together via
+  the compiled CLI binary's `--find-similar-images` in both `--format
+  text` and `--format json`, while an unrelated photo was correctly
+  excluded, and the exact engine simultaneously reported zero
+  `DuplicateGroup`s for the same tree — concrete confirmation the two
+  engines' results stay genuinely disjoint, not just structurally
+  different in name (see Validation below). The GUI's new "Similar
+  content" option is not yet manually verified through a rendered window
+  in this environment (no display/`xdotool`) — the same standing gap
+  every GUI-facing unit this session has carried.
+
 ## In progress
-- None — `SCAN-PROFILES` above is implemented and validated on
-  branch `scan-profiles`, not yet merged.
+- None — `DETECTION-PERCEPTUAL-IMAGES` above is implemented and
+  validated on branch `detection-perceptual-images`, not yet merged.
 
 ## Blocked
 - None.
 
 ## Next
-- Phase 3 of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` (§4) has one
-  more listed bet not yet started: `DETECTION-PERCEPTUAL-IMAGES` (a new
-  opt-in similarity-matching mode, needs its own dependency justification
-  and ADR, the largest lift on the list). A Dashboard chart upgrade is
-  called out as small enough to fold into whichever unit next touches the
-  Dashboard rather than standing alone. Still needs its own explicit
-  go-ahead, same as `GUI-MEDIA-PREVIEW`/`SCAN-PROFILES` did — not a
-  pre-approved batch the way Phase 1/2 were.
+- `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` is now fully implemented
+  — all three phases, all units, done. Its only remaining listed item is
+  the small Dashboard chart upgrade, explicitly called out as cheap
+  enough to fold into whichever future unit next touches the Dashboard
+  rather than standing alone; nothing else from the plan is outstanding.
 - Follow-on units intentionally left open by earlier scoping decisions
   (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
   proper (full pipeline overlap, needs a `ScanEvent` finality-contract
@@ -648,9 +702,31 @@
 ## Validation
 - `cargo fmt --all --check`: pass (2026-08-27)
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-27)
-- `cargo test --workspace`: pass, 204/204 (2026-08-27)
+- `cargo test --workspace`: pass, 221/221 (2026-08-27)
 - `cargo bench --workspace --no-run`: pass (2026-08-27)
 - `cargo doc --workspace --all-features --no-deps`: pass (2026-08-27)
+- `DETECTION-PERCEPTUAL-IMAGES` verification (2026-08-27): `image` crate
+  scratch-verified in a throwaway project (`default-features = false,
+  features = ["jpeg", "png", "gif", "bmp"]`) to build with zero `-sys`/
+  C-linked dependencies before being adopted as a real dependency.
+  `perceptual::tests::*` (11 tests, `rusty_fclone-core`) cover the dHash
+  algorithm and union-find clustering directly plus `find_similar_images`
+  end-to-end against real files on disk. Manual smoke test against a real
+  filesystem in this environment: a small Rust program generated four
+  real image files via the `image` crate — `vacation_original.jpg`, a
+  brightness-shifted `vacation_reexported.jpg`, a resized
+  `vacation_thumbnail.png` (all genuinely different byte content), and
+  an unrelated `unrelated_photo.jpg` — and the compiled
+  `rusty-fclone --find-similar-images` correctly clustered the three
+  "vacation" variants together (`max distance 0/64`, correctly matching
+  despite the format/resolution changes) while excluding the unrelated
+  photo, in both `--format text` and `--format json`; the same run's
+  ordinary output simultaneously reported `0 duplicate groups` for the
+  same tree, concretely confirming the exact and perceptual engines'
+  results never overlap. `commands::tests::find_similar_images_groups_a_real_near_identical_pair`
+  (`rusty_fclone-gui`) re-confirms the same clustering behavior at the
+  GUI's IPC boundary. Scratch verification project and generated image
+  files were removed after the check.
 - `SCAN-PROFILES` verification (2026-08-27): no CLI surface exists for
   this unit (GUI-only), so covered by `profiles::tests::*`'s 7 hermetic
   tempdir-based tests (empty-when-missing, insert, overwrite-by-name,
@@ -768,6 +844,36 @@
   light-theme toggle. Every screen rendered correctly in both themes.
 
 ## Risks and decisions needed
+- `DETECTION-PERCEPTUAL-IMAGES`'s dHash is a similarity heuristic, not a
+  cryptographic or collision-resistant hash — this project's "zero false
+  positives" claim continues to apply exclusively to the exact,
+  hash-verified engine (`scan()`/`DuplicateGroup`) and was never extended
+  to `SimilarGroup`, deliberately (ADR-0030). The default 10/64
+  Hamming-distance threshold is a commonly-cited starting point, not
+  independently tuned against a labeled dataset of real "same photo,
+  different export" pairs versus true near-misses — worth revisiting if
+  real usage surfaces it as too loose or too strict.
+- `find_similar_images`'s clustering is pairwise (O(n²) Hamming-distance
+  comparisons across every decoded image in the tree) — a deliberate
+  simplicity-over-scale tradeoff for a first, opt-in version, not
+  benchmarked against a real large photo library. Revisit only if real
+  usage shows this is actually a bottleneck.
+- `find_similar_images` only decodes JPEG/PNG/GIF/BMP (the `image` crate
+  features enabled — chosen specifically to avoid any C-linked codec, per
+  `AGENTS.md`'s no-C-toolchain rule) — WebP, AVIF, HEIC, and TIFF images
+  are silently invisible to this pass (excluded by the extension filter,
+  never attempted), narrower than `GUI-MEDIA-PREVIEW`'s own preview
+  support.
+- The GUI's "Similar content" wiring (the enabled seg-option,
+  `similarReviewMain`, the extended `reviewItems`/`groupListRow`
+  dispatch) has IPC-level test coverage for the underlying
+  `find_similar_images` command, but no Xvfb/`xdotool` end-to-end pass
+  confirmed selecting it, the resulting cards rendering correctly with
+  the "not confirmed identical" banner, or thumbnails resolving — same
+  standing gap every GUI surface this session has carried. No
+  similarity-threshold control is exposed in the GUI yet (always the
+  10/64 default); the CLI's `--similarity-threshold` is the only tunable
+  surface today.
 - `SCAN-PROFILES`'s "Saved scan profiles" card (save/list/load/delete) has
   hermetic unit-test coverage for the underlying storage logic and
   IPC-level coverage for `save_scan_profile`'s name validation, but no

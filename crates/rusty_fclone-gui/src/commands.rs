@@ -14,6 +14,7 @@ use crate::payload::{
     normalize_path_input, normalize_path_list, parse_action_kind, parse_keep_rule,
     ActionResultPayload, ChooseKeepPayload, FolderActionResultPayload, FolderMatchPayload,
     GroupPayload, PreviewPayload, ScanEventPayload, ScanOptionsPayload, ScanProfilePayload,
+    SimilarGroupPayload,
 };
 use crate::preview;
 use crate::profiles;
@@ -239,6 +240,28 @@ pub fn delete_scan_profile(name: String) -> Result<Vec<ScanProfilePayload>, Stri
     profiles::remove(&dir, &name)
 }
 
+/// Finds visually-similar (not byte-identical) image clusters under `root`
+/// (`DETECTION-PERCEPTUAL-IMAGES`, ADR-0030) — a deliberately separate,
+/// opt-in pass from `start_scan`'s exact-duplicate results, run on demand
+/// rather than automatically for every scan. `max_hamming_distance`
+/// defaults to `PerceptualOptions::default()` (10/64) when omitted.
+#[tauri::command]
+pub fn find_similar_images(
+    root: String,
+    options: ScanOptionsPayload,
+    max_hamming_distance: Option<u32>,
+) -> Result<Vec<SimilarGroupPayload>, String> {
+    let root = PathBuf::from(normalize_path_input(&root));
+    let options = options.into();
+    let perceptual_options = rusty_fclone_core::PerceptualOptions {
+        max_hamming_distance: max_hamming_distance
+            .unwrap_or(rusty_fclone_core::PerceptualOptions::default().max_hamming_distance),
+    };
+    rusty_fclone_core::find_similar_images(&root, &options, &perceptual_options)
+        .map(|groups| groups.iter().map(Into::into).collect())
+        .map_err(|err| err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -260,7 +283,8 @@ mod tests {
                 super::read_preview,
                 super::list_scan_profiles,
                 super::save_scan_profile,
-                super::delete_scan_profile
+                super::delete_scan_profile,
+                super::find_similar_images
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");
@@ -835,6 +859,47 @@ mod tests {
         assert!(err.as_str().unwrap().contains("name"));
     }
 
+    /// `DETECTION-PERCEPTUAL-IMAGES`, ADR-0030: two near-identical (but not
+    /// byte-identical) real images are clustered by `find_similar_images`.
+    /// Mirrors `perceptual::tests::find_similar_images_groups_a_real_near_identical_pair_on_disk`
+    /// at the IPC boundary.
+    #[test]
+    fn find_similar_images_groups_a_real_near_identical_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let gradient = |offset: u8| {
+            image::ImageBuffer::from_fn(64, 64, |x, y| {
+                let v = ((x * 255 / 64) + (y * 255 / 64)) as u8;
+                image::Rgb([v.saturating_add(offset); 3])
+            })
+        };
+        image::DynamicImage::ImageRgb8(gradient(0))
+            .save(dir.path().join("a.png"))
+            .unwrap();
+        image::DynamicImage::ImageRgb8(gradient(5))
+            .save(dir.path().join("b.png"))
+            .unwrap();
+
+        let response = invoke(
+            "find_similar_images",
+            json!({ "root": dir.path().display().to_string(), "options": {} }),
+        )
+        .expect("find_similar_images should succeed");
+
+        let groups = response.as_array().expect("response should be an array");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["paths"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn find_similar_images_rejects_a_nonexistent_root() {
+        let err = invoke(
+            "find_similar_images",
+            json!({ "root": "/does/not/exist/at/all", "options": {} }),
+        )
+        .expect_err("a nonexistent root must be rejected");
+        assert!(err.as_str().unwrap().contains("does not exist"));
+    }
+
     #[test]
     fn save_scan_profile_rejects_a_whitespace_only_name() {
         let err = invoke(
@@ -919,7 +984,8 @@ mod tests {
                 super::read_preview,
                 super::list_scan_profiles,
                 super::save_scan_profile,
-                super::delete_scan_profile
+                super::delete_scan_profile,
+                super::find_similar_images
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");

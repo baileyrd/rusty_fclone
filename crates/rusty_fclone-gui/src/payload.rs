@@ -14,7 +14,7 @@ use rusty_fclone_core::action::{ActionKind, ActionPlan, ApplyReport, FileAction}
 use rusty_fclone_core::folder_action::{FolderActionPlan, FolderApplyReport};
 use rusty_fclone_core::select::Rule as SelectRule;
 use rusty_fclone_core::{
-    DuplicateGroup, FileError, FolderMatch, ScanOptions, ScanProgress, ScanSummary,
+    DuplicateGroup, FileError, FolderMatch, ScanOptions, ScanProgress, ScanSummary, SimilarGroup,
 };
 
 /// Scan tunables sent from the frontend. Mirrors [`ScanOptions`]; every
@@ -435,6 +435,27 @@ pub struct ScanProfilePayload {
     pub options: ScanOptionsPayload,
 }
 
+/// A [`SimilarGroup`] (`DETECTION-PERCEPTUAL-IMAGES`, ADR-0030), shaped for
+/// `find_similar_images`'s response — deliberately its own type, never
+/// merged into [`GroupPayload`]/[`ScanEventPayload::DuplicateGroup`], so
+/// the frontend can never mistake a merely-similar image for a
+/// byte-identical one.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimilarGroupPayload {
+    pub paths: Vec<String>,
+    pub max_distance: u32,
+}
+
+impl From<&SimilarGroup> for SimilarGroupPayload {
+    fn from(g: &SimilarGroup) -> Self {
+        SimilarGroupPayload {
+            paths: g.paths.iter().map(|p| p.display().to_string()).collect(),
+            max_distance: g.max_distance,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,6 +713,18 @@ mod tests {
         assert_eq!(json["removed"], "/small");
         assert_eq!(json["fileCount"], 0);
         assert_eq!(json["bytesReclaimed"], 42);
+    }
+
+    #[test]
+    fn similar_group_converts_with_camel_case_fields() {
+        let g = SimilarGroup {
+            paths: vec![PathBuf::from("/a.jpg"), PathBuf::from("/b.jpg")],
+            max_distance: 6,
+        };
+        let payload = SimilarGroupPayload::from(&g);
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["paths"], serde_json::json!(["/a.jpg", "/b.jpg"]));
+        assert_eq!(json["maxDistance"], 6);
     }
 
     #[test]

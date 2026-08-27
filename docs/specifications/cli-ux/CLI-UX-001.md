@@ -1,5 +1,5 @@
 # CLI-UX-001 — CLI Output, Progress, and Confirmation
-- Version: 0.3.5
+- Version: 0.3.6
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -174,6 +174,20 @@ confirmation prompt as a second safety layer on top of `--apply`.
   reserved top-level keyword: `rusty-fclone history ...` never triggers a
   scan, and `rusty-fclone <ROOT> ...` for any other first argument SHALL
   be completely unaffected (`CLI-HISTORY-AUDIT`).
+- `CLI-UX-001-FR-019`: The CLI SHALL expose
+  `FCLONE-DETECTION-001`'s `find_similar_images` as `--find-similar-images`
+  (bool, off by default) and `--similarity-threshold <0-64>` (default 10,
+  the same as `PerceptualOptions::default()`). When set, the CLI SHALL run
+  the pass after the scan's event stream is fully drained and report each
+  resulting `SimilarGroup`. `--similarity-threshold` SHALL have no effect
+  unless `--find-similar-images` is also set. Neither flag SHALL interact
+  with `--action`/`--apply`/`--history` in any way — a similar-images run
+  is never recorded to `--history` and never reaches
+  `action::plan`/`apply` (`DETECTION-PERCEPTUAL-IMAGES`, ADR-0030).
+- `CLI-UX-001-FR-020`: In `--format text`, a `SimilarGroup` SHALL print as
+  `--- similar images (max distance <N>/64): <count> files ---` followed
+  by one path per line. In `--format json`, it SHALL be emitted as
+  `{"type":"similar_images","paths":[<string>,...],"max_distance":<u32>}`.
 
 ## Architecture and interfaces
 
@@ -197,6 +211,15 @@ FR-009 through FR-011) per matched folder pair when `--action` was also
 set. `folder_match_roots`/`group_fully_covered_by` decide, per
 `DuplicateGroup`, whether it's already represented by a folder match's
 own output — CLI-only classification logic, no core-crate involvement.
+
+`--find-similar-images`/`--similarity-threshold` (FR-019/FR-020) call
+`rusty_fclone_core::find_similar_images` once, also after the scan's
+event stream is fully drained — independent of `--find-duplicate-folders`
+and every `--action`/`--history` code path, since a `SimilarGroup` never
+interacts with either. `report_similar_group` is a standalone print
+function taking no `outcomes`/action parameter at all (unlike
+`print_folder_match_text`/`json`), reflecting that there is nothing for
+it to report beyond the paths and the cluster's max distance.
 
 `rusty_fclone-cli` `history` module (ADR-0017, extended by ADR-0027):
 `--history <path>` (`Option<PathBuf>`). `history::ScanRecord` (one
@@ -355,6 +378,19 @@ same position without restructuring every existing scan invocation
   kind/bytes/succeeded), and aggregate totals matched what actually
   happened on disk; a plain `rusty-fclone <ROOT>` invocation confirmed
   unaffected by the new `history` keyword dispatch.
+- FR-019/FR-020 (`--find-similar-images`/`--similarity-threshold`) are
+  exercised by `main::tests::find_similar_images_flag_succeeds_and_does_not_touch_the_filesystem`,
+  `find_similar_images_flag_succeeds_with_json_format`, and
+  `similarity_threshold_flag_is_accepted_and_does_not_error`, plus the
+  underlying `rusty_fclone_core::perceptual` unit tests
+  (`FCLONE-DETECTION-001` FR-015 through FR-017). Manually smoke-tested
+  against a real filesystem in this environment: three real synthetic
+  JPEG/PNG photos (a base image, a brightness-shifted "re-export," and a
+  resized thumbnail — all genuinely different byte content) correctly
+  clustered under `--find-similar-images` in both `--format text` and
+  `--format json`, while an unrelated fourth photo was correctly
+  excluded; the same run's exact-duplicate output simultaneously reported
+  zero duplicate groups, confirming the two results stay fully disjoint.
 
 ## Verification plan
 
@@ -374,7 +410,10 @@ stdin) and accept (`echo y |`) both confirmed against real filesystem
 state; progress checkpoints confirmed present in JSON mode and absent
 (no `\r` spam) in text mode against a piped, non-terminal stderr;
 `--history` across two real scans confirmed correct via a direct SQL
-query against the resulting database.
+query against the resulting database; `--find-similar-images` against a
+real four-image tree confirmed correct clustering in both output formats
+(see FR-019/FR-020's acceptance-criteria entry above for the exact
+scenario).
 
 ## Traceability
 
@@ -406,9 +445,24 @@ See `docs/traceability/TRACEABILITY.md`.
 - A real directory literally named `history` at a scan root needs
   `rusty-fclone ./history` to disambiguate from the reserved subcommand
   keyword — narrow, and not expected to matter in practice (ADR-0027).
+- `--find-similar-images`/`--similarity-threshold` have no `--action`
+  interaction at all (deliberate, ADR-0030) — a future unit adding one
+  would need its own explicit design decision about what "act on a
+  probabilistic similarity judgment" should mean for this project's
+  destructive-action safety model, not a routine extension of the
+  existing `--action`/`--apply` flags.
 
 ## Change history
 
+- 0.3.6 (2026-08-27): Added `--find-similar-images`/`--similarity-threshold`
+  (FR-019/FR-020), the CLI surface for `FCLONE-DETECTION-001`'s new opt-in
+  perceptual image-similarity pass (`DETECTION-PERCEPTUAL-IMAGES`, third
+  and final unit of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s
+  Phase 3). Runs once after the scan's event stream is fully drained,
+  entirely independent of `--action`/`--apply`/`--history`/
+  `--find-duplicate-folders` — a `SimilarGroup` is report-only, never
+  reaches the action layer, and is never recorded to history. New
+  `similar_images` `--format json` NDJSON event. ADR-0030.
 - 0.3.5 (2026-08-27): Added per-action history detail rows and a
   `rusty-fclone history <list|stats>` query subcommand (FR-018,
   `CLI-HISTORY-AUDIT`, third and final unit of `docs/roadmap/

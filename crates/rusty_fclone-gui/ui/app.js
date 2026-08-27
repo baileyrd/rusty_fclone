@@ -123,6 +123,13 @@ const state = {
   groups: [],
   folderMatches: [],
   findingFolders: false,
+  // Perceptual "similar images" clusters (DETECTION-PERCEPTUAL-IMAGES,
+  // ADR-0030) -- only populated when `matchMode === "similar"`; a
+  // deliberately separate, opt-in, report-only pass run after a normal
+  // scan finishes, never merged into `groups`, which stays exclusively
+  // byte-identical duplicates.
+  similarGroups: [],
+  findingSimilarImages: false,
   lastSummary: null,
   scanHistory: [],
   errors: [],
@@ -487,9 +494,24 @@ function scanView() {
           el(
             "div",
             { className: "seg" },
-            el("button", { className: "seg-option active" }, "Exact match"),
-            el("button", { className: "seg-option", disabled: true, title: "Fuzzy/near-duplicate matching isn't implemented yet" }, "Similar content"),
+            el(
+              "button",
+              { className: "seg-option" + (state.matchMode === "exact" ? " active" : ""), onClick: () => setState({ matchMode: "exact" }) },
+              "Exact match",
+            ),
+            el(
+              "button",
+              { className: "seg-option" + (state.matchMode === "similar" ? " active" : ""), onClick: () => setState({ matchMode: "similar" }) },
+              "Similar content",
+            ),
           ),
+          state.matchMode === "similar"
+            ? el(
+                "div",
+                { className: "hint" },
+                "Runs alongside the exact scan, not instead of it -- similar (not byte-identical) images show up in Review as their own, separately-labeled clusters, with no action offered (DETECTION-PERCEPTUAL-IMAGES).",
+              )
+            : null,
         ),
         el(
           "div",
@@ -703,7 +725,8 @@ function reviewItems() {
     .filter((g) => state.typeFilter.has(categoryOf(g.paths[0])))
     .map((g, i) => ({ kind: "file", group: g, key: `file-${i}` }));
   const folders = state.folderMatches.map((m, i) => ({ kind: "folder", match: m, key: `folder-${i}` }));
-  return files.concat(folders);
+  const similar = state.similarGroups.map((g, i) => ({ kind: "similar", group: g, key: `similar-${i}` }));
+  return files.concat(folders).concat(similar);
 }
 
 function scanningSubtitle() {
@@ -787,13 +810,20 @@ function viewHeader(title, subtitle) {
 
 function groupListRow(item, active, onClick) {
   const isFolder = item.kind === "folder";
-  const color = isFolder ? "var(--pink)" : KIND_COLOR[categoryOf(item.group.paths[0])] || "var(--accent)";
+  const isSimilar = item.kind === "similar";
+  const color = isFolder
+    ? "var(--pink)"
+    : isSimilar
+      ? "var(--warning)"
+      : KIND_COLOR[categoryOf(item.group.paths[0])] || "var(--accent)";
   const name = isFolder
     ? fileNameOf(item.match.type === "exact" ? item.match.folders[0] : item.match.subset)
     : fileNameOf(item.group.paths[0]);
   const meta = isFolder
     ? `${item.match.fileCount} files · ${bytesHuman(item.match.bytes)}`
-    : `${item.group.paths.length} copies · ${bytesHuman(item.group.size)}`;
+    : isSimilar
+      ? `${item.group.paths.length} similar · max diff ${item.group.maxDistance}/64`
+      : `${item.group.paths.length} copies · ${bytesHuman(item.group.size)}`;
 
   return el(
     "button",
@@ -819,6 +849,7 @@ function colorTint(cssVar) {
 
 function reviewMain(item) {
   if (item.kind === "folder") return folderReviewMain(item);
+  if (item.kind === "similar") return similarReviewMain(item);
   return fileReviewMain(item);
 }
 
@@ -971,6 +1002,52 @@ function fileReviewMain(item) {
           `Apply ${ACTION_KINDS.find((k) => k.id === state.actionKind).label}`,
         ),
       ),
+    ),
+  );
+}
+
+// A perceptual "similar images" cluster (DETECTION-PERCEPTUAL-IMAGES,
+// ADR-0030) -- deliberately read-only: no keep-choice, no action bar, no
+// `run_action` call of any kind. "Similar" is not the byte-identical
+// guarantee the action layer's destructive operations are built on, so
+// this card only ever lets the user look and decide for themselves.
+function similarReviewMain(item) {
+  const group = item.group;
+
+  const cards = group.paths.map((path) => {
+    const category = categoryOf(path);
+    ensurePreview(path);
+    const preview = state.previewCache[path];
+    const hasPreview = typeof preview === "string";
+    const thumb = hasPreview && category === "photo"
+      ? el("img", { src: preview, alt: `preview of ${fileNameOf(path)}` })
+      : icon("file", 26);
+    return el(
+      "div",
+      { className: "compare-card" },
+      el("div", { className: "compare-thumb" }, thumb),
+      el("div", { className: "compare-path" }, path),
+    );
+  });
+
+  return el(
+    "div",
+    { className: "review-main" },
+    el(
+      "div",
+      { className: "card", style: "border-color:var(--warning)" },
+      el("div", { className: "card-title", style: "color:var(--warning)" }, "Similar images -- not confirmed identical"),
+      el(
+        "div",
+        { className: "hint" },
+        `These ${group.paths.length} images look visually similar (max difference ${group.maxDistance}/64 under a perceptual hash) but were not confirmed byte-identical by the exact scan -- review each one yourself before deleting anything.`,
+      ),
+    ),
+    el("div", { className: "compare-row" }, ...cards),
+    el(
+      "div",
+      { className: "card review-action-bar" },
+      el("div", { className: "review-action-right" }, el("button", { className: "btn btn-ghost", onClick: nextGroup }, "Skip")),
     ),
   );
 }
@@ -1242,6 +1319,7 @@ async function startScan() {
     actionMessage: null,
     groups: [],
     folderMatches: [],
+    similarGroups: [],
     errors: [],
     progress: { filesScanned: 0, bytesScanned: 0 },
     groupIndex: 0,
@@ -1420,20 +1498,37 @@ async function onScanFinished(summary) {
     scanHistory: [record, ...state.scanHistory],
   });
 
-  if (state.groups.length === 0) return;
-  setState({ findingFolders: true });
-  try {
-    const matches = await invoke("find_duplicate_folders", {
-      root: state.scanRoot,
-      groups: state.groups.map((g) => ({ size: g.size, paths: g.paths })),
-      options: scanOptionsPayload(),
-    });
-    setState({ folderMatches: matches, findingFolders: false });
-  } catch (err) {
-    // A folder-dedup failure (e.g. the root vanished between the scan and
-    // this follow-up call) shouldn't hide the file-level results already
-    // shown -- just stop looking for folder matches this round.
-    setState({ findingFolders: false });
+  if (state.groups.length > 0) {
+    setState({ findingFolders: true });
+    try {
+      const matches = await invoke("find_duplicate_folders", {
+        root: state.scanRoot,
+        groups: state.groups.map((g) => ({ size: g.size, paths: g.paths })),
+        options: scanOptionsPayload(),
+      });
+      setState({ folderMatches: matches, findingFolders: false });
+    } catch (err) {
+      // A folder-dedup failure (e.g. the root vanished between the scan
+      // and this follow-up call) shouldn't hide the file-level results
+      // already shown -- just stop looking for folder matches this round.
+      setState({ findingFolders: false });
+    }
+  }
+
+  // Independent of `state.groups.length` -- unlike folder-dedup, a
+  // perceptual cluster doesn't depend on any exact `DuplicateGroup`
+  // existing at all (DETECTION-PERCEPTUAL-IMAGES, ADR-0030).
+  if (state.matchMode === "similar") {
+    setState({ findingSimilarImages: true });
+    try {
+      const groups = await invoke("find_similar_images", {
+        root: state.scanRoot,
+        options: scanOptionsPayload(),
+      });
+      setState({ similarGroups: groups, findingSimilarImages: false });
+    } catch (err) {
+      setState({ findingSimilarImages: false });
+    }
   }
 }
 

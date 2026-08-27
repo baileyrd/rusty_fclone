@@ -1,5 +1,5 @@
 # FCLONE-DETECTION-001 — Duplicate File Detection Engine
-- Version: 0.2.1
+- Version: 0.3.0
 - Status: Implemented (v1 baseline)
 - Owners: baileyrd
 - Depends on: none
@@ -21,8 +21,13 @@ reporting, a GUI) is out of scope for this specification and depends on it.
   replace this whole folder" action exists or is planned here — a folder
   match is acted on today via the existing per-file actions on the
   `DuplicateGroup`s it's built from (ADR-0021).
-- Near-duplicate / fuzzy / perceptual matching (e.g. similar images, similar
-  text). This engine only detects byte-identical content.
+- Near-duplicate / fuzzy / perceptual matching of anything other than
+  images (e.g. similar text) — `find_similar_images` (FR-015 onward,
+  `DETECTION-PERCEPTUAL-IMAGES`, ADR-0030) reverses this non-goal for
+  images specifically, as a deliberately separate, opt-in pass whose
+  output (`SimilarGroup`) is never mixed into `DuplicateGroup`/`scan()`'s
+  results — this engine's byte-identical guarantee applies exclusively to
+  those, unaffected by the new pass's existence.
 - Distributed or network-filesystem-aware scanning beyond what a portable
   blocking-I/O model gets for free.
 - Linux-specific I/O fast paths (io_uring, `FIEMAP` extent ordering) — see
@@ -43,6 +48,15 @@ reporting, a GUI) is out of scope for this specification and depends on it.
 - **Full hash**: an xxh3-128 hash of a file's entire content.
 - **Duplicate group**: the final, reported unit — every path (including
   hardlink aliases) confirmed to share identical content.
+- **Difference hash (dHash)**: a 64-bit perceptual fingerprint of an
+  image's pixel content — shrink to a 9x8 grayscale grid, record whether
+  each pixel is brighter than its right neighbor. Two images' dHashes'
+  Hamming distance (bits differing) is a rough measure of visual
+  similarity, *not* content identity.
+- **Similar group**: `find_similar_images`'s reported unit — two or more
+  images whose dHashes are within a configured Hamming-distance
+  threshold. Structurally distinct from a duplicate group; never implies
+  byte-identical content.
 
 ## Requirements
 
@@ -153,6 +167,31 @@ reporting, a GUI) is out of scope for this specification and depends on it.
   `ScanOptions::exclude_paths` SHALL NOT be descended into at all —
   pruned before traversal reads its contents, not filtered out of
   results afterward (`DETECTION-SCAN-FILTERS`).
+- `FCLONE-DETECTION-001-FR-015`: The engine SHALL provide
+  `find_similar_images(root, scan_options, perceptual_options)`, a
+  deliberately separate pass from `scan()`: it SHALL run its own
+  traversal (reusing `scan_options`'s symlink/filesystem-boundary/size/
+  exclude-path settings, but restricted to the image extensions its
+  decoder supports), compute each image's dHash, and report every
+  cluster of two or more images whose pairwise Hamming distance is at
+  or below `PerceptualOptions::max_hamming_distance` as a `SimilarGroup`.
+  `SimilarGroup` SHALL NOT be a variant of `ScanEvent` and SHALL share no
+  fields or trait impls with `DuplicateGroup` that would let a caller
+  confuse the two (`DETECTION-PERCEPTUAL-IMAGES`, ADR-0030).
+- `FCLONE-DETECTION-001-FR-016`: A file that fails to decode as one of
+  the supported image formats (corrupt, truncated, an extension not
+  matching its real content) SHALL be silently excluded from clustering
+  — not reported as an error and not a reason to fail the whole call.
+- `FCLONE-DETECTION-001-FR-017`: `find_similar_images` SHALL reject a
+  nonexistent or non-directory root with `ScanError::InvalidRoot`,
+  matching `scan()`'s and `find_folder_duplicates`'s existing
+  root-validation contract.
+- `FCLONE-DETECTION-001-NFR-008`: `find_similar_images` SHALL NOT read
+  or depend on any `DuplicateGroup` a prior `scan()` call produced —
+  unlike `find_folder_duplicates`, it is fully self-contained given only
+  a root and options, since perceptually similar images are by
+  definition not byte-identical and so would never appear in a
+  `DuplicateGroup` together in the first place.
 
 ## Architecture and interfaces
 
@@ -182,6 +221,11 @@ pub fn find_folder_duplicates(root: &Path, groups: &[DuplicateGroup], options: &
 pub enum FolderMatch { Exact { folders: Vec<PathBuf>, file_count: u64, bytes: u64 },
                         Contained { subset: PathBuf, superset: PathBuf,
                                     file_count: u64, bytes: u64 } }
+
+pub fn find_similar_images(root: &Path, scan_options: &ScanOptions, perceptual_options: &PerceptualOptions)
+    -> Result<Vec<SimilarGroup>, ScanError>;
+pub struct PerceptualOptions { pub max_hamming_distance: u32 } // default 10
+pub struct SimilarGroup { pub paths: Vec<PathBuf>, pub max_distance: u32 }
 ```
 
 Internal modules: `traversal` (jwalk-based walk + file-id; also applies
@@ -194,7 +238,10 @@ descending, `DETECTION-SCAN-FILTERS`), `io_pool`
 existing fclones `sled`/`bincode` cache database, ADR-0019), `pipeline`
 (orchestration: hardlink collapse → size-group → partial hash → full hash →
 optional verify → emit), `folder_dedup` (post-scan folder-level duplicate
-detection consuming a completed scan's `DuplicateGroup`s, ADR-0021).
+detection consuming a completed scan's `DuplicateGroup`s, ADR-0021),
+`perceptual` (opt-in, self-contained image-similarity pass: its own
+traversal via `traversal::traverse`, `image`-crate decode, hand-rolled
+dHash, union-find clustering by Hamming distance, ADR-0030).
 
 ## Data/state and invariants
 
@@ -230,6 +277,13 @@ detection consuming a completed scan's `DuplicateGroup`s, ADR-0021).
   uploads without revisiting the hash choice.
 - No special handling of file permissions/ACLs/extended attributes beyond
   what's needed to read file content; those are out of scope for detection.
+- `find_similar_images` decodes untrusted image files via the `image`
+  crate (pure-Rust codecs only — `jpeg`/`png`/`gif`/`bmp`, no C toolchain,
+  ADR-0030); no adversarial-input hardening beyond what that crate itself
+  provides. dHash is a similarity heuristic, not a cryptographic or
+  collision-resistant hash — this engine's "zero false positives" claim
+  is scoped to `scan()`'s byte-identical results and never extends to
+  `SimilarGroup`.
 
 ## Acceptance criteria
 
@@ -257,6 +311,21 @@ large-file scenario (beating its default configuration outright).
 The naive `HashMap`-based data model (ADR-0004) is meant to be revisited
 only once a benchmark demonstrates it's the bottleneck.
 
+`perceptual` module tests (11) cover the dHash algorithm directly
+(identical images hash identically, very different images hash far
+apart, a small uniform brightness shift stays within the default
+threshold), the union-find clustering logic in isolation (threshold
+boundaries, never reporting a singleton), and `find_similar_images`
+end-to-end against real files on disk (a near-identical pair clustered,
+unrelated images not clustered, a non-image file ignored, a file with an
+image extension but bogus content skipped rather than erroring, a
+nonexistent root rejected). Additionally verified manually in this
+environment: real synthetic JPEG/PNG photos (base image, brightness-
+shifted "re-export," resized thumbnail) correctly clustered via the
+compiled CLI binary's `--find-similar-images`, with an unrelated photo
+correctly excluded, while the exact engine simultaneously reported zero
+`DuplicateGroup`s for the same tree.
+
 ## Traceability
 
 See `docs/traceability/TRACEABILITY.md`.
@@ -281,9 +350,39 @@ See `docs/traceability/TRACEABILITY.md`.
   (groups always precede `Finished`) but not actual wall-clock overlap
   between traversal and hashing — see `DETECTION-STREAMING-OVERLAP` on the
   roadmap.
+- `find_similar_images`'s clustering is pairwise (O(n²) Hamming-distance
+  comparisons across every decoded image) — a deliberate simplicity-over-
+  scale tradeoff for a first, opt-in version (ADR-0030's consequences).
+  Not benchmarked against a real large photo library; revisit only if
+  real usage shows this is actually a bottleneck.
+- dHash's default 10/64 Hamming-distance threshold is a commonly-cited
+  starting point, not independently tuned against a labeled dataset of
+  real "same photo, different export" pairs versus true near-misses —
+  worth revisiting if real usage surfaces it as too loose or too strict.
+- `find_similar_images` only decodes JPEG/PNG/GIF/BMP (the `image` crate
+  features enabled here, chosen to avoid any C-linked codec) — WebP,
+  AVIF, HEIC, and TIFF images are silently invisible to this pass
+  (excluded by the extension filter, not attempted and failed), the same
+  "narrower than GUI-MEDIA-PREVIEW's preview support" tradeoff ADR-0030
+  documents.
 
 ## Change history
 
+- 0.3.0 (2026-08-27): Added opt-in perceptual image similarity (FR-015
+  through FR-017, NFR-008) — reverses this spec's own "near-duplicate/
+  fuzzy/perceptual matching" non-goal for images specifically
+  (`DETECTION-PERCEPTUAL-IMAGES`, third and final unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 3). New `perceptual` module
+  and public `find_similar_images(root, scan_options, perceptual_options)
+  -> Result<Vec<SimilarGroup>, ScanError>`: a fully self-contained,
+  deliberately separate pass (its own traversal, no dependency on any
+  prior `scan()` result) that decodes each image (`image` crate, pure-
+  Rust `jpeg`/`png`/`gif`/`bmp` codecs only — no C toolchain), computes a
+  64-bit dHash, and clusters images within a configurable Hamming-
+  distance threshold (default 10/64) via union-find. `SimilarGroup` is
+  structurally distinct from `DuplicateGroup` — this engine's byte-
+  identical guarantee is unaffected. No `ScanEvent`/action-layer
+  interaction of any kind. ADR-0030.
 - 0.2.1 (2026-08-26): Added include/exclude scan filters (FR-014, NFR-007)
   — `ScanOptions::min_size`/`max_size`, `include_extensions`/
   `exclude_extensions`, and `exclude_paths`, all applied during traversal

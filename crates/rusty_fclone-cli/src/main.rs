@@ -10,8 +10,8 @@ use rusty_fclone_core::action::{self, ActionKind, ActionPlan, ApplyReport};
 use rusty_fclone_core::folder_action;
 use rusty_fclone_core::select::{self, Rule as SelectRule};
 use rusty_fclone_core::{
-    find_folder_duplicates, scan, DuplicateGroup, FileError, FolderMatch, ScanEvent, ScanOptions,
-    ScanProgress, ScanSummary,
+    find_folder_duplicates, find_similar_images, scan, DuplicateGroup, FileError, FolderMatch,
+    PerceptualOptions, ScanEvent, ScanOptions, ScanProgress, ScanSummary, SimilarGroup,
 };
 use serde::Serialize;
 
@@ -255,6 +255,19 @@ struct Cli {
     /// work most scans don't need.
     #[arg(long)]
     find_duplicate_folders: bool,
+
+    /// After the scan completes, also look for visually similar images
+    /// (dHash perceptual comparison, opt-in and always separate from the
+    /// byte-identical duplicate results above -- ADR-0030). Off by
+    /// default; report-only, with no `--action`/`--apply` interaction.
+    #[arg(long)]
+    find_similar_images: bool,
+
+    /// Maximum dHash Hamming distance (0-64) for two images to be reported
+    /// as similar under `--find-similar-images`. Lower is more
+    /// conservative. No effect unless `--find-similar-images` is set.
+    #[arg(long, default_value_t = PerceptualOptions::default().max_hamming_distance)]
+    similarity_threshold: u32,
 
     /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Text)]
@@ -502,6 +515,7 @@ fn run(cli: Cli) -> ExitCode {
     let root_display = cli.root.display().to_string();
     let started_at = unix_timestamp_now();
     let folder_dedup_root = cli.find_duplicate_folders.then(|| cli.root.clone());
+    let similar_images_root = cli.find_similar_images.then(|| cli.root.clone());
 
     let options = ScanOptions {
         follow_symlinks: cli.follow_symlinks,
@@ -519,6 +533,7 @@ fn run(cli: Cli) -> ExitCode {
         exclude_paths: cli.exclude_paths,
     };
     let folder_dedup_options = folder_dedup_root.is_some().then(|| options.clone());
+    let similar_images_options = similar_images_root.is_some().then(|| options.clone());
 
     let handle = match scan(cli.root, options) {
         Ok(handle) => handle,
@@ -633,6 +648,23 @@ fn run(cli: Cli) -> ExitCode {
                 &mut total_files_acted_on,
                 history_actions.as_mut(),
             );
+        }
+    }
+
+    if let (Some(root), Some(options)) = (similar_images_root, similar_images_options) {
+        let perceptual_options = PerceptualOptions {
+            max_hamming_distance: cli.similarity_threshold,
+        };
+        match find_similar_images(&root, &options, &perceptual_options) {
+            Ok(groups) => {
+                for group in &groups {
+                    report_similar_group(cli.format, group);
+                }
+            }
+            Err(err) => {
+                had_errors = true;
+                eprintln!("error: {err}");
+            }
         }
     }
 
@@ -1140,6 +1172,30 @@ fn report_folder_matches(
     had_errors
 }
 
+/// Prints one `--find-similar-images` cluster (ADR-0030). Deliberately no
+/// `outcomes`/action parameter -- unlike duplicate groups and folder
+/// matches, a `SimilarGroup` has no `--action`/`--apply` interaction at
+/// all, since "similar" is not the byte-identical guarantee the action
+/// layer's destructive operations are built on.
+fn report_similar_group(format: Format, group: &SimilarGroup) {
+    match format {
+        Format::Text => {
+            println!(
+                "--- similar images (max distance {}/64): {} files ---",
+                group.max_distance,
+                group.paths.len()
+            );
+            for p in &group.paths {
+                println!("{}", p.display());
+            }
+        }
+        Format::Json => print_json(&JsonEvent::SimilarImages {
+            paths: paths_to_strings(&group.paths),
+            max_distance: group.max_distance,
+        }),
+    }
+}
+
 fn print_folder_match_text(m: &FolderMatch, outcomes: &[FolderPairOutcome]) {
     match m {
         FolderMatch::Exact {
@@ -1283,6 +1339,10 @@ enum JsonEvent {
         bytes: u64,
         action: Vec<FolderPairActionJson>,
     },
+    SimilarImages {
+        paths: Vec<String>,
+        max_distance: u32,
+    },
 }
 
 #[derive(Serialize)]
@@ -1355,6 +1415,8 @@ mod tests {
             apply: false,
             yes: false,
             find_duplicate_folders: false,
+            find_similar_images: false,
+            similarity_threshold: PerceptualOptions::default().max_hamming_distance,
             format: Format::Text,
             verbose: 0,
         }
@@ -1693,6 +1755,70 @@ mod tests {
         let mut cli = base_cli(dir.path().to_path_buf());
         cli.find_duplicate_folders = true;
         cli.format = Format::Json;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+    }
+
+    fn write_gradient_png(path: &Path, brightness_offset: u8) {
+        let img = image::ImageBuffer::from_fn(64, 64, |x, y| {
+            let v = ((x * 255 / 64) + (y * 255 / 64)) as u8;
+            image::Rgb([v.saturating_add(brightness_offset); 3])
+        });
+        image::DynamicImage::ImageRgb8(img).save(path).unwrap();
+    }
+
+    /// ADR-0030, `DETECTION-PERCEPTUAL-IMAGES`: `--find-similar-images`
+    /// succeeds and doesn't interact with `--action`/`--apply` at all --
+    /// two near-identical (but not byte-identical) images produce no
+    /// `DuplicateGroup` from the exact engine, only a `SimilarGroup` from
+    /// this separate pass.
+    #[test]
+    fn find_similar_images_flag_succeeds_and_does_not_touch_the_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        write_gradient_png(&dir.path().join("a.png"), 0);
+        write_gradient_png(&dir.path().join("b.png"), 5);
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.find_similar_images = true;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert!(dir.path().join("a.png").exists());
+        assert!(dir.path().join("b.png").exists());
+    }
+
+    /// Same as above, but for `--format json` -- exercises the
+    /// `SimilarImages` JSON event variant.
+    #[test]
+    fn find_similar_images_flag_succeeds_with_json_format() {
+        let dir = tempfile::tempdir().unwrap();
+        write_gradient_png(&dir.path().join("a.png"), 0);
+        write_gradient_png(&dir.path().join("b.png"), 5);
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.find_similar_images = true;
+        cli.format = Format::Json;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+    }
+
+    /// `--similarity-threshold` reaching `PerceptualOptions::
+    /// max_hamming_distance` (rather than a hardcoded default) is covered
+    /// directly at the core level by
+    /// `perceptual::tests::cluster_groups_only_pairs_within_the_threshold`;
+    /// this just confirms the CLI accepts the flag and an unusually strict
+    /// value (0) doesn't error the pass out.
+    #[test]
+    fn similarity_threshold_flag_is_accepted_and_does_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_gradient_png(&dir.path().join("a.png"), 0);
+        write_gradient_png(&dir.path().join("b.png"), 5);
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.find_similar_images = true;
+        cli.similarity_threshold = 0;
         let exit = run(cli);
 
         assert_eq!(exit, ExitCode::SUCCESS);
