@@ -66,6 +66,64 @@ function fileNameOf(path) {
   return parts[parts.length - 1] || path;
 }
 
+// ---- real path helpers (GUI-FS-BROWSE / GUI-REVIEW-PANELS) ---------------
+// Every path handled here is a real absolute filesystem path the backend
+// already returned (a duplicate group's member, a folder match, a
+// `list_directory` entry) -- never a fabricated one, unlike the design
+// handoff's static mocked tree.
+
+function normPath(path) {
+  return (path || "").replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+}
+
+// The directory containing `path` -- i.e. `path` with its final segment
+// removed, still an absolute path.
+function parentOf(path) {
+  const norm = normPath(path);
+  const idx = norm.lastIndexOf("/");
+  return idx <= 0 ? "/" : norm.slice(0, idx);
+}
+
+// True if `path` is `dir` itself or lives somewhere underneath it.
+function pathUnder(path, dir) {
+  const p = normPath(path);
+  const d = normPath(dir);
+  return p === d || p.startsWith(d + "/");
+}
+
+// `path`'s directory chain relative to `root` (e.g. `/a/b/c/file.txt` under
+// root `/a` is `["b", "c"]`) -- falls back to the full absolute chain if
+// `path` isn't actually under `root`.
+function relativeChain(path, root) {
+  const dir = parentOf(path);
+  const r = normPath(root || "/");
+  if (dir === r) return [];
+  if (dir.startsWith(r + "/")) return dir.slice(r.length + 1).split("/").filter(Boolean);
+  return normPath(dir).split("/").filter(Boolean);
+}
+
+// Resolves (via `list_directory`) the real immediate subdirectories of
+// `path` (or the platform's browse roots, when `path` is falsy), caching
+// the result in `cache` keyed by `path || ""` -- shared across every panel
+// showing that directory. Same in-flight-marker pattern as `ensurePreview`:
+// mutates `cache`/`open` directly for the `null` "in flight" marker to
+// avoid a re-render mid-render, then calls `onLoaded` (expected to trigger
+// a re-render) once the real children come back.
+function ensureDirChildren(path, cache, onLoaded) {
+  const key = path || "";
+  if (key in cache) return;
+  cache[key] = null;
+  invoke("list_directory", { path: path || null })
+    .then((entries) => {
+      cache[key] = entries;
+      onLoaded();
+    })
+    .catch(() => {
+      cache[key] = [];
+      onLoaded();
+    });
+}
+
 function bytesHuman(n) {
   if (n < 1024) return `${n} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -94,6 +152,11 @@ function relativeTime(ms) {
 const state = {
   theme: "dark",
   view: "dashboard",
+  // Sidebar collapse (GUI-REVIEW-PANELS): a 64px icon-only rail, toggled
+  // from a button at the sidebar's own base -- frees width for Duplicate
+  // Review's three side-by-side panels on a narrow window. Session-only,
+  // like every other render-only UI preference here (theme included).
+  navCollapsed: false,
   scanRoot: "",
   options: {
     followSymlinks: false,
@@ -134,6 +197,25 @@ const state = {
   scanHistory: [],
   errors: [],
   groupIndex: 0,
+  // Duplicate Review's real file-system panel (GUI-REVIEW-PANELS) -- a
+  // lazily-expanded tree of the scan root's real subdirectories, backed by
+  // the `list_directory` command. `fsChildrenCache` maps an absolute path
+  // to its already-fetched DirEntryPayload[] children (`null` while a
+  // fetch is in flight, absent if never requested); `fsOpenPaths` is the
+  // set of expanded directories. Reset whenever a new scan starts (see
+  // `startScan`), since a prior scan's tree is meaningless for a new root.
+  fsChildrenCache: {},
+  fsOpenPaths: new Set(),
+  // Clicking a File System panel row filters the duplicate-group panel and
+  // the Group X of N navigation to items located under this real absolute
+  // path; `null` means no filter.
+  fsSelectedPath: null,
+  fsTreeCollapsed: false,
+  // Duplicate-group panel's nested folder sections (grouped by real path
+  // hierarchy under the scan root) that are collapsed, keyed by the
+  // relative chain joined with "/".
+  dupCollapsedFolders: new Set(),
+  dupTreeCollapsed: false,
   // Inline media preview (GUI-MEDIA-PREVIEW, ADR-0028) -- keyed by file
   // path, value is `null` (loading), a data: URI (loaded), or `false`
   // (not previewable: unsupported type, too large, or a read error).
@@ -154,6 +236,16 @@ const state = {
   archiveDir: "",
   sessionBytesReclaimed: 0,
   actionMessage: null,
+  // Scan Setup's "Browse..." folder picker (GUI-FS-BROWSE) -- a real,
+  // lazily-expanded tree of the machine's actual directories, backed by
+  // `list_directory`. Same cache/open-set shape as the Review file-system
+  // panel above, but rooted at the platform's browse starting points
+  // (`list_directory(null)`) instead of a scan root, since here the user
+  // is picking one.
+  browseModalOpen: false,
+  browseChildrenCache: {},
+  browseOpenPaths: new Set(),
+  browseSelectedPath: null,
   rules: [
     {
       id: 1,
@@ -247,17 +339,24 @@ function render() {
 }
 
 function sidebar() {
-  const navItem = (id, label, view) =>
+  const collapsed = state.navCollapsed;
+  const labels = ["dashboard", "scan", "review", "rules"];
+  const titles = { dashboard: "Dashboard", scan: "Scan", review: "Review", rules: "Rules" };
+  const navItem = (id, view) =>
     el(
       "button",
-      { className: "nav-item" + (state.view === view ? " active" : ""), onClick: () => setState({ view }) },
+      {
+        className: "nav-item" + (state.view === view ? " active" : ""),
+        onClick: () => setState({ view }),
+        title: collapsed ? titles[id] : null,
+      },
       icon(id, 17),
-      el("span", null, label),
+      !collapsed && el("span", null, titles[id]),
     );
 
   return el(
     "div",
-    { className: "sidebar" },
+    { className: "sidebar" + (collapsed ? " collapsed" : "") },
     el(
       "div",
       null,
@@ -265,16 +364,9 @@ function sidebar() {
         "div",
         { className: "brand" },
         el("div", { className: "brand-icon" }, icon("logo", 15)),
-        el("div", { className: "brand-name" }, "Rusty FClone"),
+        !collapsed && el("div", { className: "brand-name" }, "Rusty FClone"),
       ),
-      el(
-        "div",
-        { className: "nav" },
-        navItem("dashboard", "Dashboard", "dashboard"),
-        navItem("scan", "Scan", "scan"),
-        navItem("review", "Review", "review"),
-        navItem("rules", "Rules", "rules"),
-      ),
+      el("div", { className: "nav" }, ...labels.map((id) => navItem(id, id))),
     ),
     el(
       "div",
@@ -282,15 +374,25 @@ function sidebar() {
       el("div", { className: "sidebar-footer-divider" }),
       el(
         "button",
-        { className: "theme-toggle", onClick: toggleTheme },
+        { className: "theme-toggle", onClick: toggleTheme, title: collapsed ? (state.theme === "dark" ? "Light mode" : "Dark mode") : null },
         icon(state.theme === "dark" ? "sun" : "moon", 15),
-        el("span", null, state.theme === "dark" ? "Light mode" : "Dark mode"),
+        !collapsed && el("span", null, state.theme === "dark" ? "Light mode" : "Dark mode"),
       ),
-      el(
+      !collapsed && el(
         "div",
         { className: "session-savings" },
         el("div", { className: "session-savings-label" }, "Reclaimed this session"),
         el("div", { className: "session-savings-value" }, bytesHuman(state.sessionBytesReclaimed)),
+      ),
+      el(
+        "button",
+        {
+          className: "sidebar-collapse-btn",
+          onClick: () => setState({ navCollapsed: !collapsed }),
+          title: collapsed ? "Expand sidebar" : "Collapse sidebar",
+        },
+        icon(collapsed ? "chevronRight" : "chevronLeft", 15),
+        !collapsed && el("span", null, "Collapse"),
       ),
     ),
   );
@@ -499,7 +601,7 @@ function scanView() {
 
   return el(
     "div",
-    { className: "view" },
+    { className: "view", style: "position:relative" },
     el(
       "div",
       { className: "view-header" },
@@ -522,7 +624,12 @@ function scanView() {
           className: "field-label",
           style: "margin-top:10px;margin-bottom:6px",
         }, "Directory"),
-        pathInput("e.g. /home/me/Pictures", state.scanRoot, (v) => { state.scanRoot = v; }),
+        el(
+          "div",
+          { style: "display:flex;gap:8px" },
+          el("div", { style: "flex:1;min-width:0" }, pathInput("e.g. /home/me/Pictures", state.scanRoot, (v) => { state.scanRoot = v; })),
+          el("button", { className: "btn btn-ghost", onClick: openBrowseModal }, "Browse…"),
+        ),
         el("div", { className: "hint" }, "Scanning multiple locations at once isn't supported yet -- enter one root directory."),
       ),
       el(
@@ -684,6 +791,95 @@ function scanView() {
         state.scanning ? "Scanning..." : "Start Scan",
       ),
     ),
+    state.browseModalOpen && browseModal(),
+  );
+}
+
+// A real, lazily-expanded directory tree for picking a scan root
+// (GUI-FS-BROWSE) -- opened from Scan Setup's "Browse..." button. Backed
+// by the `list_directory` command, starting from the platform's browse
+// roots (home directory, plus `/` or drive letters). This replaces the
+// design handoff's static mocked filesystem tree with a real one; see
+// `payload::DirEntryPayload`'s doc comment for why.
+function openBrowseModal() {
+  ensureDirChildren(null, state.browseChildrenCache, () => render());
+  setState({ browseModalOpen: true, browseSelectedPath: null });
+}
+
+function browseModal() {
+  const rows = [];
+  const walk = (path, depth) => {
+    const children = state.browseChildrenCache[path || ""];
+    if (!children) return;
+    for (const entry of children) {
+      rows.push({ entry, depth });
+      if (state.browseOpenPaths.has(entry.path)) walk(entry.path, depth + 1);
+    }
+  };
+  walk(null, 0);
+
+  const loading = state.browseChildrenCache[""] === null;
+
+  return el(
+    "div",
+    { className: "modal-overlay" },
+    el(
+      "div",
+      { className: "modal-card" },
+      el("div", { className: "card-title" }, "Choose a folder"),
+      el("div", { className: "hint", style: "margin-bottom:12px" }, "No native file picker yet -- browse the real directory tree below."),
+      el(
+        "div",
+        { className: "browse-tree" },
+        loading
+          ? el("div", { className: "empty-note" }, "Loading…")
+          : rows.length === 0
+            ? el("div", { className: "empty-note" }, "No accessible folders found.")
+            : rows.map((row) => browseRow(row)),
+      ),
+      el("div", { className: "hint", style: "margin:12px 0" }, `Selected: ${state.browseSelectedPath || "No folder selected"}`),
+      el(
+        "div",
+        { style: "display:flex;gap:10px;justify-content:flex-end" },
+        el("button", { className: "btn btn-ghost", onClick: () => setState({ browseModalOpen: false }) }, "Cancel"),
+        el(
+          "button",
+          {
+            className: "btn btn-primary",
+            disabled: !state.browseSelectedPath,
+            onClick: () => setState({ scanRoot: state.browseSelectedPath, browseModalOpen: false }),
+          },
+          "Select Folder",
+        ),
+      ),
+    ),
+  );
+}
+
+function browseRow({ entry, depth }) {
+  const expanded = state.browseOpenPaths.has(entry.path);
+  const selected = state.browseSelectedPath === entry.path;
+  return el(
+    "div",
+    { className: "tree-row" + (selected ? " active" : ""), style: `padding-left:${8 + depth * 16}px`, onClick: () => setState({ browseSelectedPath: entry.path }) },
+    entry.hasChildren
+      ? el("span", {
+          className: "tree-chevron",
+          onClick: (e) => {
+            e.stopPropagation();
+            const open = new Set(state.browseOpenPaths);
+            if (open.has(entry.path)) {
+              open.delete(entry.path);
+            } else {
+              open.add(entry.path);
+              ensureDirChildren(entry.path, state.browseChildrenCache, () => render());
+            }
+            setState({ browseOpenPaths: open });
+          },
+        }, expanded ? "▾" : "▸")
+      : el("span", { className: "tree-chevron" }),
+    icon("folder", 13),
+    el("span", { className: "tree-row-label", title: entry.path }, entry.name),
   );
 }
 
@@ -761,13 +957,87 @@ function pathInput(placeholder, value, onInput) {
 
 // ---- review -----------------------------------------------------------
 
-function reviewItems() {
+// The real absolute path a review item is "at" -- a file group's kept
+// candidate, a folder match's primary folder, or a similar-images
+// cluster's first member. Used both to color/filter the real file-system
+// panel and to place the item in the duplicate-group panel's nested tree.
+function itemRepresentativePath(item) {
+  if (item.kind === "folder") {
+    return item.match.type === "exact" ? item.match.folders[0] : item.match.subset;
+  }
+  return item.group.paths[0];
+}
+
+// Every real copy `item` has, not just its representative one -- e.g. a
+// file group's every path, or an exact folder match's every folder. Used
+// by the file-system panel's direct-duplicate badges, so a folder shows a
+// badge as soon as *any* copy of *any* duplicate lives there, the same
+// breadth the design handoff's own mocked badges used.
+function itemAllPaths(item) {
+  if (item.kind === "folder") {
+    return item.match.type === "exact" ? item.match.folders : [item.match.subset, item.match.superset];
+  }
+  return item.group.paths;
+}
+
+// `item`'s real directory chain relative to the scanned root (GUI-REVIEW-
+// PANELS) -- e.g. an item at `<root>/Documents/Finance/report.pdf` chains
+// to `["Documents", "Finance"]`. Drives the duplicate-group panel's nested
+// folder sections, mirroring the real path hierarchy instead of a flat list.
+function itemChain(item) {
+  return relativeChain(itemRepresentativePath(item), state.scanRoot);
+}
+
+function itemColor(item) {
+  if (item.kind === "folder") return "var(--pink)";
+  if (item.kind === "similar") return "var(--warning)";
+  return KIND_COLOR[categoryOf(item.group.paths[0])] || "var(--accent)";
+}
+
+function itemName(item) {
+  return fileNameOf(itemRepresentativePath(item));
+}
+
+function itemMeta(item) {
+  if (item.kind === "folder") return `${item.match.fileCount} files · ${bytesHuman(item.match.bytes)}`;
+  if (item.kind === "similar") return `${item.group.paths.length} similar · max diff ${item.group.maxDistance}/64`;
+  return `${item.group.paths.length} copies · ${bytesHuman(item.group.size)}`;
+}
+
+function colorTint(cssVar) {
+  // Every KIND_COLOR entry is a var(--token) reference; the *-tint custom
+  // properties already exist for accent/success/danger/pink, but per-kind
+  // tints (purple/warning/other) don't have a dedicated variable, so tint
+  // generically via color-mix, which every target webview (WebKitGTK,
+  // WebView2, WKWebView) supports.
+  return `color-mix(in srgb, ${cssVar} 16%, transparent)`;
+}
+
+// The type-filtered review items, before the file-system panel's folder
+// filter is applied -- used by the file-system panel itself so its "which
+// folders hold duplicates" badges never disappear just because a filter is
+// currently narrowing the other two panels.
+function baseReviewItems() {
   const files = state.groups
     .filter((g) => state.typeFilter.has(categoryOf(g.paths[0])))
     .map((g, i) => ({ kind: "file", group: g, key: `file-${i}` }));
   const folders = state.folderMatches.map((m, i) => ({ kind: "folder", match: m, key: `folder-${i}` }));
   const similar = state.similarGroups.map((g, i) => ({ kind: "similar", group: g, key: `similar-${i}` }));
   return files.concat(folders).concat(similar);
+}
+
+// The items actually shown/navigated in Review: type-filtered, further
+// narrowed by the file-system panel's selected folder (if any), and sorted
+// by real directory chain so this list's order always matches the
+// duplicate-group panel's nested tree order.
+function reviewItems() {
+  const base = baseReviewItems();
+  const filtered = state.fsSelectedPath
+    ? base.filter((item) => pathUnder(itemRepresentativePath(item), state.fsSelectedPath))
+    : base;
+  return filtered
+    .slice()
+    .sort((a, b) => itemChain(a).join("/").localeCompare(itemChain(b).join("/")) || itemName(a).localeCompare(itemName(b)));
 }
 
 function scanningSubtitle() {
@@ -786,8 +1056,10 @@ function errorsPanel() {
 }
 
 function reviewView() {
+  const allBase = baseReviewItems();
   const items = reviewItems();
-  if (items.length === 0) {
+
+  if (allBase.length === 0) {
     return el(
       "div",
       { className: "view" },
@@ -803,8 +1075,9 @@ function reviewView() {
     );
   }
 
-  const idx = Math.min(state.groupIndex, items.length - 1);
+  const idx = Math.min(state.groupIndex, Math.max(items.length - 1, 0));
   const current = items[idx];
+  const clearFilter = () => setState({ fsSelectedPath: null, groupIndex: 0 });
 
   return el(
     "div",
@@ -816,9 +1089,9 @@ function reviewView() {
         "div",
         null,
         el("div", { className: "view-title" }, "Duplicate Review"),
-        el("div", { className: "view-subtitle" }, state.scanning ? scanningSubtitle() : `${items.length} item${items.length === 1 ? "" : "s"} to review`),
+        el("div", { className: "view-subtitle" }, state.scanning ? scanningSubtitle() : `${items.length} of ${allBase.length} item${allBase.length === 1 ? "" : "s"} shown`),
       ),
-      el(
+      items.length > 0 && el(
         "div",
         { className: "review-header-nav" },
         el("button", { className: "icon-btn", onClick: () => setState({ groupIndex: (idx + items.length - 1) % items.length }) }, icon("chevronLeft", 13)),
@@ -830,13 +1103,28 @@ function reviewView() {
     errorsPanel(),
     el(
       "div",
-      { className: "review-layout" },
+      { className: "review-3col" },
+      fsPanel(allBase),
+      dupTreePanel(items, idx, clearFilter),
       el(
         "div",
-        { className: "group-list" },
-        ...items.map((item, i) => groupListRow(item, i === idx, () => setState({ groupIndex: i }))),
+        { className: "review-main-panel" },
+        items.length === 0
+          ? el(
+              "div",
+              { className: "empty-state" },
+              el("div", null, `No duplicates under ${state.fsSelectedPath}`),
+              el("div", { className: "hint" }, "This folder wasn't part of a scan that found duplicates."),
+              el("button", { className: "btn btn-ghost", onClick: clearFilter }, "Clear filter"),
+            )
+          : el(
+              "div",
+              { className: "breadcrumb" },
+              icon("folder", 13),
+              el("span", null, itemChain(current).concat(itemName(current)).join(" / ")),
+            ),
+        items.length > 0 && reviewMain(current),
       ),
-      reviewMain(current),
     ),
   );
 }
@@ -849,43 +1137,191 @@ function viewHeader(title, subtitle) {
   );
 }
 
-function groupListRow(item, active, onClick) {
-  const isFolder = item.kind === "folder";
-  const isSimilar = item.kind === "similar";
-  const color = isFolder
-    ? "var(--pink)"
-    : isSimilar
-      ? "var(--warning)"
-      : KIND_COLOR[categoryOf(item.group.paths[0])] || "var(--accent)";
-  const name = isFolder
-    ? fileNameOf(item.match.type === "exact" ? item.match.folders[0] : item.match.subset)
-    : fileNameOf(item.group.paths[0]);
-  const meta = isFolder
-    ? `${item.match.fileCount} files · ${bytesHuman(item.match.bytes)}`
-    : isSimilar
-      ? `${item.group.paths.length} similar · max diff ${item.group.maxDistance}/64`
-      : `${item.group.paths.length} copies · ${bytesHuman(item.group.size)}`;
+// Panel 1: a real, lazily-expanded directory tree rooted at the scanned
+// root (GUI-REVIEW-PANELS). Deliberately rooted there rather than the
+// design handoff's whole-disk "/" mock -- every real duplicate is
+// guaranteed to live under the scan root, so browsing the rest of the
+// filesystem from here would have no filtering purpose, and would mean
+// touching directories a scan never scanned (see `payload::DirEntryPayload`
+// and ADR-0022's "no fabricated capability" precedent). Rows are colored
+// by real scan status: accent + a count badge for a folder directly
+// holding a duplicate, primary text for an ancestor of one, muted for
+// everything else.
+function fsPanel(allItems) {
+  const collapsed = state.fsTreeCollapsed;
+  if (collapsed) {
+    return el(
+      "div",
+      { className: "fs-panel collapsed" },
+      el("button", { className: "panel-toggle-btn", onClick: () => setState({ fsTreeCollapsed: false }), title: "Show file system panel" }, icon("chevronRight", 13)),
+    );
+  }
+  if (!state.scanRoot) {
+    return el(
+      "div",
+      { className: "fs-panel" },
+      panelHeader("File system", true, () => setState({ fsTreeCollapsed: true })),
+    );
+  }
+
+  ensureDirChildren(state.scanRoot, state.fsChildrenCache, () => render());
+
+  const directCounts = new Map();
+  for (const item of allItems) {
+    for (const path of itemAllPaths(item)) {
+      const dir = normPath(parentOf(path));
+      if (!directCounts.has(dir)) directCounts.set(dir, new Set());
+      directCounts.get(dir).add(item.key);
+    }
+  }
+  const directKeys = [...directCounts.keys()];
+  const hasDescendantDirect = (dir) => directKeys.some((k) => k !== dir && k.startsWith(dir + "/"));
+
+  const rows = [];
+  const walk = (path, depth) => {
+    const children = state.fsChildrenCache[path];
+    if (!children) return;
+    for (const entry of children) {
+      const norm = normPath(entry.path);
+      const directCount = (directCounts.get(norm) || new Set()).size;
+      const isAncestor = directCount === 0 && hasDescendantDirect(norm);
+      const tier = directCount > 0 ? "direct" : isAncestor ? "ancestor" : "none";
+      rows.push({ entry, depth, directCount, tier });
+      if (state.fsOpenPaths.has(entry.path)) walk(entry.path, depth + 1);
+    }
+  };
+  walk(state.scanRoot, 0);
 
   return el(
-    "button",
-    { className: "group-row" + (active ? " active" : ""), onClick },
-    el("div", { className: "group-swatch", style: `background:${colorTint(color)};color:${color}` }, isFolder ? icon("folder", 15) : null),
-    el(
+    "div",
+    { className: "fs-panel" },
+    panelHeader("File system", true, () => setState({ fsTreeCollapsed: true })),
+    rows.length === 0
+      ? el("div", { className: "empty-note" }, state.fsChildrenCache[state.scanRoot] === null ? "Loading…" : "No subfolders.")
+      : rows.map((row) => fsRow(row)),
+  );
+}
+
+function panelHeader(label, showLabel, onCollapse) {
+  return el(
+    "div",
+    { style: "display:flex;align-items:center;gap:6px" },
+    showLabel && el("div", { className: "panel-label", style: "flex:1" }, label),
+    el("button", { className: "panel-toggle-btn", onClick: onCollapse, title: `Toggle ${label} panel` }, icon("chevronLeft", 13)),
+  );
+}
+
+function fsRow({ entry, depth, directCount, tier }) {
+  const expanded = state.fsOpenPaths.has(entry.path);
+  const selected = state.fsSelectedPath === entry.path;
+  const toggle = (e) => {
+    e.stopPropagation();
+    const open = new Set(state.fsOpenPaths);
+    if (open.has(entry.path)) {
+      open.delete(entry.path);
+    } else {
+      open.add(entry.path);
+      ensureDirChildren(entry.path, state.fsChildrenCache, () => render());
+    }
+    setState({ fsOpenPaths: open });
+  };
+  const select = () =>
+    setState(
+      state.fsSelectedPath === entry.path
+        ? { fsSelectedPath: null, groupIndex: 0 }
+        : { fsSelectedPath: entry.path, groupIndex: 0 },
+    );
+
+  return el(
+    "div",
+    { className: "tree-row fs-row tier-" + tier + (selected ? " active" : ""), style: `padding-left:${8 + depth * 14}px`, onClick: select, title: entry.path },
+    entry.hasChildren ? el("span", { className: "tree-chevron", onClick: toggle }, expanded ? "▾" : "▸") : el("span", { className: "tree-chevron" }),
+    icon("folder", 13),
+    el("span", { className: "tree-row-label" }, entry.name),
+    directCount > 0 && el("span", { className: "fs-badge" }, String(directCount)),
+  );
+}
+
+// Panel 2: a nested tree of the duplicate-group items themselves, grouped
+// by real directory (e.g. "Documents › Finance") instead of a flat list --
+// collapsible per folder section, same collapsed-state persistence as the
+// design handoff's mockup.
+function dupTreePanel(items, activeIdx, clearFilter) {
+  if (state.dupTreeCollapsed) {
+    return el(
       "div",
-      { style: "flex:1;min-width:0" },
-      el("div", { className: "group-row-name" }, name),
-      el("div", { className: "group-row-meta" }, meta),
+      { className: "dup-tree-panel collapsed" },
+      el("button", { className: "panel-toggle-btn", onClick: () => setState({ dupTreeCollapsed: false }), title: "Show duplicate list panel" }, icon("chevronRight", 13)),
+    );
+  }
+
+  const collapsedFolders = state.dupCollapsedFolders;
+  const ancestorsCollapsed = (chain, upTo) => {
+    for (let i = 1; i <= upTo; i++) if (collapsedFolders.has(chain.slice(0, i).join("/"))) return true;
+    return false;
+  };
+  const rows = [];
+  let prevChain = [];
+  items.forEach((item, i) => {
+    const chain = itemChain(item);
+    let common = 0;
+    while (common < prevChain.length && common < chain.length && prevChain[common] === chain[common]) common++;
+    for (let d = common; d < chain.length; d++) {
+      if (ancestorsCollapsed(chain, d)) continue;
+      const key = chain.slice(0, d + 1).join("/");
+      rows.push({ type: "folder", label: chain[d], key, depth: d, expanded: !collapsedFolders.has(key) });
+    }
+    if (!ancestorsCollapsed(chain, chain.length)) {
+      rows.push({ type: "item", item, index: i, depth: chain.length });
+    }
+    prevChain = chain;
+  });
+
+  return el(
+    "div",
+    { className: "dup-tree-panel" },
+    panelHeader("Duplicates", false, () => setState({ dupTreeCollapsed: true })),
+    state.fsSelectedPath && el(
+      "div",
+      { className: "dup-filter-chip" },
+      el("span", { style: "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, `Filtered: ${state.fsSelectedPath}`),
+      el("span", { style: "cursor:pointer;font-weight:700", onClick: clearFilter }, "✕"),
+    ),
+    ...rows.map((row) =>
+      row.type === "folder"
+        ? el(
+            "div",
+            {
+              className: "dup-folder-header",
+              style: `padding-left:${8 + row.depth * 16}px`,
+              onClick: () => {
+                const next = new Set(collapsedFolders);
+                next.has(row.key) ? next.delete(row.key) : next.add(row.key);
+                setState({ dupCollapsedFolders: next });
+              },
+            },
+            el("span", { className: "tree-chevron" }, row.expanded ? "▾" : "▸"),
+            icon("folder", 13),
+            el("span", null, row.label),
+          )
+        : dupItemRow(row.item, row.index === activeIdx, row.depth, () => setState({ groupIndex: row.index })),
     ),
   );
 }
 
-function colorTint(cssVar) {
-  // Every KIND_COLOR entry is a var(--token) reference; the *-tint custom
-  // properties already exist for accent/success/danger/pink, but per-kind
-  // tints (purple/warning/other) don't have a dedicated variable, so tint
-  // generically via color-mix, which every target webview (WebKitGTK,
-  // WebView2, WKWebView) supports.
-  return `color-mix(in srgb, ${cssVar} 16%, transparent)`;
+function dupItemRow(item, active, depth, onClick) {
+  const color = itemColor(item);
+  return el(
+    "div",
+    { className: "tree-row group-row" + (active ? " active" : ""), style: `padding-left:${8 + depth * 16}px`, onClick },
+    el("div", { className: "group-swatch", style: `background:${colorTint(color)};color:${color}` }, item.kind === "folder" ? icon("folder", 14) : (item.kind === "similar" ? icon("similar", 14) : null)),
+    el(
+      "div",
+      { style: "flex:1;min-width:0" },
+      el("div", { className: "group-row-name" }, itemName(item)),
+      el("div", { className: "group-row-meta" }, itemMeta(item)),
+    ),
+  );
 }
 
 function reviewMain(item) {
@@ -1366,6 +1802,12 @@ async function startScan() {
     groupIndex: 0,
     keepChoice: {},
     ruleKeepChoice: {},
+    // A prior scan's file-system tree/filter is meaningless once the root
+    // changes -- start every new scan with a fresh Review panel state.
+    fsChildrenCache: {},
+    fsOpenPaths: new Set(),
+    fsSelectedPath: null,
+    dupCollapsedFolders: new Set(),
     view: "review",
   });
 

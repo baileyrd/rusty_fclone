@@ -33,6 +33,8 @@ const ICONS = {
     '<path d="M12 3l7 3v6c0 4.5-3 7-7 9-4-2-7-4.5-7-9V6l7-3z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>',
   scanEmpty:
     '<path d="M3 8V4h4M17 4h4v4M21 16v4h-4M7 20H3v-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.5"/>',
+  similar:
+    '<path d="M8 8h9v9H8z" stroke="currentColor" stroke-width="1.6"/><path d="M5 5h9v9" stroke="currentColor" stroke-width="1.6" opacity="0.5"/>',
 };
 
 function icon(name, size) {

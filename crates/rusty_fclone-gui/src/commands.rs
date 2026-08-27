@@ -12,9 +12,9 @@ use rusty_fclone_core::{action, find_folder_duplicates, folder_action};
 
 use crate::payload::{
     normalize_path_input, normalize_path_list, parse_action_kind, parse_keep_rule,
-    ActionResultPayload, ChooseKeepPayload, FolderActionResultPayload, FolderMatchPayload,
-    GroupPayload, PreviewPayload, ScanEventPayload, ScanOptionsPayload, ScanProfilePayload,
-    SimilarGroupPayload,
+    ActionResultPayload, ChooseKeepPayload, DirEntryPayload, FolderActionResultPayload,
+    FolderMatchPayload, GroupPayload, PreviewPayload, ScanEventPayload, ScanOptionsPayload,
+    ScanProfilePayload, SimilarGroupPayload,
 };
 use crate::preview;
 use crate::profiles;
@@ -262,6 +262,101 @@ pub fn find_similar_images(
         .map_err(|err| err.to_string())
 }
 
+/// Lists the real, immediate subdirectories of `path` — or, when `path` is
+/// `None`, the platform's natural browse starting points (the user's home
+/// directory, plus `/` on Unix or each drive letter on Windows) — for the
+/// Scan Setup "Browse…" folder picker and the Duplicate Review file-system
+/// panel (`GUI-FS-BROWSE`). Directories only (files can't be a scan root
+/// or a filter target); hidden (dot-prefixed) entries are skipped, same as
+/// every shell's default `ls`. Sorted case-insensitively so the tree reads
+/// the same regardless of the OS's raw directory order. An unreadable
+/// directory (permission denied, vanished mid-read) degrades to an empty
+/// list rather than failing the whole call — one inaccessible branch
+/// shouldn't break browsing everywhere else.
+#[tauri::command]
+pub fn list_directory(path: Option<String>) -> Result<Vec<DirEntryPayload>, String> {
+    let dir = match path {
+        Some(p) => PathBuf::from(normalize_path_input(&p)),
+        None => return Ok(browse_roots()),
+    };
+    Ok(subdirectories_of(&dir))
+}
+
+fn subdirectories_of(dir: &std::path::Path) -> Vec<DirEntryPayload> {
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+    let mut entries: Vec<DirEntryPayload> = read_dir
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            !entry.file_name().to_string_lossy().starts_with('.')
+                && entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+        })
+        .map(|entry| {
+            let full_path = entry.path();
+            let has_children = has_subdirectory(&full_path);
+            DirEntryPayload {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: full_path.display().to_string(),
+                has_children,
+            }
+        })
+        .collect();
+    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    entries
+}
+
+fn has_subdirectory(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|mut rd| {
+            rd.any(|entry| {
+                entry
+                    .ok()
+                    .map(|e| {
+                        !e.file_name().to_string_lossy().starts_with('.')
+                            && e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn browse_roots() -> Vec<DirEntryPayload> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        roots.push(DirEntryPayload {
+            name: "Home".to_string(),
+            has_children: has_subdirectory(&home),
+            path: home.display().to_string(),
+        });
+    }
+    #[cfg(windows)]
+    {
+        for letter in b'A'..=b'Z' {
+            let root = PathBuf::from(format!("{}:\\", letter as char));
+            if root.is_dir() {
+                roots.push(DirEntryPayload {
+                    name: root.display().to_string(),
+                    has_children: has_subdirectory(&root),
+                    path: root.display().to_string(),
+                });
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let root = PathBuf::from("/");
+        roots.push(DirEntryPayload {
+            name: "/".to_string(),
+            has_children: has_subdirectory(&root),
+            path: root.display().to_string(),
+        });
+    }
+    roots
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -284,7 +379,8 @@ mod tests {
                 super::list_scan_profiles,
                 super::save_scan_profile,
                 super::delete_scan_profile,
-                super::find_similar_images
+                super::find_similar_images,
+                super::list_directory
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");
@@ -985,7 +1081,8 @@ mod tests {
                 super::list_scan_profiles,
                 super::save_scan_profile,
                 super::delete_scan_profile,
-                super::find_similar_images
+                super::find_similar_images,
+                super::list_directory
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("failed to build mock app");
@@ -1031,5 +1128,84 @@ mod tests {
             }
         }
         assert!(finished, "expected a finished scan-event within 5s");
+    }
+
+    #[test]
+    fn list_directory_lists_only_real_subdirectories_sorted_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("zeta")).unwrap();
+        fs::create_dir(dir.path().join("Alpha")).unwrap();
+        fs::write(dir.path().join("not-a-dir.txt"), b"file").unwrap();
+        fs::create_dir(dir.path().join(".hidden")).unwrap();
+
+        let response = invoke(
+            "list_directory",
+            json!({ "path": dir.path().display().to_string() }),
+        )
+        .expect("list_directory should succeed");
+
+        let names: Vec<String> = response
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Alpha".to_string(), "zeta".to_string()],
+            "files and dotfiles must be excluded, real directories sorted case-insensitively"
+        );
+    }
+
+    #[test]
+    fn list_directory_reports_has_children_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let with_child = dir.path().join("with-child");
+        fs::create_dir(&with_child).unwrap();
+        fs::create_dir(with_child.join("nested")).unwrap();
+        fs::create_dir(dir.path().join("leaf")).unwrap();
+
+        let response = invoke(
+            "list_directory",
+            json!({ "path": dir.path().display().to_string() }),
+        )
+        .expect("list_directory should succeed");
+
+        let by_name = |name: &str| {
+            response
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["name"] == name)
+                .unwrap()
+        };
+        assert_eq!(by_name("with-child")["hasChildren"], true);
+        assert_eq!(by_name("leaf")["hasChildren"], false);
+    }
+
+    #[test]
+    fn list_directory_on_an_unreadable_path_returns_an_empty_list_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+
+        let response = invoke(
+            "list_directory",
+            json!({ "path": missing.display().to_string() }),
+        )
+        .expect("a missing directory must degrade to an empty list, not an IPC error");
+
+        assert_eq!(response, json!([]));
+    }
+
+    #[test]
+    fn list_directory_without_a_path_returns_at_least_one_browse_root() {
+        let response = invoke("list_directory", json!({ "path": null }))
+            .expect("list_directory with no path should succeed");
+
+        let roots = response.as_array().unwrap();
+        assert!(
+            !roots.is_empty(),
+            "expected at least one platform browse root (home directory and/or filesystem root)"
+        );
     }
 }

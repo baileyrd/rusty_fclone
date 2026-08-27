@@ -20,8 +20,13 @@ semantics, which are unchanged.
 - Any change to detection or action semantics — same boundary `CLI-UX-001`
   already draws for the CLI (ADR-0005: core stays UI-agnostic, of either
   kind).
-- A native file/directory picker dialog — the scan root is a plain text
-  field in v1 (see Open questions).
+- A native OS file/directory picker dialog (the platform's own file-chooser
+  window, via Tauri's `dialog` plugin) — still not attempted; see Open
+  questions. `GUI-REVIEW-PANELS` (FR-030, ADR-0031) narrows this gap with
+  a real, in-app directory browser (`list_directory`, backed by actual
+  `std::fs::read_dir` reads, not a picker window), but the scan-root text
+  field itself remains plain, hand-editable text — the browser only ever
+  fills it in.
 - Batch actions across multiple duplicate groups at once — each group's
   action is planned/applied independently, one `run_action` call per
   group, matching how a user reviews groups one at a time.
@@ -301,6 +306,36 @@ semantics, which are unchanged.
   chart SHALL always display each category's exact byte total alongside
   its percentage, not percentage alone, so the same information is
   reachable without hovering anything (`DASHBOARD-CHART-UPGRADE`).
+- `GUI-UX-001-FR-030`: The GUI SHALL expose a `list_directory` command
+  that lists the real, immediate subdirectories of a given path (or, when
+  no path is given, the platform's browse-starting roots — the user's
+  home directory, plus `/` on Unix or each present drive letter on
+  Windows), sorted case-insensitively, hidden (dot-prefixed) entries
+  excluded, and degrading to an empty list — never an `Err` — for an
+  unreadable directory. Scan Setup's "Folder to scan" field SHALL gain a
+  "Browse…" button opening a modal that lazily expands this real tree
+  (never a fabricated one) and, on confirmation, writes the chosen path
+  into the field. The Duplicate Review screen SHALL be restructured into
+  three independently-collapsible panels: (1) a file-system panel showing
+  the same real, lazily-expanded tree rooted at the current scan root,
+  with each row colored/badged by whether it, or a descendant, directly
+  holds a duplicate (computed from every real path in `state.groups`/
+  `state.folderMatches`/`state.similarGroups`, not just each item's
+  first/representative path) — clicking a row SHALL filter the
+  duplicate-group panel and the "Item X of N" navigation to items located
+  under that real path, clicking the same row again SHALL clear the
+  filter, and a filter narrowing the list to zero items SHALL show an
+  explicit empty state with a "Clear filter" action rather than an empty
+  panel; (2) a duplicate-group panel nesting the (type- and, if active,
+  folder-) filtered items under collapsible headers matching their real
+  directory hierarchy relative to the scan root, sorted so this panel's
+  order always matches the "Item X of N" navigation order; (3) the
+  existing compare-cards/action-bar panel, prefixed with a breadcrumb
+  line naming the current item's real directory chain and name. The main
+  sidebar SHALL gain a collapse toggle at its own base that shrinks it to
+  a 64px icon-only rail (labels hidden, nav/theme/collapse rows center
+  their icons), independent of, and without altering, Review's own
+  three-panel collapse state (`GUI-REVIEW-PANELS`, ADR-0031).
 
 ## Architecture and interfaces
 
@@ -652,6 +687,44 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   skill's palette validator against both theme surfaces as part of this
   change — see this requirement's Open questions entry for what it
   found and how the chart mitigates it.
+- FR-030 (real directory browse + three-panel Duplicate Review + sidebar
+  collapse) is exercised at the Rust layer by four new hermetic
+  `commands::tests::list_directory_*` tests (a tempdir with real
+  subdirectories, dotfiles, and a plain file — only the two real,
+  non-hidden directories are returned, sorted case-insensitively;
+  `hasChildren` correct for a directory with and without a subdirectory
+  of its own; an unreadable/missing path returns `[]`, not an `Err`; a
+  `null` path returns at least one platform browse root). `app.js` has no
+  automated coverage in this repo's own test suite (same standing gap the
+  Verification plan section already notes for the rest of the frontend);
+  this session instead drove a real, rendered Chromium page (Playwright,
+  headless, with `window.__TAURI__.core.invoke`/`event.listen` replaced
+  by an in-memory mock backing `list_directory`/`start_scan`/
+  `find_duplicate_folders` with synthetic-but-real directory data) through
+  the actual `index.html`/`app.js`/`style.css` files: Scan Setup's
+  "Browse…" modal expanding a real nested tree and writing the selected
+  path into the root field; a scan landing on a real 3-panel Duplicate
+  Review (file-system panel showing correct direct/ancestor/none tier
+  coloring and badge counts derived from every path in a file group and
+  a folder match, not just each item's first path — confirmed by
+  deliberately putting a duplicate's second copy in a different folder
+  from its first and checking the badge appeared on both); clicking a
+  file-system row to filter, then clearing the filter via the resulting
+  chip; collapsing and re-expanding each of the three panels; navigating
+  into a folder-match item and confirming its match-badge action bar
+  still rendered inside the new layout; and the sidebar collapsing to a
+  real 64px rail. All three views (dark, light, and mid-flow) were also
+  screenshotted. This script was a scratch file outside the repository
+  (`npm install playwright` in a throwaway directory, not added as a
+  project dependency) and was not committed — the same "verified by hand,
+  not added to the suite" precedent `SCAN-PROFILES`'s
+  `default_profiles_dir()` verification already set, chosen here instead
+  of a real Tauri window (no display/Xvfb + `xdotool` toolchain available
+  in this environment this session) specifically because a bare static
+  HTML load can't work at all: `window.__TAURI__` doesn't exist outside a
+  real Tauri webview, so `app.js`'s first line would throw before
+  `render()` ever ran — mocking it was the only way to exercise the real
+  DOM logic at all here, not a substitute chosen over a real window pass.
 
 ## Verification plan
 
@@ -727,19 +800,40 @@ No automated frontend/DOM test suite exists (no JS test runner is part of
 this project's dependency set) — frontend logic (`app.js`) is covered by
 the manual end-to-end pass only, not by an automated test in CI.
 
+`GUI-REVIEW-PANELS` (FR-030, ADR-0031) added the workspace's first real,
+rendered-page frontend check this session, run with a headless Chromium
+via a scratch Playwright script (not committed — see FR-030's Acceptance
+criteria entry above for exactly what it drove and why a real Tauri
+window wasn't available in this environment this session). This isn't a
+standing "the frontend now has automated coverage" claim: the script and
+its `npm install` live outside the repository, aren't wired into CI, and
+would need to be rewritten as a real, committed test (a JS test runner
+dependency, which the paragraph above notes doesn't exist yet) to count
+as one — see Open questions.
+
 ## Traceability
 
 See `docs/traceability/TRACEABILITY.md`.
 
 ## Open questions
 
-- No native file/directory picker (Non-goals) — worth adding once Tauri's
-  `dialog` plugin's permission/capability shape has been reasoned about
-  the same way this spec reasoned about `core:default`.
+- No native OS file/directory picker dialog (Non-goals) — worth adding
+  once Tauri's `dialog` plugin's permission/capability shape has been
+  reasoned about the same way this spec reasoned about `core:default`.
+  `GUI-REVIEW-PANELS` (FR-030) narrows the practical gap (real directory
+  browsing now exists, just via an in-app modal instead of the OS's own
+  picker window), but doesn't close this question — a native dialog is
+  still real work, and still not attempted.
 - No automated frontend test coverage — `app.js`'s DOM logic (group
   rendering, result text, disabled-state handling) is only exercised
   manually. A headless-browser or WebDriver-based check would close this
   if the frontend grows past what manual verification can keep up with.
+  `GUI-REVIEW-PANELS` (FR-030) used exactly such a check this session
+  (headless Chromium via Playwright, a stubbed `window.__TAURI__`) but as
+  a scratch, non-committed script — worth promoting into a real,
+  committed test (a `package.json`/JS test runner this project doesn't
+  have yet) if `app.js` keeps growing at this pace, rather than
+  re-writing an equivalent throwaway script for every future GUI change.
 - Multiple concurrent scans aren't backend-guarded (Data/state and
   invariants) — revisit if the frontend ever allows triggering
   `start_scan` while one is already in flight.
@@ -818,6 +912,25 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.4.2 (2026-08-27): Added a real directory-browse capability and
+  restructured Duplicate Review into three independently-collapsible
+  panels (FR-030, `GUI-REVIEW-PANELS`, prompted by a refreshed design
+  handoff — `Deduplication app UI design.zip` (v2) — reconciled against
+  the real backend the same way `GUI-REDESIGN` reconciled the v1
+  handoff). New `list_directory` command/`DirEntryPayload` type list a
+  path's real subdirectories (or the platform's browse roots), backing
+  both a new "Browse…" modal on Scan Setup's root field and Duplicate
+  Review's new file-system panel — a deliberate real replacement for the
+  v2 handoff's own static, mocked filesystem tree (its README explicitly
+  flagged that mock as a forward-looking affordance needing a real
+  decision; this spec's answer is a real, on-demand directory read
+  instead of fabricating one, and rooting Review's tree at the scan root
+  rather than the handoff's whole-disk `/` — see ADR-0031). Duplicate
+  Review's previous single flat group list is now three panels: a real
+  file-system tree colored by scan status, a nested duplicate-group tree
+  grouped by real directory hierarchy, and the existing compare/action
+  panel with a new breadcrumb. The main sidebar gained an independent
+  collapse toggle (64px icon-only rail). ADR-0031.
 - 0.4.1 (2026-08-27): Fixed a real Scan Setup layout bug, found via this
   project's first actual Xvfb + `xdotool` interactive pass this session
   (`xdotool` was installed specifically to take a full screenshot tour of
