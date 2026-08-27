@@ -1,5 +1,5 @@
 # GUI-UX-001 — Desktop GUI (Tauri)
-- Version: 0.3.3
+- Version: 0.3.4
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -219,6 +219,16 @@ semantics, which are unchanged.
   that group's default kept path and displayed reason. A manual
   keep-choice badge SHALL always take precedence over the rule
   (`SELECTION-RULES`).
+- `GUI-UX-001-FR-023`: Scan Setup SHALL expose a real, wired "Protected
+  folders" field, sent as `referencePaths` to the `run_action`,
+  `choose_keep`, and `run_folder_action` commands (not `start_scan` or
+  `find_duplicate_folders`, since detection itself doesn't need it) — an
+  empty list SHALL be identical to no guardrail. The Duplicate Review
+  screen's rule-preview lookup SHALL also resolve via `choose_keep`
+  whenever at least one reference folder is configured, even under the
+  default `"alphabetical"` rule, so the "keeping this file" badge
+  reflects the guardrail before Apply rather than only after
+  (`ACTION-REFERENCE-FOLDERS`, ADR-0025).
 
 ## Architecture and interfaces
 
@@ -229,11 +239,15 @@ semantics, which are unchanged.
 #[tauri::command]
 fn start_scan<R: Runtime>(app: AppHandle<R>, root: String, options: ScanOptionsPayload) -> Result<(), String>;
 #[tauri::command]
-fn run_action(group: GroupPayload, kind: String, apply: bool) -> Result<ActionResultPayload, String>;
+fn run_action(group: GroupPayload, kind: String, keep_reason: Option<String>, apply: bool,
+              reference_paths: Vec<String>) -> Result<ActionResultPayload, String>;
+#[tauri::command]
+fn choose_keep(group: GroupPayload, rule: String, reference_paths: Vec<String>) -> Result<ChooseKeepPayload, String>;
 #[tauri::command]
 fn find_duplicate_folders(root: String, groups: Vec<GroupPayload>, options: ScanOptionsPayload) -> Result<Vec<FolderMatchPayload>, String>;
 #[tauri::command]
-fn run_folder_action(removed: String, kept: String, groups: Vec<GroupPayload>, options: ScanOptionsPayload, kind: String, apply: bool) -> Result<FolderActionResultPayload, String>;
+fn run_folder_action(removed: String, kept: String, groups: Vec<GroupPayload>, options: ScanOptionsPayload, kind: String, apply: bool,
+                      reference_paths: Vec<String>) -> Result<FolderActionResultPayload, String>;
 
 // src/payload.rs — serde DTOs, kept out of rusty_fclone-core (ADR-0020)
 struct ScanOptionsPayload { /* mirrors ScanOptions, all fields optional */ }
@@ -411,10 +425,22 @@ hardcoded SVG strings are the only `innerHTML` use in the frontend.
   by the manual end-to-end pass below — no IPC-level test drives the
   frontend's pair-selection logic (`folderMatchPairs`), since that logic
   runs in `app.js`, not behind an `invoke` boundary; see Open questions.
+- FR-023 (reference-folder guardrail) is exercised by
+  `commands::tests::run_action_reference_path_overrides_the_chosen_keep_and_is_never_acted_on`
+  and `commands::tests::run_folder_action_reference_path_protects_a_file_and_blocks_the_prune`
+  — both IPC-level, asserting on real filesystem state (a protected file
+  survives and, at the folder level, blocks the directory prune) — plus
+  every existing `run_action`/`choose_keep`/`run_folder_action` test
+  updated to pass `referencePaths: []`. `app.js`'s `referencePathsList`/
+  `ensureRuleKeepChoice` changes have no automated coverage (same standing
+  gap as the rest of `app.js`; see Open questions) and no manual Xvfb/
+  `xdotool` pass this session — `xdotool` isn't installed in this
+  environment, so this requirement, like FR-020 through FR-022 before it,
+  has IPC-level verification only.
 
 ## Verification plan
 
-Unit/IPC tests in `rusty_fclone-gui` (24 tests: 14 in `payload::tests`, 10
+Unit/IPC tests in `rusty_fclone-gui` (32 tests: 16 in `payload::tests`, 16
 in `commands::tests`), run as part of `cargo test --workspace`. Manual
 end-to-end verification of the redesigned frontend (this environment has
 no display, so via Xvfb): a built binary was launched, screenshotted at
@@ -499,6 +525,16 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.4 (2026-08-27): Added the reference-folder guardrail's GUI surface
+  (FR-023, `ACTION-REFERENCE-FOLDERS`, first unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2). A new "Protected folders"
+  field on Scan Setup, sent as `referencePaths` to `run_action`,
+  `choose_keep` (both gained the parameter), and `run_folder_action` —
+  not `start_scan`/`find_duplicate_folders`, since detection itself
+  doesn't need it. `ensureRuleKeepChoice` (Duplicate Review) now also
+  resolves via `choose_keep` under the default `"alphabetical"` rule
+  whenever a reference folder is configured, so the "keeping this file"
+  badge reflects the guardrail before Apply. ADR-0025.
 - 0.3.3 (2026-08-26): Reversed `FCLONE-ACTION-001`'s "configurable
   keep-strategy" v1 non-goal on the GUI side too (`SELECTION-RULES`,
   third and final Phase 1 unit of

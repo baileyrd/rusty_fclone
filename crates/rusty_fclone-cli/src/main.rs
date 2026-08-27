@@ -196,6 +196,17 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = KeepRule::Alphabetical)]
     keep_rule: KeepRule,
 
+    /// Mark this path (a file or a directory subtree) as protected --
+    /// never selected as a redundant copy to act on. Repeatable. Overrides
+    /// --keep-rule when a group contains a protected path: that path is
+    /// always kept, and every other protected copy is excluded from the
+    /// action too, even if it isn't the one kept. A hard, fails-closed
+    /// guardrail, not a suggestion -- it can't be bypassed by --keep-rule
+    /// or by which path a group happens to sort first
+    /// (`ACTION-REFERENCE-FOLDERS`). No effect in the default Report mode.
+    #[arg(long = "reference")]
+    reference_paths: Vec<PathBuf>,
+
     /// Actually perform --action's effect. Without this flag, delete,
     /// hardlink, and reflink only print a preview and touch nothing — a
     /// deliberate two-flag confirmation so a single typo can't cause data
@@ -329,6 +340,7 @@ fn run(cli: Cli) -> ExitCode {
                         &group,
                         action_kind,
                         cli.keep_rule.as_core_rule(),
+                        &cli.reference_paths,
                         cli.apply,
                         cli.format,
                         &mut total_bytes_reclaimed,
@@ -371,6 +383,7 @@ fn run(cli: Cli) -> ExitCode {
             &collected_groups,
             &options,
             action_kind,
+            &cli.reference_paths,
             cli.apply,
             &mut total_bytes_reclaimed,
             &mut total_files_acted_on,
@@ -393,6 +406,7 @@ fn run(cli: Cli) -> ExitCode {
                 group,
                 action_kind,
                 cli.keep_rule.as_core_rule(),
+                &cli.reference_paths,
                 cli.apply,
                 cli.format,
                 &mut total_bytes_reclaimed,
@@ -588,10 +602,12 @@ fn report_action_summary(
 /// requested, its plan and, with --apply, the result of actually running
 /// it) in the requested format. Returns whether any per-file error
 /// occurred.
+#[allow(clippy::too_many_arguments)]
 fn handle_group(
     group: &DuplicateGroup,
     action_kind: Option<ActionKind>,
     keep_rule: SelectRule,
+    reference_paths: &[PathBuf],
     apply: bool,
     format: Format,
     total_bytes_reclaimed: &mut u64,
@@ -602,8 +618,8 @@ fn handle_group(
         return false;
     };
 
-    let (keep, keep_reason) = select::choose_keep(group, keep_rule);
-    let plan = action::plan_with_keep(group, &keep, kind);
+    let (keep, keep_reason) = select::choose_keep(group, keep_rule, reference_paths);
+    let plan = action::plan_with_keep(group, &keep, kind, reference_paths);
     if plan.actions.is_empty() {
         print_group(format, group, None);
         return false;
@@ -786,6 +802,7 @@ fn report_folder_matches(
     groups: &[DuplicateGroup],
     options: &ScanOptions,
     action_kind: Option<ActionKind>,
+    reference_paths: &[PathBuf],
     apply: bool,
     total_bytes_reclaimed: &mut u64,
     total_files_acted_on: &mut u64,
@@ -795,7 +812,14 @@ fn report_folder_matches(
         let mut outcomes = Vec::new();
         if let Some(kind) = action_kind {
             for (removed, kept) in folder_match_pairs(m) {
-                match folder_action::plan_folder(removed, kept, groups, options, kind) {
+                match folder_action::plan_folder(
+                    removed,
+                    kept,
+                    groups,
+                    options,
+                    kind,
+                    reference_paths,
+                ) {
                     Ok(plan) => {
                         let report = apply.then(|| folder_action::apply_folder(&plan));
                         let (bytes, files, failed, directory_removed) = match &report {
@@ -1049,6 +1073,7 @@ mod tests {
             exclude_paths: ScanOptions::default().exclude_paths,
             action: Action::Report,
             keep_rule: KeepRule::Alphabetical,
+            reference_paths: Vec::new(),
             apply: false,
             yes: false,
             find_duplicate_folders: false,
@@ -1160,6 +1185,31 @@ mod tests {
     }
 
     #[test]
+    fn reference_path_overrides_keep_rule_and_is_never_acted_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("reference");
+        fs::create_dir_all(&reference).unwrap();
+        // z_protected.txt would lose to a.txt under --keep-rule alphabetical
+        // (the default) on filename alone -- the reference guardrail must
+        // still win.
+        let protected = reference.join("z_protected.txt");
+        let a = dir.path().join("a.txt");
+        fs::write(&protected, b"dup").unwrap();
+        fs::write(&a, b"dup").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.action = Action::Trash;
+        cli.reference_paths = vec![reference];
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert!(protected.exists(), "the protected file must survive");
+        assert!(!a.exists(), "its unprotected duplicate is still removed");
+    }
+
+    #[test]
     fn action_with_apply_actually_hardlinks() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.txt");
@@ -1182,7 +1232,8 @@ mod tests {
                     size: 3,
                     paths: vec![a.clone().into(), b.clone().into()]
                 },
-                ActionKind::Delete
+                ActionKind::Delete,
+                &[]
             )
             .actions
             .len(),
@@ -1318,6 +1369,43 @@ mod tests {
 
         assert_eq!(exit, ExitCode::SUCCESS);
         assert!(!small.exists(), "the emptied subset folder must be pruned");
+        assert!(big.join("1.txt").exists(), "the superset must be untouched");
+        assert!(big.join("extra.txt").exists());
+    }
+
+    /// ADR-0025: a protected file inside a folder-match's subset side
+    /// must survive `--find-duplicate-folders --action delete --apply`,
+    /// and the guardrail must also block the directory-prune step --
+    /// pruning `small` here would silently delete the protected file it
+    /// still contains.
+    #[test]
+    fn find_duplicate_folders_with_reference_protects_a_file_and_blocks_the_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("extra.txt"), b"only in big").unwrap();
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.find_duplicate_folders = true;
+        cli.action = Action::Delete;
+        cli.reference_paths = vec![small.clone()];
+        cli.apply = true;
+        cli.yes = true;
+        let exit = run(cli);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert!(
+            small.join("1.txt").exists(),
+            "the protected file must survive"
+        );
+        assert!(
+            small.exists(),
+            "the directory must not be pruned while it still holds a protected file"
+        );
         assert!(big.join("1.txt").exists(), "the superset must be untouched");
         assert!(big.join("extra.txt").exists());
     }

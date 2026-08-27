@@ -1,9 +1,9 @@
 # Project Status
-- Last verified main commit: `c295f76` — merged `ACTION-TRASH` (PR #38),
-  the second table-stakes unit from `docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch (`selection-rules`)
-  implements that plan's third and final Phase 1 unit,
-  `SELECTION-RULES`.
+- Last verified main commit: `d6f17b4` — merged `SELECTION-RULES` (PR
+  #39), completing Phase 1 of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. This branch
+  (`action-reference-folders`) implements that plan's Phase 2, first
+  unit: `ACTION-REFERENCE-FOLDERS`.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -12,9 +12,9 @@
   pushed yet (tag pushes require a maintainer's own credentials in this
   environment); everything merged since `v0.1.0` will be tagged once that
   happens.
-- Verified at: 2026-08-26
-- Current milestone: `SELECTION-RULES` (Phase 1 of
-  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, now complete once this merges) —
+- Verified at: 2026-08-27
+- Current milestone: `ACTION-REFERENCE-FOLDERS` (Phase 2 of
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md`, first of three independent units) —
   implemented, validated, not yet merged. See `docs/roadmap/ROADMAP.md`.
 - Health: green — workspace (three crates) builds, lints, and tests clean
   on the pinned toolchain
@@ -401,19 +401,58 @@
   standing gap `DETECTION-SCAN-FILTERS`/`ACTION-TRASH` already left open
   for their own GUI surfaces).
 
+- `ACTION-REFERENCE-FOLDERS`: first unit of `DEDUP-GAP-IMPLEMENTATION-
+  PLAN.md`'s Phase 2 — a protected/reference-folder guardrail, as a hard
+  block rather than a dismissible warning. New `reference_paths:
+  &[PathBuf]` parameter on `select::choose_keep`, `action::plan`/
+  `plan_with_keep`, and `folder_action::plan_folder`: a path under any
+  configured reference folder always wins as `keep` (overriding `Rule`
+  and any caller-supplied `keep`) and is filtered out of `actions`/
+  `pairs` independently of that override, so the guarantee holds even
+  for a caller that bypasses `choose_keep` entirely. `FCLONE-ACTION-001`
+  0.6.0 (FR-015 through FR-017). New `FolderActionPlan::
+  protected_files_skipped` field; `apply_folder`'s directory-prune step
+  (ADR-0023) now also requires it to be zero — caught during
+  implementation as a real gap, not just a tidiness fix: without this
+  guard, a protected file left inside `removed` after every *planned*
+  pair succeeds would still be deleted by the prune's own
+  `fs::remove_dir_all`. CLI gained a repeatable `--reference <path>`,
+  `CLI-UX-001` 0.3.3 (FR-016). GUI gained a "Protected folders" field on
+  Scan Setup, threaded into `run_action`/`choose_keep`/
+  `run_folder_action` (not the detection-only commands); the Review
+  screen's rule-preview lookup (`ensureRuleKeepChoice`) now also resolves
+  via `choose_keep` under the default "alphabetical" rule whenever a
+  reference folder is configured, so the "keeping this file" badge
+  reflects the guardrail before Apply, `GUI-UX-001` 0.3.4 (FR-023).
+  ADR-0025 — extends ADR-0009's safety model, an architecture-level
+  decision per `AGENTS.md`. Implemented, tested (158/158 workspace
+  tests — 2 new core `select` tests, 3 new core `action` tests, 2 new
+  core `folder_action` tests, 2 new CLI tests, 2 new GUI `commands`
+  tests), `cargo fmt`/`clippy -D warnings`/`bench --no-run`/`doc` all
+  pass. Manually smoke-tested against real filesystems in this
+  environment: a file-level `--action trash --reference <dir> --apply`
+  run kept a protected file that alphabetical ordering would otherwise
+  have lost to an unprotected copy, reporting "in a protected/reference
+  folder" as the reason; a folder-level `--find-duplicate-folders
+  --action delete --reference <dir> --apply` run against a subset folder
+  containing a protected file left both the file and the folder itself
+  untouched. The GUI's new field is not yet manually verified through
+  the rendered UI — `xdotool` isn't installed in this environment (same
+  standing gap `DETECTION-SCAN-FILTERS`/`ACTION-TRASH`/`SELECTION-RULES`
+  already left open for their own GUI surfaces).
+
 ## In progress
-- None — `SELECTION-RULES` above is implemented and validated on branch
-  `selection-rules`, not yet merged. Once it does, Phase 1 of
-  `DEDUP-GAP-IMPLEMENTATION-PLAN.md` is complete.
+- None — `ACTION-REFERENCE-FOLDERS` above is implemented and validated on
+  branch `action-reference-folders`, not yet merged.
 
 ## Blocked
 - None.
 
 ## Next
-- Phase 1 of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` is complete
-  once `SELECTION-RULES` merges. Phase 2's three units
-  (`ACTION-REFERENCE-FOLDERS`, `ACTION-MOVE-COPY`, `CLI-HISTORY-AUDIT`)
-  are independent of each other and can start in any order.
+- Phase 2 of `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` continues
+  once `ACTION-REFERENCE-FOLDERS` merges. Its remaining two units
+  (`ACTION-MOVE-COPY`, `CLI-HISTORY-AUDIT`) are independent of each other
+  and can start in any order.
 - Follow-on units intentionally left open by earlier scoping decisions
   (each needs its own design work before starting): `DETECTION-STREAMING-OVERLAP`
   proper (full pipeline overlap, needs a `ScanEvent` finality-contract
@@ -435,11 +474,22 @@
   disabled with an explanatory tooltip in `GUI-REDESIGN`.
 
 ## Validation
-- `cargo fmt --all --check`: pass (2026-08-26)
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-26)
-- `cargo test --workspace`: pass, 146/146 (2026-08-26)
-- `cargo bench --workspace --no-run`: pass (2026-08-26)
-- `cargo doc --workspace --all-features --no-deps`: pass (2026-08-26)
+- `cargo fmt --all --check`: pass (2026-08-27)
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass (2026-08-27)
+- `cargo test --workspace`: pass, 158/158 (2026-08-27)
+- `cargo bench --workspace --no-run`: pass (2026-08-27)
+- `cargo doc --workspace --all-features --no-deps`: pass (2026-08-27)
+- Manual CLI smoke test, `ACTION-REFERENCE-FOLDERS` (2026-08-27): a real
+  two-file tree (`reference/z_protected.txt`, `other/a.txt`, both
+  duplicates) confirmed `--action trash --reference reference --apply`
+  kept `z_protected.txt` and trashed `a.txt`, despite alphabetical
+  ordering favoring `a.txt` — the text output's `keep:` line reported
+  "in a protected/reference folder" as the reason. A second real tree
+  (`small/1.txt` duplicated inside `big/1.txt`, `big/extra.txt`) confirmed
+  `--find-duplicate-folders --action delete --reference small --apply`
+  left `small/1.txt` and the `small` directory itself untouched (0 files,
+  0 bytes reclaimed), instead of the folder being pruned as it normally
+  would be once its one file is deleted.
 - Manual CLI smoke test, `SELECTION-RULES` (2026-08-26): a real two-file
   tree with deliberately different modification times confirmed
   `--keep-rule newest` kept the newer file (not the alphabetically-first
@@ -494,6 +544,16 @@
   light-theme toggle. Every screen rendered correctly in both themes.
 
 ## Risks and decisions needed
+- `ACTION-REFERENCE-FOLDERS`'s GUI surface (the new "Protected folders"
+  field) has IPC-level test coverage for `run_action`/`choose_keep`/
+  `run_folder_action`'s new `referencePaths` parameter, but no Xvfb/
+  `xdotool` end-to-end pass confirmed a protected file actually shows the
+  right "keeping this file" badge and survives Apply through the rendered
+  UI — `xdotool` isn't installed in this environment. The underlying
+  core logic is fully unit-tested and additionally confirmed via real CLI
+  smoke tests against a real filesystem (see Validation above), so the
+  residual risk is UI wiring specifically, same shape as the other GUI
+  surfaces below.
 - `SELECTION-RULES`'s GUI surface (the real "Keep newest copy" toggle) has
   IPC-level test coverage for the new `choose_keep` command and
   `run_action`'s `keepReason` handling, but no Xvfb/`xdotool` end-to-end

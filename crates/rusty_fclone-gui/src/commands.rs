@@ -11,9 +11,9 @@ use rusty_fclone_core::select;
 use rusty_fclone_core::{action, find_folder_duplicates, folder_action};
 
 use crate::payload::{
-    normalize_path_input, parse_action_kind, parse_keep_rule, ActionResultPayload,
-    ChooseKeepPayload, FolderActionResultPayload, FolderMatchPayload, GroupPayload,
-    ScanEventPayload, ScanOptionsPayload,
+    normalize_path_input, normalize_path_list, parse_action_kind, parse_keep_rule,
+    ActionResultPayload, ChooseKeepPayload, FolderActionResultPayload, FolderMatchPayload,
+    GroupPayload, ScanEventPayload, ScanOptionsPayload,
 };
 
 /// Starts a scan on a background thread and streams results back to the
@@ -71,9 +71,11 @@ pub fn run_action(
     kind: String,
     keep_reason: Option<String>,
     apply: bool,
+    reference_paths: Vec<String>,
 ) -> Result<ActionResultPayload, String> {
     let kind = parse_action_kind(&kind)?;
     let group = group.into();
+    let reference_paths = normalize_path_list(&reference_paths);
     // The kept path is always `group.paths[0]` here -- the frontend
     // resolves which path that should be *before* calling this command
     // (either a manual keep-choice badge, or `choose_keep` below for a
@@ -83,7 +85,10 @@ pub fn run_action(
     // keep"). `keep_reason` is likewise resolved by the frontend from
     // whichever of those two paths it took, and just passed through here
     // for display -- `action::plan` itself has no concept of "why".
-    let plan = action::plan(&group, kind);
+    // `reference_paths` (ACTION-REFERENCE-FOLDERS) still overrides that
+    // choice, the same defense-in-depth `action::plan`'s core caller
+    // already relies on.
+    let plan = action::plan(&group, kind, &reference_paths);
     let applied = if apply {
         Some((&action::apply(&plan)).into())
     } else {
@@ -100,10 +105,15 @@ pub fn run_action(
 /// pick before the user confirms, the same way it already resolves a
 /// manual keep-choice badge (`SELECTION-RULES`).
 #[tauri::command]
-pub fn choose_keep(group: GroupPayload, rule: String) -> Result<ChooseKeepPayload, String> {
+pub fn choose_keep(
+    group: GroupPayload,
+    rule: String,
+    reference_paths: Vec<String>,
+) -> Result<ChooseKeepPayload, String> {
     let rule = parse_keep_rule(&rule)?;
     let group = group.into();
-    let (keep, reason) = select::choose_keep(&group, rule);
+    let reference_paths = normalize_path_list(&reference_paths);
+    let (keep, reason) = select::choose_keep(&group, rule, &reference_paths);
     Ok(ChooseKeepPayload {
         keep: keep.display().to_string(),
         reason,
@@ -150,14 +160,17 @@ pub fn run_folder_action(
     options: ScanOptionsPayload,
     kind: String,
     apply: bool,
+    reference_paths: Vec<String>,
 ) -> Result<FolderActionResultPayload, String> {
     let kind = parse_action_kind(&kind)?;
     let removed = PathBuf::from(normalize_path_input(&removed));
     let kept = PathBuf::from(normalize_path_input(&kept));
     let groups: Vec<_> = groups.into_iter().map(Into::into).collect();
     let options = options.into();
-    let plan = folder_action::plan_folder(&removed, &kept, &groups, &options, kind)
-        .map_err(|err| err.to_string())?;
+    let reference_paths = normalize_path_list(&reference_paths);
+    let plan =
+        folder_action::plan_folder(&removed, &kept, &groups, &options, kind, &reference_paths)
+            .map_err(|err| err.to_string())?;
     let applied = if apply {
         Some((&folder_action::apply_folder(&plan)).into())
     } else {
@@ -223,6 +236,7 @@ mod tests {
                 "group": {"size": 3, "paths": [a.display().to_string(), b.display().to_string()]},
                 "kind": "delete",
                 "apply": false,
+                "referencePaths": [],
             }),
         )
         .expect("run_action should succeed");
@@ -254,6 +268,7 @@ mod tests {
                 "group": {"size": 3, "paths": [a.display().to_string(), b.display().to_string()]},
                 "kind": "delete",
                 "apply": true,
+                "referencePaths": [],
             }),
         )
         .expect("run_action should succeed");
@@ -283,6 +298,7 @@ mod tests {
                 "group": {"size": 3, "paths": [a.display().to_string(), b.display().to_string()]},
                 "kind": "delete",
                 "apply": false,
+                "referencePaths": [],
             }),
         )
         .expect("run_action should succeed");
@@ -305,6 +321,7 @@ mod tests {
                 "kind": "delete",
                 "keepReason": "most recent modification time",
                 "apply": false,
+                "referencePaths": [],
             }),
         )
         .expect("run_action should succeed");
@@ -312,6 +329,41 @@ mod tests {
         assert_eq!(
             response["plan"]["keepReason"],
             "most recent modification time"
+        );
+    }
+
+    /// ADR-0025: a reference-folder path passed via `referencePaths`
+    /// overrides `group.paths[0]` (the caller-chosen "keep") the same way
+    /// `action::plan_with_keep`'s core test already covers -- this is the
+    /// IPC boundary re-verifying that guarantee still holds once the path
+    /// list has been through JSON.
+    #[test]
+    fn run_action_reference_path_overrides_the_chosen_keep_and_is_never_acted_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("reference");
+        fs::create_dir_all(&reference).unwrap();
+        let protected = reference.join("protected.txt");
+        let other = dir.path().join("other.txt");
+        fs::write(&protected, b"dup").unwrap();
+        fs::write(&other, b"dup").unwrap();
+
+        let response = invoke(
+            "run_action",
+            json!({
+                // `other` is first, so it would normally be the "keep".
+                "group": {"size": 3, "paths": [other.display().to_string(), protected.display().to_string()]},
+                "kind": "trash",
+                "apply": true,
+                "referencePaths": [reference.display().to_string()],
+            }),
+        )
+        .expect("run_action should succeed");
+
+        assert_eq!(response["plan"]["kept"], protected.display().to_string());
+        assert!(protected.exists(), "the protected file must survive");
+        assert!(
+            !other.exists(),
+            "its unprotected duplicate is still removed"
         );
     }
 
@@ -329,6 +381,7 @@ mod tests {
             json!({
                 "group": {"size": 3, "paths": [a.display().to_string(), b.display().to_string()]},
                 "rule": "newest",
+                "referencePaths": [],
             }),
         )
         .expect("choose_keep should succeed");
@@ -346,6 +399,7 @@ mod tests {
             json!({
                 "group": {"size": 1, "paths": ["/a", "/b"]},
                 "rule": "frobnicate",
+                "referencePaths": [],
             }),
         );
         assert!(response.is_err(), "an unknown keep rule must be rejected");
@@ -403,6 +457,7 @@ mod tests {
                 "options": {},
                 "kind": "delete",
                 "apply": false,
+                "referencePaths": [],
             }),
         )
         .expect("run_folder_action should succeed");
@@ -438,12 +493,58 @@ mod tests {
                 "options": {},
                 "kind": "delete",
                 "apply": true,
+                "referencePaths": [],
             }),
         )
         .expect("run_folder_action should succeed");
 
         assert_eq!(response["applied"]["directoryRemoved"], true);
         assert!(!small.exists(), "apply: true must prune the emptied folder");
+        assert!(
+            big.join("1.txt").exists(),
+            "the kept side must be untouched"
+        );
+    }
+
+    /// ADR-0025, folder-level: a protected file inside `removed` survives
+    /// and blocks the directory prune, the same guarantee the CLI's
+    /// `find_duplicate_folders_with_reference_protects_a_file_and_blocks_the_prune`
+    /// test covers -- re-verified here at the IPC boundary.
+    #[test]
+    fn run_folder_action_reference_path_protects_a_file_and_blocks_the_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+
+        let response = invoke(
+            "run_folder_action",
+            json!({
+                "removed": small.display().to_string(),
+                "kept": big.display().to_string(),
+                "groups": [
+                    {"size": 3, "paths": [small.join("1.txt").display().to_string(), big.join("1.txt").display().to_string()]},
+                ],
+                "options": {},
+                "kind": "delete",
+                "apply": true,
+                "referencePaths": [small.display().to_string()],
+            }),
+        )
+        .expect("run_folder_action should succeed");
+
+        assert_eq!(response["applied"]["directoryRemoved"], false);
+        assert!(
+            small.join("1.txt").exists(),
+            "the protected file must survive"
+        );
+        assert!(
+            small.exists(),
+            "the directory must not be pruned while it still holds a protected file"
+        );
         assert!(
             big.join("1.txt").exists(),
             "the kept side must be untouched"
@@ -471,6 +572,7 @@ mod tests {
                 "options": {},
                 "kind": "delete",
                 "apply": false,
+                "referencePaths": [],
             }),
         )
         .expect_err("a folder with no confirmed duplicate in `groups` must be rejected");
@@ -505,6 +607,7 @@ mod tests {
                 "group": {"size": 1, "paths": ["/a", "/b"]},
                 "kind": "frobnicate",
                 "apply": false,
+                "referencePaths": [],
             }),
         )
         .expect_err("an unknown action kind must be rejected");

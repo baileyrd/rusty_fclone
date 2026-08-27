@@ -9,12 +9,12 @@ usable from either a CLI or a desktop GUI.
 
 Detection (staged hashing, benchmarked faster than fclones on most
 workloads — see below), an action layer (delete/trash/hardlink/reflink,
-dry-run by default, rule-based keep selection), richer CLI output (JSON,
-progress reporting, an interactive confirmation prompt), a desktop GUI, an
-opt-in incremental hash cache, opt-in SQLite scan-history, opt-in import of
-an existing fclones hash cache, opt-in folder-level duplicate detection,
-and include/exclude scan filters (min/max size, extension, excluded paths)
-are all implemented. See
+dry-run by default, rule-based keep selection, a protected/reference-folder
+guardrail), richer CLI output (JSON, progress reporting, an interactive
+confirmation prompt), a desktop GUI, an opt-in incremental hash cache,
+opt-in SQLite scan-history, opt-in import of an existing fclones hash
+cache, opt-in folder-level duplicate detection, and include/exclude scan
+filters (min/max size, extension, excluded paths) are all implemented. See
 [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) for the current
 checkpoint and [`docs/roadmap/ROADMAP.md`](docs/roadmap/ROADMAP.md) for
 what's planned.
@@ -106,6 +106,12 @@ Options:
           (default), newest, oldest, shortest-path, or longest-path. Applied
           across every group in one pass. No effect in the default Report
           mode, which doesn't designate a kept file at all
+      --reference <PATH>
+          Mark this path (a file or directory subtree) as protected -- never
+          acted on. Repeatable. Overrides --keep-rule: a group containing a
+          protected path always keeps it, and every other protected copy is
+          excluded from the action too. A hard guardrail, not a suggestion --
+          can't be bypassed by --keep-rule or path sort order
   -y, --yes
           Skip the interactive confirmation prompt normally shown before
           --apply mutates anything
@@ -136,6 +142,11 @@ rusty-fclone --action trash --apply /path/to/scan
 # Keep the most recently modified copy in each group instead of the
 # alphabetically-first one -- applied across every group in one pass.
 rusty-fclone --action trash --keep-rule newest --apply /path/to/scan
+
+# Never touch anything under a "master" archive folder, no matter which
+# copy --keep-rule would otherwise pick -- the protected copy is always
+# kept and every other copy of it is trashed instead.
+rusty-fclone --action trash --reference /path/to/originals --apply /path/to/scan
 
 # Reclaim the space without losing any path -- replace redundant copies
 # with hardlinks to the kept file instead of deleting them.

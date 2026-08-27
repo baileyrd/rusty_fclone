@@ -115,6 +115,12 @@ const state = {
   keepChoice: {},
   keepRule: "alphabetical",
   ruleKeepChoice: {},
+  // Comma-separated protected/reference folders (ACTION-REFERENCE-FOLDERS,
+  // ADR-0025) -- any file under one of these is never planned or acted on,
+  // and always wins as the "keep" over `keepRule`. Kept separate from
+  // `state.options` since it isn't a scan tunable: detection (`start_scan`,
+  // `find_duplicate_folders`) doesn't take it, only the action commands do.
+  referencePaths: "",
   actionKind: "trash",
   sessionBytesReclaimed: 0,
   actionMessage: null,
@@ -556,6 +562,22 @@ function scanView() {
     ),
     el(
       "div",
+      { className: "card" },
+      el("div", { className: "card-title", style: "margin-bottom:4px" }, "Protected folders"),
+      el(
+        "div",
+        { className: "hint", style: "margin-bottom:14px" },
+        "A file under any of these is never deleted, trashed, hardlinked, or reflinked -- it's always the one kept, in every duplicate group it appears in.",
+      ),
+      el(
+        "div",
+        { className: "field-col" },
+        el("div", { className: "field-label" }, "Never touch files under (comma-separated)"),
+        pathInput("(none) -- e.g. /home/me/originals, /home/me/archive", state.referencePaths, (v) => { state.referencePaths = v; }),
+      ),
+    ),
+    el(
+      "div",
       { className: "card scan-footer" },
       el(
         "div",
@@ -714,17 +736,20 @@ function reviewMain(item) {
 // path a non-default keep rule would pick for `item`, caching the result in
 // `state.ruleKeepChoice` so it's only looked up once per group. A manual
 // keep-choice badge always wins over the rule, so this is skipped entirely
-// once one exists. Mutates `state` directly rather than via `setState` for
-// the in-flight marker (`null`) to avoid re-rendering mid-render; the
-// resolved result *does* go through `setState` once the lookup returns, so
-// the card updates to reflect it.
+// once one exists. Also runs for the default "alphabetical" rule whenever
+// protected folders are configured (ACTION-REFERENCE-FOLDERS) -- the
+// guardrail overrides "alphabetically first" too, so the badge would
+// otherwise show the wrong file as "kept" until Apply. Mutates `state`
+// directly rather than via `setState` for the in-flight marker (`null`) to
+// avoid re-rendering mid-render; the resolved result *does* go through
+// `setState` once the lookup returns, so the card updates to reflect it.
 function ensureRuleKeepChoice(item) {
-  if (state.keepRule === "alphabetical") return;
+  if (state.keepRule === "alphabetical" && referencePathsList().length === 0) return;
   if (state.keepChoice[item.key]) return;
   if (item.key in state.ruleKeepChoice) return;
   state.ruleKeepChoice[item.key] = null;
   const group = item.group;
-  invoke("choose_keep", { group: { size: group.size, paths: group.paths }, rule: state.keepRule })
+  invoke("choose_keep", { group: { size: group.size, paths: group.paths }, rule: state.keepRule, referencePaths: referencePathsList() })
     .then((result) => {
       setState({ ruleKeepChoice: { ...state.ruleKeepChoice, [item.key]: result } });
     })
@@ -929,6 +954,7 @@ async function applyAction(item, keepPath, keepReason) {
       kind: state.actionKind,
       keepReason,
       apply: true,
+      referencePaths: referencePathsList(),
     });
     const reclaimed = result.applied ? result.applied.bytesReclaimed : 0;
     const failed = result.applied ? result.applied.failed.length : 0;
@@ -963,6 +989,7 @@ async function applyFolderAction(item) {
         options: scanOptionsPayload(),
         kind: state.actionKind,
         apply: true,
+        referencePaths: referencePathsList(),
       });
       reclaimed += result.applied ? result.applied.bytesReclaimed : 0;
       failed += result.applied ? result.applied.failed.length : 0;
@@ -1088,6 +1115,14 @@ function parseSize(value) {
   if (!value || !value.trim()) return null;
   const n = Number(value.trim());
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+}
+
+// Parses `state.referencePaths` into the list `run_action`/`choose_keep`/
+// `run_folder_action` expect -- unlike `scanOptionsPayload`'s CSV fields,
+// this is never `null`; the backend's `referencePaths` param is a required
+// (possibly empty) array, not an `Option`.
+function referencePathsList() {
+  return parseCsv(state.referencePaths) || [];
 }
 
 function scanOptionsPayload() {
