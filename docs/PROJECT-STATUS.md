@@ -1,16 +1,15 @@
 # Project Status
-- Last verified main commit: `4e34dae` — merged `DASHBOARD-CHART-UPGRADE`
-  (PR #46), the last remaining item of `docs/roadmap/
-  DEDUP-GAP-IMPLEMENTATION-PLAN.md`. **The plan is now fully implemented
-  in its entirety** — all three phases, every listed unit. This branch
-  (`gui-scan-layout-fix`) is a follow-up, not a plan item: the user asked
-  to see a real screenshot tour of the GUI, which meant installing
-  `xdotool` in this environment (not present all session) and actually
-  driving the compiled binary under Xvfb for the first time since
-  `FOLDER-ACTION`. That pass found and fixed a real, previously-
-  undiscovered layout bug on Scan Setup (see the Completed entry below)
-  and re-verified several units' GUI surfaces that had only ever had
-  IPC-level coverage.
+- Last verified main commit: `c67f63c` — merged `GUI-SCAN-LAYOUT-FIX`
+  (PR #47). `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` was already
+  **fully implemented in its entirety** as of `DASHBOARD-CHART-UPGRADE`
+  (PR #46) — all three phases, every listed unit; `GUI-SCAN-LAYOUT-FIX`
+  is a follow-up, not a plan item. The user asked to see a real
+  screenshot tour of the GUI, which meant installing `xdotool` in this
+  environment (not present all session) and actually driving the
+  compiled binary under Xvfb for the first time since `FOLDER-ACTION`.
+  That pass found and fixed a real, previously-undiscovered layout bug
+  on Scan Setup (see the Completed entry below) and re-verified several
+  units' GUI surfaces that had only ever had IPC-level coverage.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -22,7 +21,7 @@
 - Verified at: 2026-08-27
 - Current milestone: a Scan Setup layout bug fix + a real Xvfb/`xdotool`
   GUI verification pass (not a `DEDUP-GAP-IMPLEMENTATION-PLAN.md` item —
-  that plan is fully done) — implemented, validated, not yet merged.
+  that plan is fully done) — implemented, validated, merged (PR #47).
 - Health: green — workspace (three crates) builds, lints, and tests clean
   on the pinned toolchain
 
@@ -772,8 +771,8 @@
   `clippy -D warnings`/`test`/`bench --no-run`/`doc`.
 
 ## In progress
-- None — `GUI-SCAN-LAYOUT-FIX` above is implemented and validated on
-  branch `gui-scan-layout-fix`, not yet merged.
+- None — `GUI-SCAN-LAYOUT-FIX` above is implemented, validated, and
+  merged to `main` (PR #47).
 
 ## Blocked
 - None.
