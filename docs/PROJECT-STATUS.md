@@ -1,15 +1,20 @@
 # Project Status
-- Last verified main commit: `c67f63c` — merged `GUI-SCAN-LAYOUT-FIX`
-  (PR #47). `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` was already
-  **fully implemented in its entirety** as of `DASHBOARD-CHART-UPGRADE`
-  (PR #46) — all three phases, every listed unit; `GUI-SCAN-LAYOUT-FIX`
-  is a follow-up, not a plan item. The user asked to see a real
-  screenshot tour of the GUI, which meant installing `xdotool` in this
-  environment (not present all session) and actually driving the
+- Last verified main commit: `51f9cb6` — merged `GUI-REVIEW-PANELS`
+  (PR #52). Prompted by a refreshed `Deduplication app UI design.zip`
+  (v2 handoff) committed to the repo root; see the Completed entry below
+  for the full account. Prior checkpoint: `c67f63c` — merged
+  `GUI-SCAN-LAYOUT-FIX` (PR #47). `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md` was already **fully implemented in
+  its entirety** as of `DASHBOARD-CHART-UPGRADE` (PR #46) — all three
+  phases, every listed unit; `GUI-SCAN-LAYOUT-FIX` and `GUI-REVIEW-
+  PANELS` are both follow-ups, not plan items. The user asked to see a
+  real screenshot tour of the GUI, which meant installing `xdotool` in
+  this environment (not present all session) and actually driving the
   compiled binary under Xvfb for the first time since `FOLDER-ACTION`.
   That pass found and fixed a real, previously-undiscovered layout bug
-  on Scan Setup (see the Completed entry below) and re-verified several
-  units' GUI surfaces that had only ever had IPC-level coverage.
+  on Scan Setup (see the `GUI-SCAN-LAYOUT-FIX` Completed entry) and
+  re-verified several units' GUI surfaces that had only ever had
+  IPC-level coverage.
 - Tagged: `v0.1.0` at commit `b616294`, GitHub Release published with all
   four platform archives attached (verified via the GitHub API after
   `.github/workflows/release.yml`'s first real dispatch succeeded — see
@@ -770,37 +775,39 @@
   221/221 workspace tests unaffected, confirmed via `cargo fmt`/
   `clippy -D warnings`/`test`/`bench --no-run`/`doc`.
 
-## In progress
-- `GUI-REVIEW-PANELS`: implemented and validated on branch
-  `claude/ui-design-package-review-kmxb0h`, not yet merged to `main`.
-  Prompted by a refreshed `Deduplication app UI design.zip` (v2 handoff)
-  committed to the repo root — diffed against the v1 handoff `GUI-
-  REDESIGN`/ADR-0022 already reconciled and found most of what it newly
-  describes (Trash/Move/Copy, protected folders, saved profiles,
-  perceptual matching) was already real and ahead of the mockup; only a
-  "Browse…" folder picker, a three-panel Duplicate Review layout, and a
-  sidebar collapse were genuinely new. New `list_directory` command/
-  `DirEntryPayload` type read the real filesystem directly (no new Tauri
-  capability/permission grant) — resolving the v2 README's own flagged,
-  unresolved question about the mock filesystem tree as "build the real
-  browser," never a fabricated one. Duplicate Review's previous flat
-  group list is now three independently-collapsible panels: a real
+- `GUI-REVIEW-PANELS`: prompted by a refreshed `Deduplication app UI
+  design.zip` (v2 handoff) committed to the repo root — diffed against
+  the v1 handoff `GUI-REDESIGN`/ADR-0022 already reconciled and found
+  most of what it newly describes (Trash/Move/Copy, protected folders,
+  saved profiles, perceptual matching) was already real and ahead of the
+  mockup; only a "Browse…" folder picker, a three-panel Duplicate Review
+  layout, and a sidebar collapse were genuinely new. New `list_directory`
+  command/`DirEntryPayload` type read the real filesystem directly (no
+  new Tauri capability/permission grant) — resolving the v2 README's own
+  flagged, unresolved question about the mock filesystem tree as "build
+  the real browser," never a fabricated one. Duplicate Review's previous
+  flat group list is now three independently-collapsible panels: a real
   file-system tree (rooted at the scan root, not the handoff's whole-disk
   `/` mock — see ADR-0031) colored by scan status computed from every
   real path a duplicate touches, a nested duplicate-group tree grouped by
   real directory hierarchy, and the existing compare/action panel with a
   new breadcrumb. `cargo fmt`/`clippy -D warnings`/`test` all green
   (225/225 workspace tests — 63 in `rusty_fclone-gui`, 4 new
-  `list_directory` tests; no other crate touched). No display/`xdotool` toolchain in this environment this
-  session, so frontend verification used a scratch, non-committed
-  headless-Chromium (Playwright) script instead — driving the real
-  `index.html`/`app.js`/`style.css` with a mocked `window.__TAURI__`
-  through the Browse modal, all three Review panels (including a real
-  folder-match item), panel/sidebar collapse, and both themes,
-  screenshotted at each step. ADR-0031; `GUI-UX-001` 0.4.1 → 0.4.2. See
-  `docs/roadmap/ROADMAP.md`'s `GUI-REVIEW-PANELS` row and
-  `GUI-UX-001`'s FR-030/Verification plan/Open questions for the full
-  account.
+  `list_directory` tests; no other crate touched). No display/`xdotool`
+  toolchain in this environment this session, so frontend verification
+  used a scratch, non-committed headless-Chromium (Playwright) script
+  instead — driving the real `index.html`/`app.js`/`style.css` with a
+  mocked `window.__TAURI__` through the Browse modal, all three Review
+  panels (including a real folder-match item), panel/sidebar collapse,
+  and both themes, screenshotted at each step. ADR-0031; `GUI-UX-001`
+  0.4.1 → 0.4.2. Implemented, validated, and merged to `main` (PR #52,
+  merge commit `51f9cb6`). See `docs/roadmap/ROADMAP.md`'s
+  `GUI-REVIEW-PANELS` row and `GUI-UX-001`'s FR-030/Verification
+  plan/Open questions for the full account.
+
+## In progress
+- None — `GUI-REVIEW-PANELS` above is implemented, validated, and merged
+  to `main` (PR #52).
 
 ## Blocked
 - None.
