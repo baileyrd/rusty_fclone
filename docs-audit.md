@@ -105,3 +105,101 @@ were prose/path/diagram-caption edits), so step 5's "execute the read-only
 commands" check doesn't apply to this batch's new content;
 `cargo test --workspace` was already re-confirmed passing (76/76) as part of
 step 1's ground truth and nothing in this batch touches code.
+
+---
+
+# Docs audit — 2026-08-27 (re-run)
+
+Scope: whole tracked `*.md` surface (45 docs — up from 31 at the last run;
+23+ PRs landed in between, closing out
+`docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` in its entirety). Prompted
+by a `/docs-loop` invocation, no specific doc named. Doc-comments not
+audited (not requested). Harness mode: interactive (`LOOP_HARNESS_MODE`
+unset) — nothing below is applied without sign-off.
+
+Ground truth built from: `Cargo.toml`/each crate's `Cargo.toml`,
+`crates/rusty_fclone-core/src/action.rs`'s `ActionKind` enum, a real
+`cargo run -p rusty_fclone-cli -- --help` capture diffed against README's
+Usage section, `git ls-files`, `scripts/inventory_docs.sh` (drift ranking),
+`scripts/check_references.py --all` (451 references: 1 `broken`, 73
+`unresolved`, 16 `historical-inline-path` — see below), and the spec/ADR/
+roadmap files themselves. The prior run's "Resolution" section above (PRs
+#20-#24) was re-verified as still holding, not re-litigated.
+
+## check_references.py: the one `broken` hit
+
+`docs/PROJECT-STATUS.md:127` names `scripts/check_references.py` as a
+repo-relative path. It resolves against *this skill's* script (outside the
+repo), inside prose narrating a past docs-loop run — the same structural
+false-positive class the skill's own Limitations section calls out (a doc
+correctly describing a different component's layout). Reviewed, not a
+finding.
+
+## Findings
+
+| Doc | Where | Claim | Classification | Ground truth | Fix | Size |
+| --- | --- | --- | --- | --- | --- | --- |
+| `AGENTS.md` | `Project shape`, L9 | "an action layer (delete/trash/hardlink/reflink)" | stale | `action.rs`'s `ActionKind` also has `Move`/`Copy` (`ACTION-MOVE-COPY`, ADR-0026, shipped); CLI `--action move`/`copy` and GUI archive-folder field both exist | Add move/copy to the list | S |
+| `AGENTS.md` | `Change rules`, L69-70 | "Update the relevant spec (`FCLONE-DETECTION-001.md`, `FCLONE-ACTION-001.md`, or **a future one**)" | stale | Two more specs already exist and are actively maintained: `docs/specifications/cli-ux/CLI-UX-001.md`, `docs/specifications/gui-ux/GUI-UX-001.md` — "a future one" undersells what's already shipped | Name both existing specs explicitly | S |
+| `docs/architecture/SYSTEM-ARCHITECTURE.md` | `Where to look next` → Specs, L172-174 | Lists `FCLONE-DETECTION-001.md`, `FCLONE-ACTION-001.md`, `GUI-UX-001.md` | missing | `docs/specifications/cli-ux/CLI-UX-001.md` exists (0.3.6, actively maintained) and isn't listed | Add it to the list | S |
+| `docs/roadmap/DEDUP-GAP-IMPLEMENTATION-PLAN.md` | Header, L9-15 | "Status of this document: a proposal, not a commitment... fold the chosen rows into `ROADMAP.md`... this plan can be trimmed to a changelog note or removed" | orphaned | Every unit in this plan (all 3 phases, 10 units) is `Done` and already folded into `ROADMAP.md`, confirmed by grepping every unit name there — the doc's own stated exit condition has been reached | Update the status note to reflect completion (or trim per its own instruction — user's call, see below) | S |
+| `docs/roadmap/ROADMAP.md` | `GUI-MEDIA-PREVIEW`/`SCAN-PROFILES`/`DETECTION-PERCEPTUAL-IMAGES`/`DASHBOARD-CHART-UPGRADE` rows, Evidence column | Each: "not yet manually verified through the rendered UI (no Xvfb/`xdotool` pass this session)" | stale | `GUI-UX-001.md`'s own Verification plan (0.4.1 entry) documents a real Xvfb+`xdotool` pass, merged this session (PR #47), that verified: `GUI-MEDIA-PREVIEW`'s photo path (not audio), `SCAN-PROFILES`'s card rendering (not save/load/delete interaction), `DETECTION-PERCEPTUAL-IMAGES` end-to-end, `DASHBOARD-CHART-UPGRADE` end-to-end (chart/tooltip/legend) | Update each row's Evidence text to match what `GUI-UX-001.md` and `PROJECT-STATUS.md` already record as verified vs. still-open | M |
+| `docs/traceability/TRACEABILITY.md` | `FR-026`/`FR-027`/`FR-028`/`FR-029` rows, Status column | Each: "no manual Xvfb/`xdotool` verification through the rendered UI yet" | stale | Same ground truth as the `ROADMAP.md` row above | Same correction, mirrored into the Status column | M |
+| `docs/PROJECT-STATUS.md` | Header, L2, L5-6, L23-25; `## In progress`, L774-776 | "Last verified main commit: `4e34dae`"; branch `gui-scan-layout-fix` described as "not yet merged" / "implemented, validated, not yet merged" | stale | `main` is at `c67f63c` (PR #47 merged this session, branch deleted); `AGENTS.md`'s own "Definition of done" requires `PROJECT-STATUS.md` updated after every merge — this update didn't happen yet | Rewrite the header and `## In progress` to reflect the merge | S |
+
+## Reviewed, not findings
+
+- `docs/benchmarks/FCLONES-COMPARISON.md` ranked highest on the drift
+  scanner (36 code commits since last touched) but nothing since has
+  changed the benchmarked hot path (traversal/hashing) — every unit in
+  between was additive (filters, actions, GUI, perceptual images, a
+  separate opt-in pass). Spot-checked the header claims; still accurate.
+  Not re-benchmarked (no code change to justify it).
+- `WORKFLOW.md` — the two rows the last run fixed (orphaned Authority
+  section, hardcoded ADR count) stayed fixed; no new drift found on a
+  fresh read.
+- The 73 `unresolved` + 16 `historical-inline-path` hits from
+  `check_references.py --all`: spot-checked a sample (`ui/app.js`-style
+  paths in `GUI-UX-001.md`/`TRACEABILITY.md` are inline shorthand in
+  sentences that already name `crates/rusty_fclone-gui`; `docs-audit.md`'s
+  own `historical-inline-path` hits are the prior run's resolution record,
+  correctly left alone). Same pattern as the last run's 19 reviewed hits;
+  not worth a row each.
+- README.md's Usage section vs. a real `cargo run -- --help` capture:
+  every flag name, default value, and possible-value set matches. The
+  prose is a hand-formatted paraphrase (wrapped lines, `<BYTES>` instead of
+  clap's derived `<SMALL_FILE_THRESHOLD>`), not a verbatim dump — a
+  stylistic choice, not drift. No finding.
+- `README.md`, `SYSTEM-ARCHITECTURE.md` (body), `docs/specifications/
+  SPEC-REGISTRY.md`, `docs/specifications/gui-ux/GUI-UX-001.md`: all
+  freshly authored or revised this session (0-2 commits since last
+  touched per the drift scanner) and already cross-checked against the
+  code during that work. Spot-checked, no new drift found.
+
+## Counts
+
+| Classification | Count |
+| --- | --- |
+| missing | 1 |
+| stale | 5 |
+| orphaned | 1 |
+| aspirational | 0 |
+| unverifiable | 0 |
+| accurate (reviewed this run) | 5 doc groups (+ the 73/16 reference-check hits, sampled) |
+
+## Auto-eligible under `LOOP_HARNESS_MODE=auto` (not set — all rows wait for pick either way)
+
+The `AGENTS.md` move/copy row, the `SYSTEM-ARCHITECTURE.md` missing-spec
+row, and the `PROJECT-STATUS.md` merge-sync row are transcription from a
+verifiable source (an enum variant, a file's existence, `git log`) — would
+qualify. The `AGENTS.md` "a future one" row, the `ROADMAP.md`/
+`TRACEABILITY.md` verification-status rows, and the `DEDUP-GAP-
+IMPLEMENTATION-PLAN.md` status note all involve picking *how much detail to
+say*, not just correcting one fact — would pause for sign-off even in auto
+mode.
+
+## No code-is-the-suspect-party findings
+
+Everything above is a doc lagging real, already-shipped, already-tested
+changes (mostly this session's own). Nothing here suggests the code is
+behaving wrong.

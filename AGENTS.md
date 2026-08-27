@@ -6,8 +6,8 @@ under `crates/`) would override this file.
 ## Project shape
 - Purpose: `rusty_fclone` is a duplicate-file finder — a spiritual successor
   to [fclones](https://github.com/pkolaczk/fclones) — with a detection
-  engine and an action layer (delete/trash/hardlink/reflink) on top of it,
-  consumed by both a CLI and a desktop GUI (see
+  engine and an action layer (delete/trash/hardlink/reflink/move/copy) on
+  top of it, consumed by both a CLI and a desktop GUI (see
   `docs/architecture/SYSTEM-ARCHITECTURE.md`).
 - Rust structure: a three-member Cargo workspace.
   - `crates/rusty_fclone-core` — the detection engine (`scan`) and action
@@ -67,7 +67,9 @@ project architecture.
   repo). Routine implementation mechanics (internal function names, minor
   refactors) don't need one.
 - Update the relevant spec (`docs/specifications/detection/FCLONE-DETECTION-001.md`,
-  `docs/specifications/action/FCLONE-ACTION-001.md`, or a future one) and
+  `docs/specifications/action/FCLONE-ACTION-001.md`,
+  `docs/specifications/cli-ux/CLI-UX-001.md`,
+  `docs/specifications/gui-ux/GUI-UX-001.md`, or a future one) and
   `docs/traceability/TRACEABILITY.md` whenever a requirement's
   implementation or verification state changes.
 - Update `docs/PROJECT-STATUS.md` after every merge to `main`.
