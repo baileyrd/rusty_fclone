@@ -15,7 +15,7 @@ use crate::model::DuplicateGroup;
 use crate::select;
 
 /// What to do with every redundant copy in a group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionKind {
     /// Remove the redundant copy outright — permanently, with no recovery
     /// path. Prefer [`ActionKind::Trash`] unless a permanent, unrecoverable
@@ -39,6 +39,21 @@ pub enum ActionKind {
     /// enabled, APFS, ZFS on some setups) — fails per-file, not silently,
     /// wherever it isn't (ADR-0014).
     Reflink,
+    /// Relocate the redundant copy into the given archive directory,
+    /// mirroring its original path structure underneath it (collision-safe
+    /// — two files with the same name from different original directories
+    /// land at different archived paths). The original path is gone
+    /// afterward, same as [`ActionKind::Delete`]/[`ActionKind::Trash`], but
+    /// the file itself survives at its new archived path rather than being
+    /// destroyed (`ACTION-MOVE-COPY`, ADR-0026).
+    Move(PathBuf),
+    /// Copy the redundant copy into the given archive directory (same
+    /// path-mirroring scheme as [`ActionKind::Move`]), leaving the
+    /// original untouched. Reclaims no space at all — this is a
+    /// consolidate-for-review action, not a cleanup one; a caller wanting
+    /// to actually free space afterward runs a second `Delete`/`Trash`
+    /// pass once the archive is trusted (`ACTION-MOVE-COPY`, ADR-0026).
+    Copy(PathBuf),
 }
 
 /// One redundant copy and what will happen to it.
@@ -133,7 +148,7 @@ pub fn plan_with_keep(
         })
         .map(|path| FileAction {
             path: path.to_path_buf(),
-            kind,
+            kind: kind.clone(),
         })
         .collect();
 
@@ -153,16 +168,23 @@ pub fn plan_with_keep(
 pub fn apply(plan: &ActionPlan) -> ApplyReport {
     let mut report = ApplyReport::default();
     for action in &plan.actions {
-        let result = match action.kind {
+        let result = match &action.kind {
             ActionKind::Delete => fs::remove_file(&action.path),
             ActionKind::Trash => trash::delete(&action.path).map_err(std::io::Error::other),
             ActionKind::Hardlink => hardlink_over(&plan.kept, &action.path),
             ActionKind::Reflink => reflink_over(&plan.kept, &action.path),
+            ActionKind::Move(archive_dir) => move_into(archive_dir, &action.path),
+            ActionKind::Copy(archive_dir) => copy_into(archive_dir, &action.path),
         };
         match result {
             Ok(()) => {
                 report.succeeded.push(action.path.clone());
-                report.bytes_reclaimed += plan.size;
+                // `Copy` deliberately leaves the original in place -- it
+                // reclaims nothing at the scanned location, unlike every
+                // other kind (ADR-0026).
+                if !matches!(&action.kind, ActionKind::Copy(_)) {
+                    report.bytes_reclaimed += plan.size;
+                }
             }
             Err(source) => report.failed.push(FileError {
                 path: action.path.clone().into(),
@@ -204,6 +226,62 @@ fn reflink_over(kept: &Path, path: &Path) -> std::io::Result<()> {
         return Err(err);
     }
     fs::rename(&tmp, path)
+}
+
+/// Moves `path` into `archive_dir`, at its [`archived_path`]. Fails rather
+/// than silently overwriting if the destination already exists (e.g. a
+/// second scan finding the same redundant file already archived from an
+/// earlier run) — the same "never silently clobber" posture every other
+/// action in this module already has. Deliberately does not fall back to
+/// copy-then-remove on a cross-device `rename` failure: it surfaces as a
+/// normal per-file error instead, the same choice [`reflink_over`] already
+/// made for its own cross-filesystem limitation, rather than adding
+/// asymmetric fallback behavior found nowhere else in this module
+/// (`ACTION-MOVE-COPY`, ADR-0026).
+fn move_into(archive_dir: &Path, path: &Path) -> std::io::Result<()> {
+    let dest = archived_path(archive_dir, path);
+    ensure_fresh_destination(&dest)?;
+    fs::rename(path, dest)
+}
+
+/// Copies `path` into `archive_dir`, at its [`archived_path`], leaving
+/// `path` itself untouched. Same "never silently clobber" guard as
+/// [`move_into`].
+fn copy_into(archive_dir: &Path, path: &Path) -> std::io::Result<()> {
+    let dest = archived_path(archive_dir, path);
+    ensure_fresh_destination(&dest)?;
+    fs::copy(path, dest)?;
+    Ok(())
+}
+
+fn ensure_fresh_destination(dest: &Path) -> std::io::Result<()> {
+    if dest.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("archive destination already exists: {}", dest.display()),
+        ));
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+/// Where `original` lands under `archive_dir`: every path component except
+/// a root/prefix/`.`/`..` is preserved and joined underneath `archive_dir`,
+/// so two files named `photo.jpg` from different original directories
+/// never collide, and the archived layout still tells you roughly where
+/// each file came from. `..` components are dropped rather than preserved
+/// (they can't appear in an absolute scanned path anyway, and keeping them
+/// would let a crafted relative path escape `archive_dir`).
+fn archived_path(archive_dir: &Path, original: &Path) -> PathBuf {
+    let mut dest = archive_dir.to_path_buf();
+    for component in original.components() {
+        if let std::path::Component::Normal(part) = component {
+            dest.push(part);
+        }
+    }
+    dest
 }
 
 fn tmp_sibling(path: &Path) -> PathBuf {
@@ -538,5 +616,112 @@ mod tests {
         assert_eq!(report.succeeded, vec![redundant.clone()]);
         assert!(protected.exists(), "the protected file must survive");
         assert!(!redundant.exists(), "its unprotected duplicate is removed");
+    }
+
+    #[test]
+    fn apply_move_relocates_the_redundant_copy_into_the_archive_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive");
+        let a = dir.path().join("keep").join("a.txt");
+        let b = dir.path().join("elsewhere").join("b.txt");
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let plan = plan(
+            &group(3, vec![a.clone(), b.clone()]),
+            ActionKind::Move(archive.clone()),
+            &[],
+        );
+        let report = apply(&plan);
+
+        assert!(report.failed.is_empty());
+        assert_eq!(report.bytes_reclaimed, 3, "Move reclaims like Delete/Trash");
+        assert!(a.exists(), "the kept file must be untouched");
+        assert!(
+            !b.exists(),
+            "the redundant copy is gone from its original path"
+        );
+        let archived = archived_path(&archive, &b);
+        assert_eq!(
+            fs::read(&archived).unwrap(),
+            b"dup",
+            "the file must survive at its archived path"
+        );
+    }
+
+    #[test]
+    fn apply_copy_leaves_the_original_in_place_and_reclaims_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let plan = plan(
+            &group(3, vec![a.clone(), b.clone()]),
+            ActionKind::Copy(archive.clone()),
+            &[],
+        );
+        let report = apply(&plan);
+
+        assert!(report.failed.is_empty());
+        assert_eq!(
+            report.bytes_reclaimed, 0,
+            "Copy leaves the original in place -- nothing is reclaimed"
+        );
+        assert!(a.exists());
+        assert!(b.exists(), "Copy must not touch the original");
+        let archived = archived_path(&archive, &b);
+        assert_eq!(fs::read(&archived).unwrap(), b"dup");
+    }
+
+    #[test]
+    fn apply_move_fails_without_clobbering_an_existing_archive_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        // Something already occupies b's archived destination -- e.g. a
+        // previous run already archived a file with this same relative
+        // path.
+        let already_there = archived_path(&archive, &b);
+        fs::create_dir_all(already_there.parent().unwrap()).unwrap();
+        fs::write(&already_there, b"earlier archive run").unwrap();
+
+        let plan = plan(
+            &group(3, vec![a.clone(), b.clone()]),
+            ActionKind::Move(archive),
+            &[],
+        );
+        let report = apply(&plan);
+
+        assert!(report.succeeded.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert!(b.exists(), "a failed move must leave the original in place");
+        assert_eq!(
+            fs::read(&already_there).unwrap(),
+            b"earlier archive run",
+            "the pre-existing archived file must not be clobbered"
+        );
+    }
+
+    #[test]
+    fn archived_path_mirrors_original_structure_so_same_named_files_never_collide() {
+        let archive = Path::new("/archive");
+        let a = Path::new("/scan/photos/img.jpg");
+        let b = Path::new("/scan/backup/img.jpg");
+
+        let archived_a = archived_path(archive, a);
+        let archived_b = archived_path(archive, b);
+
+        assert_ne!(archived_a, archived_b);
+        assert_eq!(archived_a, Path::new("/archive/scan/photos/img.jpg"));
+        assert_eq!(archived_b, Path::new("/archive/scan/backup/img.jpg"));
     }
 }

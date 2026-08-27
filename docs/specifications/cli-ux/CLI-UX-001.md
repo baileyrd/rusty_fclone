@@ -1,5 +1,5 @@
 # CLI-UX-001 — CLI Output, Progress, and Confirmation
-- Version: 0.3.3
+- Version: 0.3.4
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -151,6 +151,13 @@ confirmation prompt as a second safety layer on top of `--apply`.
   have no effect in the default `report` mode, and an empty
   `--reference` list SHALL be identical to no guardrail
   (`ACTION-REFERENCE-FOLDERS`).
+- `CLI-UX-001-FR-017`: The CLI SHALL expose `FCLONE-ACTION-001`'s
+  `ActionKind::Move`/`Copy` as `--action move`/`--action copy`, and
+  SHALL expose their archive destination as `--archive-dir <PATH>`.
+  `--action move`/`copy` without `--archive-dir` SHALL be rejected with
+  an error naming the specific action that needs it, before any scan
+  runs. `--archive-dir` SHALL have no effect with any other `--action`
+  value (`ACTION-MOVE-COPY`).
 
 ## Architecture and interfaces
 
@@ -289,6 +296,16 @@ action totals `run()` already tracks.
   folder-level `--find-duplicate-folders --action delete --reference
   <dir> --apply` run against a subset folder containing a protected file
   left the file and the folder itself untouched.
+- FR-017 (`--action move`/`copy`, `--archive-dir`) is exercised by
+  `main::tests::action_with_apply_actually_moves_into_the_archive_directory`,
+  `action_with_apply_actually_copies_into_the_archive_directory_and_keeps_the_original`,
+  and `action_move_without_archive_dir_fails_before_touching_anything`.
+  Manual smoke test against a real filesystem confirmed all three: `move`
+  relocated the redundant copy to its mirrored archive path; `copy`
+  archived a copy while leaving both originals untouched and reported `0`
+  bytes reclaimed, with a repeated run against the same tree failing
+  cleanly on the already-archived destination rather than clobbering it;
+  `move` without `--archive-dir` was rejected before any scan ran.
 
 ## Verification plan
 
@@ -336,6 +353,13 @@ See `docs/traceability/TRACEABILITY.md`.
 
 ## Change history
 
+- 0.3.4 (2026-08-27): Added `--action move`/`copy` and `--archive-dir`
+  (FR-017), the CLI surface for `FCLONE-ACTION-001`'s archive-folder
+  actions (`ACTION-MOVE-COPY`, second unit of `docs/roadmap/
+  DEDUP-GAP-IMPLEMENTATION-PLAN.md`'s Phase 2). `--archive-dir` is
+  required by, and only meaningful with, `--action move`/`copy` —
+  validated explicitly (not via clap's generic required-if machinery) so
+  the error names the specific action needing it. ADR-0026.
 - 0.3.3 (2026-08-27): Added `--reference` (FR-016), the CLI surface for
   `FCLONE-ACTION-001`'s reference-folder guardrail
   (`ACTION-REFERENCE-FOLDERS`, first unit of `docs/roadmap/

@@ -72,8 +72,10 @@ pub fn run_action(
     keep_reason: Option<String>,
     apply: bool,
     reference_paths: Vec<String>,
+    archive_dir: Option<String>,
 ) -> Result<ActionResultPayload, String> {
-    let kind = parse_action_kind(&kind)?;
+    let archive_dir = archive_dir.as_deref().map(normalize_path_input);
+    let kind = parse_action_kind(&kind, archive_dir.as_deref().map(std::path::Path::new))?;
     let group = group.into();
     let reference_paths = normalize_path_list(&reference_paths);
     // The kept path is always `group.paths[0]` here -- the frontend
@@ -153,6 +155,7 @@ pub fn find_duplicate_folders(
 /// and current on-disk size before planning, failing closed (an `Err`, not
 /// a partial plan) if the scan has gone stale since.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn run_folder_action(
     removed: String,
     kept: String,
@@ -161,8 +164,10 @@ pub fn run_folder_action(
     kind: String,
     apply: bool,
     reference_paths: Vec<String>,
+    archive_dir: Option<String>,
 ) -> Result<FolderActionResultPayload, String> {
-    let kind = parse_action_kind(&kind)?;
+    let archive_dir = archive_dir.as_deref().map(normalize_path_input);
+    let kind = parse_action_kind(&kind, archive_dir.as_deref().map(std::path::Path::new))?;
     let removed = PathBuf::from(normalize_path_input(&removed));
     let kept = PathBuf::from(normalize_path_input(&kept));
     let groups: Vec<_> = groups.into_iter().map(Into::into).collect();
@@ -367,6 +372,91 @@ mod tests {
         );
     }
 
+    /// ADR-0026: `kind: "move"` relocates the redundant copy into
+    /// `archiveDir`, mirroring its original path -- the IPC-boundary
+    /// counterpart of the core `apply_move_relocates_the_redundant_copy_into_the_archive_directory`
+    /// test.
+    #[test]
+    fn run_action_move_relocates_the_redundant_copy_into_the_archive_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let response = invoke(
+            "run_action",
+            json!({
+                "group": {"size": 3, "paths": [a.display().to_string(), b.display().to_string()]},
+                "kind": "move",
+                "apply": true,
+                "referencePaths": [],
+                "archiveDir": archive.display().to_string(),
+            }),
+        )
+        .expect("run_action should succeed");
+
+        assert_eq!(
+            response["applied"]["succeeded"],
+            json!([b.display().to_string()])
+        );
+        assert!(a.exists());
+        assert!(!b.exists(), "the redundant copy is gone from its path");
+        assert!(
+            archive.join(b.strip_prefix("/").unwrap()).exists(),
+            "the redundant copy must survive at its archived path"
+        );
+    }
+
+    /// `kind: "copy"` leaves the original in place, unlike every other
+    /// action kind.
+    #[test]
+    fn run_action_copy_leaves_the_original_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+
+        let response = invoke(
+            "run_action",
+            json!({
+                "group": {"size": 3, "paths": [a.display().to_string(), b.display().to_string()]},
+                "kind": "copy",
+                "apply": true,
+                "referencePaths": [],
+                "archiveDir": archive.display().to_string(),
+            }),
+        )
+        .expect("run_action should succeed");
+
+        assert_eq!(response["applied"]["bytesReclaimed"], 0);
+        assert!(a.exists());
+        assert!(b.exists(), "Copy must not touch the original");
+        assert!(archive.join(b.strip_prefix("/").unwrap()).exists());
+    }
+
+    /// `kind: "move"`/`"copy"` without `archiveDir` must be rejected, not
+    /// silently ignored.
+    #[test]
+    fn run_action_move_without_archive_dir_is_rejected() {
+        let response = invoke(
+            "run_action",
+            json!({
+                "group": {"size": 1, "paths": ["/a", "/b"]},
+                "kind": "move",
+                "apply": false,
+                "referencePaths": [],
+            }),
+        );
+        assert!(
+            response.is_err(),
+            "\"move\" without an archive directory must be rejected"
+        );
+    }
+
     #[test]
     fn choose_keep_resolves_the_newest_file_without_touching_the_filesystem() {
         let dir = tempfile::tempdir().unwrap();
@@ -503,6 +593,52 @@ mod tests {
         assert!(
             big.join("1.txt").exists(),
             "the kept side must be untouched"
+        );
+    }
+
+    /// ADR-0026, folder-level: `kind: "move"` relocates every file and
+    /// prunes the emptied folder, same as delete/trash.
+    #[test]
+    fn run_folder_action_move_relocates_every_file_and_prunes_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        let archive = dir.path().join("archive");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&big).unwrap();
+        fs::write(small.join("1.txt"), b"dup").unwrap();
+        fs::write(big.join("1.txt"), b"dup").unwrap();
+
+        let response = invoke(
+            "run_folder_action",
+            json!({
+                "removed": small.display().to_string(),
+                "kept": big.display().to_string(),
+                "groups": [
+                    {"size": 3, "paths": [small.join("1.txt").display().to_string(), big.join("1.txt").display().to_string()]},
+                ],
+                "options": {},
+                "kind": "move",
+                "apply": true,
+                "referencePaths": [],
+                "archiveDir": archive.display().to_string(),
+            }),
+        )
+        .expect("run_folder_action should succeed");
+
+        assert_eq!(response["applied"]["directoryRemoved"], true);
+        assert!(
+            !small.exists(),
+            "Move prunes the emptied folder like delete/trash"
+        );
+        assert!(
+            big.join("1.txt").exists(),
+            "the kept side must be untouched"
+        );
+        let archived = small.join("1.txt");
+        assert!(
+            archive.join(archived.strip_prefix("/").unwrap()).exists(),
+            "the moved file must survive at its archived path"
         );
     }
 
