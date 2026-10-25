@@ -1,5 +1,5 @@
 # CLI-UX-001 — CLI Output, Progress, and Confirmation
-- Version: 0.3.6
+- Version: 0.4.0
 - Status: Implemented (v1)
 - Owners: baileyrd
 - Depends on: `FCLONE-DETECTION-001`, `FCLONE-ACTION-001`
@@ -188,6 +188,34 @@ confirmation prompt as a second safety layer on top of `--apply`.
   `--- similar images (max distance <N>/64): <count> files ---` followed
   by one path per line. In `--format json`, it SHALL be emitted as
   `{"type":"similar_images","paths":[<string>,...],"max_distance":<u32>}`.
+- `CLI-UX-001-FR-021`: `--plan-out <path>` SHALL write the previewed plan
+  as JSON (`format`, `version`, absolute `root`, `created_at`, tagged
+  `action`, and per-group `size`/`kept`/`targets`, each file with its
+  absolute path and `mtime_ns`) and SHALL NOT mutate the filesystem. It
+  SHALL require an `--action` other than `report` (otherwise exit non-zero
+  and write nothing) and SHALL be rejected at parse time alongside
+  `--apply` or `--find-duplicate-folders`. A group whose files can't be
+  stamped (vanished, non-UTF-8 path) SHALL be left out with a warning and
+  a non-zero exit, never silently (`ACTION-PLAN-FILE`, ADR-0032).
+- `CLI-UX-001-FR-022`: `rusty-fclone plan apply <PLAN>` SHALL reject a file
+  whose `format`/`version` doesn't match, SHALL preview without `--apply`,
+  and with `--apply` SHALL prompt for confirmation unless `-y`.
+- `CLI-UX-001-FR-023`: Before acting on a group, `plan apply` SHALL verify
+  that every file in it (kept and targets) is still a regular file with the
+  recorded size and mtime. Any mismatch SHALL skip the whole group, report
+  it, and make the exit code non-zero. Execution SHALL go through
+  `action::plan_with_keep`/`action::apply` with the recorded kept path.
+- `CLI-UX-001-FR-024`: Each action `plan apply --apply` completes SHALL be
+  appended as one JSON line to the journal (`--journal`, default
+  `<PLAN>.journal.jsonl`), synced to disk once per group before the next
+  group starts. A `move`/`copy` entry SHALL record the exact destination
+  (`action::archived_path`).
+- `CLI-UX-001-FR-025`: `rusty-fclone plan undo <JOURNAL>` SHALL preview
+  without `--apply`; with `--apply` it SHALL rename each `move` entry's
+  destination back to its original path, newest first, and SHALL NOT
+  overwrite anything already at the original path (a per-entry failure,
+  non-zero exit). Non-`move` entries SHALL be reported as not undoable.
+  A malformed journal line SHALL be an error naming its line number.
 
 ## Architecture and interfaces
 
@@ -453,6 +481,14 @@ See `docs/traceability/TRACEABILITY.md`.
   existing `--action`/`--apply` flags.
 
 ## Change history
+
+- 0.4.0 (2026-10-25): Added reviewable plan files (`ACTION-PLAN-FILE`,
+  FR-021 through FR-025): `--plan-out`, and a new reserved top-level
+  `rusty-fclone plan <apply|undo>` keyword pre-dispatched like `history`.
+  `plan apply` re-checks size+mtime per group (stale groups skipped
+  whole), executes through the unchanged core action layer, and journals
+  each completed action as JSONL; `plan undo` reverses `move` entries.
+  Core change: `action::archived_path` made public. ADR-0032.
 
 - 0.3.6 (2026-08-27): Added `--find-similar-images`/`--similarity-threshold`
   (FR-019/FR-020), the CLI surface for `FCLONE-DETECTION-001`'s new opt-in

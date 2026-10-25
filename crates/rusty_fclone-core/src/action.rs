@@ -274,7 +274,11 @@ fn ensure_fresh_destination(dest: &Path) -> std::io::Result<()> {
 /// each file came from. `..` components are dropped rather than preserved
 /// (they can't appear in an absolute scanned path anyway, and keeping them
 /// would let a crafted relative path escape `archive_dir`).
-fn archived_path(archive_dir: &Path, original: &Path) -> PathBuf {
+///
+/// Public so callers that journal a `Move`/`Copy` (the CLI's plan-file
+/// journal, `ACTION-PLAN-FILE`) record exactly the destination `apply`
+/// used, instead of re-deriving the mirroring scheme themselves.
+pub fn archived_path(archive_dir: &Path, original: &Path) -> PathBuf {
     let mut dest = archive_dir.to_path_buf();
     for component in original.components() {
         if let std::path::Component::Normal(part) = component {

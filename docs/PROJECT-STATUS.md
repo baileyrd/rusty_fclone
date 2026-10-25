@@ -1,5 +1,8 @@
 # Project Status
-- Last verified main commit: `51f9cb6` — merged `GUI-REVIEW-PANELS`
+- Last verified main commit: `c81686c` (branch `action-plan-file` pending
+  review: `ACTION-PLAN-FILE` — reviewable plan files, apply journal, undo
+  for moves; ADR-0032).
+- Previous checkpoint note: `51f9cb6` — merged `GUI-REVIEW-PANELS`
   (PR #52). Prompted by a refreshed `Deduplication app UI design.zip`
   (v2 handoff) committed to the repo root; see the Completed entry below
   for the full account. Prior checkpoint: `c67f63c` — merged
@@ -31,6 +34,20 @@
   on the pinned toolchain
 
 ## Completed
+- `ACTION-PLAN-FILE` (2026-10-25, not a `DEDUP-GAP-IMPLEMENTATION-PLAN.md`
+  item): `--plan-out <FILE>` writes a reviewable/editable JSON plan instead
+  of acting; new reserved `rusty-fclone plan apply <FILE> [--apply]`
+  re-checks size+mtime per group (stale groups skipped whole, non-zero
+  exit), executes through the unchanged core `plan_with_keep`/`apply`, and
+  journals each completed action as fsynced JSONL; `rusty-fclone plan undo
+  <JOURNAL> [--apply]` restores `move` entries newest-first, never
+  overwriting. Core change: `action::archived_path` is now `pub`. New
+  `plan_file` CLI module (12 tests) + 4 `main` tests; manual smoke test of
+  plan-out → preview → apply → stale re-apply → undo. CLI-UX-001 0.4.0
+  (FR-021–FR-025), ADR-0032. Verified locally on stable 1.97 (pinned
+  1.94.1 couldn't be downloaded in this environment) for the core and CLI
+  crates; the GUI crate couldn't be built here (no webkit2gtk), so CI is
+  the authority for it — no GUI code changed.
 - `DETECTION-BASELINE`, `DETECTION-BENCHMARK`, `DETECTION-BENCHMARK-VS-FCLONES`,
   `DETECTION-ADAPTIVE-SAMPLE-SIZE`, `DETECTION-IO-THREAD-SIZING` — the full
   detection engine, benchmarked and tuned to beat or match fclones on all

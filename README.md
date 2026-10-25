@@ -254,6 +254,31 @@ rusty-fclone history --db ~/.local/share/rusty-fclone/history.sqlite \
   --format json list --limit 5 | jq .
 ```
 
+### Reviewable plans (preview now, act later, undo moves)
+
+For big or slow trees, split preview and action into separate steps.
+`--plan-out` writes the previewed plan to a JSON file you can read and
+edit (delete any group you disagree with). `plan apply` re-checks every
+file's size and mtime and skips any group that changed since the plan was
+written, so nothing is acted on unreviewed. Applied actions are journaled,
+and `plan undo` moves quarantined files back. `plan` is a reserved
+top-level command, like `history`.
+
+```sh
+# 1. Plan: quarantine redundant copies in a folder on the same volume
+#    (a rename -- fast, no data copied). Touches nothing.
+rusty-fclone /mnt/data --action move --archive-dir /mnt/data/_quarantine \
+  --plan-out plan.json
+
+# 2. Review/edit plan.json, then preview and apply it.
+rusty-fclone plan apply plan.json
+rusty-fclone plan apply plan.json --apply    # journals to plan.json.journal.jsonl
+
+# 3. Changed your mind? Put moved files back (preview first).
+rusty-fclone plan undo plan.json.journal.jsonl
+rusty-fclone plan undo plan.json.journal.jsonl --apply
+```
+
 ## GUI
 
 A desktop GUI (`rusty_fclone-gui`, [`GUI-UX-001`](docs/specifications/gui-ux/GUI-UX-001.md))
