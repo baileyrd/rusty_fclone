@@ -1,4 +1,5 @@
 mod history;
+mod plan_file;
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -173,6 +174,15 @@ struct Cli {
     #[arg(long)]
     history: Option<PathBuf>,
 
+    /// Instead of acting, write the previewed plan to this JSON file for
+    /// review (and editing -- delete any group you disagree with), then
+    /// run it later with `rusty-fclone plan apply` (`ACTION-PLAN-FILE`,
+    /// ADR-0032). Requires a non-report --action. Conflicts with --apply
+    /// (applying is the plan file's job) and --find-duplicate-folders
+    /// (folder-level plans aren't serialized yet).
+    #[arg(long, conflicts_with_all = ["apply", "find_duplicate_folders"])]
+    plan_out: Option<PathBuf>,
+
     /// Skip files smaller than this size (bytes). Applied during traversal,
     /// before any hashing (`DETECTION-SCAN-FILTERS`).
     #[arg(long)]
@@ -326,6 +336,50 @@ enum HistoryCommand {
     },
 }
 
+/// Applies or undoes a reviewed plan file written by `--plan-out`
+/// (`ACTION-PLAN-FILE`, ADR-0032). Reached as `rusty-fclone plan
+/// <SUBCOMMAND>` -- a reserved top-level keyword pre-dispatched in `main`,
+/// exactly like `history` (ADR-0027).
+#[derive(Parser)]
+#[command(name = "rusty-fclone plan")]
+struct PlanCli {
+    #[command(subcommand)]
+    command: PlanCommand,
+}
+
+#[derive(clap::Subcommand)]
+enum PlanCommand {
+    /// Execute a plan file. Previews unless --apply. Any group whose files
+    /// changed (size or mtime) since the plan was written is skipped whole.
+    Apply {
+        /// Plan file written by `--plan-out`.
+        plan: PathBuf,
+        /// Journal to append each completed action to, one JSON line per
+        /// file. Default: `<PLAN>.journal.jsonl`.
+        #[arg(long)]
+        journal: Option<PathBuf>,
+        /// Actually perform the plan. Without it, only a preview prints.
+        #[arg(long)]
+        apply: bool,
+        /// Skip the interactive confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Reverse a journal's `move` entries, newest first. Previews unless
+    /// --apply. Never overwrites a file that already exists at the
+    /// original path; other actions are reported as not undoable.
+    Undo {
+        /// Journal written by `plan apply --apply`.
+        journal: PathBuf,
+        /// Actually restore files. Without it, only a preview prints.
+        #[arg(long)]
+        apply: bool,
+        /// Skip the interactive confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+}
+
 fn main() -> ExitCode {
     // `args[0]` is the program name; `args[1]`, if present, is either
     // "history" (routed to `HistoryCli`) or the start of a normal scan
@@ -339,6 +393,10 @@ fn main() -> ExitCode {
     if args.get(1).map(String::as_str) == Some("history") {
         let cli = HistoryCli::parse_from(&args[1..]);
         return run_history(cli);
+    }
+    if args.get(1).map(String::as_str) == Some("plan") {
+        let cli = PlanCli::parse_from(&args[1..]);
+        return run_plan(cli);
     }
 
     let cli = Cli::parse();
@@ -501,6 +559,23 @@ fn run(cli: Cli) -> ExitCode {
         }
     };
 
+    let mut plan_out = match (&cli.plan_out, &action_kind) {
+        (None, _) => None,
+        (Some(_), None) => {
+            eprintln!("error: --plan-out requires an --action other than report");
+            return ExitCode::FAILURE;
+        }
+        (Some(path), Some(kind)) => {
+            match plan_file::PlanFile::new(&cli.root, unix_timestamp_now(), kind) {
+                Ok(plan) => Some((path.clone(), plan)),
+                Err(err) => {
+                    eprintln!("error: {}: {err}", cli.root.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+
     if let Some(kind) = &action_kind {
         if cli.apply && !cli.yes && !confirm_apply(&cli.root, kind, cli.find_duplicate_folders) {
             eprintln!("aborted");
@@ -579,6 +654,7 @@ fn run(cli: Cli) -> ExitCode {
                         &mut total_bytes_reclaimed,
                         &mut total_files_acted_on,
                         history_actions.as_mut(),
+                        plan_out.as_mut().map(|(_, plan)| &mut plan.groups),
                     );
                 }
             }
@@ -647,6 +723,7 @@ fn run(cli: Cli) -> ExitCode {
                 &mut total_bytes_reclaimed,
                 &mut total_files_acted_on,
                 history_actions.as_mut(),
+                plan_out.as_mut().map(|(_, plan)| &mut plan.groups),
             );
         }
     }
@@ -700,11 +777,113 @@ fn run(cli: Cli) -> ExitCode {
         }
     }
 
+    if let Some((path, plan)) = &plan_out {
+        match plan.write(path) {
+            Ok(()) => eprintln!(
+                "wrote plan: {} groups, {} files -> {}",
+                plan.groups.len(),
+                plan.target_count(),
+                path.display()
+            ),
+            Err(err) => {
+                had_errors = true;
+                eprintln!("error: {err}");
+            }
+        }
+    }
+
     if had_errors {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Runs `rusty-fclone plan <SUBCOMMAND>` (ADR-0032).
+fn run_plan(cli: PlanCli) -> ExitCode {
+    let result = match cli.command {
+        PlanCommand::Apply {
+            plan,
+            journal,
+            apply,
+            yes,
+        } => run_plan_apply(&plan, journal, apply, yes),
+        PlanCommand::Undo {
+            journal,
+            apply,
+            yes,
+        } => run_plan_undo(&journal, apply, yes),
+    };
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `plan apply`. `Ok(false)` means some group was stale or some file failed.
+fn run_plan_apply(
+    plan_path: &Path,
+    journal: Option<PathBuf>,
+    apply: bool,
+    yes: bool,
+) -> Result<bool, plan_file::PlanFileError> {
+    let plan = plan_file::PlanFile::read(plan_path)?;
+    let verb = action_word(&plan.action.to_kind());
+    let question = format!(
+        "This will {verb} up to {} files listed in {}. Proceed? [y/N] ",
+        plan.target_count(),
+        plan_path.display()
+    );
+    if apply && !yes && !prompt(&question) {
+        eprintln!("aborted");
+        return Ok(true);
+    }
+    let journal_path = journal.unwrap_or_else(|| plan_file::default_journal_path(plan_path));
+    let mut journal = match apply {
+        true => Some(plan_file::Journal::open(&journal_path)?),
+        false => None,
+    };
+    let totals = plan_file::apply_plan(&plan, journal.as_mut(), &mut io::stdout().lock())?;
+    eprintln!(
+        "{}: {} groups, {} files, {} bytes; {} stale groups skipped, {} failed",
+        if apply { "applied" } else { "preview" },
+        totals.groups,
+        totals.files,
+        totals.bytes,
+        totals.stale,
+        totals.failed
+    );
+    if apply {
+        eprintln!("journal: {}", journal_path.display());
+    }
+    Ok(!totals.had_problems())
+}
+
+/// `plan undo`. `Ok(false)` means some restore failed.
+fn run_plan_undo(journal: &Path, apply: bool, yes: bool) -> Result<bool, plan_file::PlanFileError> {
+    let entries = plan_file::read_journal(journal)?;
+    let question = format!(
+        "This will restore up to {} moved files recorded in {}. Proceed? [y/N] ",
+        entries.len(),
+        journal.display()
+    );
+    if apply && !yes && !prompt(&question) {
+        eprintln!("aborted");
+        return Ok(true);
+    }
+    let totals = plan_file::undo(&entries, apply, &mut io::stdout().lock());
+    eprintln!(
+        "{}: {} restored, {} failed, {} not undoable",
+        if apply { "undone" } else { "preview" },
+        totals.restored,
+        totals.failed,
+        totals.not_undoable
+    );
+    Ok(totals.failed == 0)
 }
 
 /// Current time as Unix seconds, for the history record's `started_at`
@@ -728,11 +907,16 @@ fn confirm_apply(root: &Path, kind: &ActionKind, find_duplicate_folders: bool) -
     } else {
         ""
     };
-    eprint!(
+    prompt(&format!(
         "This will scan {} and {} redundant files{folders_note} as duplicates are found. Proceed? [y/N] ",
         root.display(),
         action_word(kind)
-    );
+    ))
+}
+
+/// Asks `question` on stderr and reads a yes/no answer from stdin.
+fn prompt(question: &str) -> bool {
+    eprint!("{question}");
     let _ = io::stderr().flush();
     confirm(io::stdin().lock())
 }
@@ -867,6 +1051,7 @@ fn handle_group(
     total_bytes_reclaimed: &mut u64,
     total_files_acted_on: &mut u64,
     history_actions: Option<&mut Vec<history::ActionRecord>>,
+    plan_groups: Option<&mut Vec<plan_file::PlanGroup>>,
 ) -> bool {
     let Some(kind) = action_kind else {
         print_group(format, group, None);
@@ -878,6 +1063,23 @@ fn handle_group(
     if plan.actions.is_empty() {
         print_group(format, group, None);
         return false;
+    }
+
+    // `--plan-out` (ADR-0032): stamp the previewed plan for later review.
+    // A file that can't be stamped (vanished, unreadable mtime) is
+    // reported and its group left out of the plan -- never silently.
+    let mut plan_out_failed = false;
+    if let Some(plan_groups) = plan_groups {
+        match plan_file::stamp_plan(&plan) {
+            Ok(stamped) => plan_groups.push(stamped),
+            Err(err) => {
+                plan_out_failed = true;
+                eprintln!(
+                    "warning: {}: group left out of plan: {err}",
+                    plan.kept.display()
+                );
+            }
+        }
     }
 
     let report = if apply {
@@ -919,7 +1121,7 @@ fn handle_group(
         }
     }
 
-    had_errors
+    had_errors || plan_out_failed
 }
 
 /// Pushes one [`history::ActionRecord`] per `(path, bytes)` entry into
@@ -1403,6 +1605,7 @@ mod tests {
             cache: ScanOptions::default().cache_path,
             import_fclones_cache: ScanOptions::default().fclones_import_path,
             history: None,
+            plan_out: None,
             min_size: ScanOptions::default().min_size,
             max_size: ScanOptions::default().max_size,
             include_extensions: Vec::new(),
@@ -1420,6 +1623,67 @@ mod tests {
             format: Format::Text,
             verbose: 0,
         }
+    }
+
+    /// ACTION-PLAN-FILE (ADR-0032): `--plan-out` writes the previewed plan
+    /// and touches nothing; `plan apply --apply` then executes it.
+    #[test]
+    fn plan_out_then_plan_apply_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"dup").unwrap();
+        fs::write(&b, b"dup").unwrap();
+        let plan_path = dir.path().join("plan.json");
+
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.action = Action::Delete;
+        cli.plan_out = Some(plan_path.clone());
+        assert_eq!(run(cli), ExitCode::SUCCESS);
+        assert!(a.exists() && b.exists(), "--plan-out must not act");
+
+        let plan = plan_file::PlanFile::read(&plan_path).unwrap();
+        assert_eq!((plan.groups.len(), plan.target_count()), (1, 1));
+
+        assert!(run_plan_apply(&plan_path, None, false, true).unwrap());
+        assert!(b.exists(), "plan apply without --apply is a preview");
+
+        assert!(run_plan_apply(&plan_path, None, true, true).unwrap());
+        assert!(a.exists() && !b.exists());
+        let journal =
+            plan_file::read_journal(&plan_file::default_journal_path(&plan_path)).unwrap();
+        assert_eq!(journal.len(), 1);
+    }
+
+    #[test]
+    fn plan_out_requires_a_real_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let mut cli = base_cli(dir.path().to_path_buf());
+        cli.plan_out = Some(plan_path.clone());
+        assert_eq!(run(cli), ExitCode::FAILURE);
+        assert!(!plan_path.exists());
+    }
+
+    #[test]
+    fn plan_out_conflicts_with_apply_at_parse_time() {
+        let parsed = Cli::try_parse_from([
+            "rusty-fclone",
+            ".",
+            "--action",
+            "delete",
+            "--apply",
+            "--plan-out",
+            "p.json",
+        ]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn plan_subcommands_parse() {
+        assert!(PlanCli::try_parse_from(["plan", "apply", "p.json", "--apply", "-y"]).is_ok());
+        assert!(PlanCli::try_parse_from(["plan", "undo", "j.jsonl"]).is_ok());
+        assert!(PlanCli::try_parse_from(["plan", "apply"]).is_err());
     }
 
     /// FR-007: default (`--action` omitted, i.e. `Report`) never enters the
