@@ -87,3 +87,51 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           files: ${{ env.ASSET }}
           fail_on_unmatched_files: true
+
+  # GUI (Tauri, ADR-0020): Linux only for now. Links against the system
+  # webview, so the bundle is a .deb / AppImage rather than a bare binary.
+  build-gui-linux:
+    name: build-gui (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            librsvg2-dev libayatana-appindicator3-dev libssl-dev \
+            libsoup-3.0-dev
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-tauri
+            target
+          key: ${{ runner.os }}-release-gui-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install tauri-cli
+        run: command -v cargo-tauri || cargo install tauri-cli --version "^2" --locked
+
+      - name: Build GUI bundles
+        working-directory: crates/rusty_fclone-gui
+        run: cargo tauri build --bundles deb,appimage
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+          fail_on_unmatched_files: true
