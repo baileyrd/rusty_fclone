@@ -1,7 +1,7 @@
 # Project Status
-- Last verified main commit: `c81686c` (branch `action-plan-file` pending
-  review: `ACTION-PLAN-FILE` — reviewable plan files, apply journal, undo
-  for moves; ADR-0032).
+- Last verified main commit: `46d0114` — merged `ACTION-PLAN-FILE`
+  (PR #54): reviewable plan files, apply journal, undo for moves;
+  ADR-0032. CI green on the pinned toolchain, including the GUI crate.
 - Previous checkpoint note: `51f9cb6` — merged `GUI-REVIEW-PANELS`
   (PR #52). Prompted by a refreshed `Deduplication app UI design.zip`
   (v2 handoff) committed to the repo root; see the Completed entry below
@@ -34,8 +34,8 @@
   on the pinned toolchain
 
 ## Completed
-- `ACTION-PLAN-FILE` (2026-10-25, not a `DEDUP-GAP-IMPLEMENTATION-PLAN.md`
-  item): `--plan-out <FILE>` writes a reviewable/editable JSON plan instead
+- `ACTION-PLAN-FILE` (2026-10-25, merged via PR #54, not a
+  `DEDUP-GAP-IMPLEMENTATION-PLAN.md` item): `--plan-out <FILE>` writes a reviewable/editable JSON plan instead
   of acting; new reserved `rusty-fclone plan apply <FILE> [--apply]`
   re-checks size+mtime per group (stale groups skipped whole, non-zero
   exit), executes through the unchanged core `plan_with_keep`/`apply`, and
