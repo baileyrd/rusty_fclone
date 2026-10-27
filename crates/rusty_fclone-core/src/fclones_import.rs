@@ -246,6 +246,20 @@ mod tests {
         tree.flush().unwrap();
     }
 
+    /// Opens a cache a test just wrote with sled. sled releases its
+    /// directory lock from a background flusher thread a moment after the
+    /// writing `Db` is dropped, so an immediate re-open occasionally fails
+    /// with a lock error (~1 in 60 runs); retry briefly instead.
+    fn open_seeded(cache_dir: &Path) -> FclonesImportCache {
+        for _ in 0..100 {
+            if let Some(cache) = FclonesImportCache::open(cache_dir) {
+                return cache;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("seeded fclones cache never became openable");
+    }
+
     /// Tiny hex-encode helper so the test doesn't need its own dependency
     /// just to build a fixture -- mirrors `decode_le_hash` in reverse.
     mod hex {
@@ -283,7 +297,7 @@ mod tests {
         // with its default (Metro) hash function against this path.
         sled::open(dir.path()).unwrap();
 
-        let cache = FclonesImportCache::open(dir.path()).unwrap();
+        let cache = open_seeded(dir.path());
         let file = dir.path().join("does-not-matter.txt");
         fs::write(&file, b"content").unwrap();
         assert_eq!(cache.lookup_full_hash(&file, 7, 0), None);
@@ -310,7 +324,7 @@ mod tests {
             0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00,
         );
 
-        let cache = FclonesImportCache::open(&cache_dir).unwrap();
+        let cache = open_seeded(&cache_dir);
         assert_eq!(
             cache.lookup_full_hash(&file, size, modified_ms),
             Some(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00)
@@ -344,7 +358,7 @@ mod tests {
             0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00,
         );
 
-        let cache = FclonesImportCache::open(&cache_dir).unwrap();
+        let cache = open_seeded(&cache_dir);
         assert_eq!(
             cache.lookup_full_hash(&file, size, modified_ms),
             Some(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00)
@@ -367,7 +381,7 @@ mod tests {
 
         seed_fclones_cache(&cache_dir, &file, 64 * 1024, size, modified_ms, 42);
 
-        let cache = FclonesImportCache::open(&cache_dir).unwrap();
+        let cache = open_seeded(&cache_dir);
         assert_eq!(cache.lookup_full_hash(&file, size, modified_ms), None);
     }
 
@@ -389,7 +403,7 @@ mod tests {
             42,
         );
 
-        let cache = FclonesImportCache::open(&cache_dir).unwrap();
+        let cache = open_seeded(&cache_dir);
         assert_eq!(
             cache.lookup_full_hash(&file, metadata.len() + 1, modified_ms),
             None
@@ -414,7 +428,7 @@ mod tests {
             42,
         );
 
-        let cache = FclonesImportCache::open(&cache_dir).unwrap();
+        let cache = open_seeded(&cache_dir);
         assert_eq!(
             cache.lookup_full_hash(&file, metadata.len(), modified_ms + 1000),
             None
@@ -462,7 +476,7 @@ mod tests {
         drop(tree);
         drop(db); // release sled's exclusive file lock before reopening
 
-        let cache = FclonesImportCache::open(&cache_dir).unwrap();
+        let cache = open_seeded(&cache_dir);
         assert_eq!(
             cache.lookup_full_hash(&file, metadata.len(), modified_ms),
             None
