@@ -113,6 +113,7 @@ pub fn plan_folder(
     traversal::traverse(
         removed,
         options,
+        None,
         |_err| {
             // A per-file traversal error here means that file can't even
             // be identified, let alone confirmed as a duplicate -- it
@@ -128,7 +129,7 @@ pub fn plan_folder(
             if mismatch.is_some() {
                 return;
             }
-            let path = candidate.path.to_path_buf();
+            let path = candidate.path();
 
             if select::is_protected(&path, reference_paths) {
                 protected_files_skipped += 1;

@@ -219,13 +219,14 @@ fn build_tree(
     traversal::traverse(
         root,
         options,
+        None,
         |_err| {
             // A per-file error here just means that file is missing from
             // the folder-level picture, same tolerance as the main scan
             // (ADR-0004) -- it doesn't abort the analysis.
         },
         |candidate| {
-            let path = candidate.path.to_path_buf();
+            let path = candidate.path();
             let Some(parent) = path.parent().map(Path::to_path_buf) else {
                 return;
             };
