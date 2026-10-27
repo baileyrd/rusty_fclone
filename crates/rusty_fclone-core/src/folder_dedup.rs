@@ -225,7 +225,7 @@ fn build_tree(
             // (ADR-0004) -- it doesn't abort the analysis.
         },
         |candidate| {
-            let path = candidate.path.to_path_buf();
+            let path = candidate.path();
             let Some(parent) = path.parent().map(Path::to_path_buf) else {
                 return;
             };

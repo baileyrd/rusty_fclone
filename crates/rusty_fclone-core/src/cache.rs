@@ -57,6 +57,12 @@ pub(crate) fn stat(path: &Path) -> Option<FileStat> {
     Some((metadata.len(), modified))
 }
 
+/// In-memory page cache for the redb database. redb defaults to 1 GiB,
+/// which on a multi-million-entry cache grows the scan's resident memory by
+/// up to that much on top of the file lists themselves; lookups are one
+/// point read per file, so a small cache costs little throughput.
+const DB_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
 pub(crate) struct HashCache {
     db: Database,
 }
@@ -66,7 +72,9 @@ impl HashCache {
     /// the table exists so a lookup against a brand-new database is a
     /// clean miss rather than an error.
     pub(crate) fn open(path: &Path) -> Result<Self, redb::Error> {
-        let db = Database::create(path)?;
+        let db = Database::builder()
+            .set_cache_size(DB_CACHE_BYTES)
+            .create(path)?;
         let write_txn = db.begin_write()?;
         {
             let _ = write_txn.open_table(TABLE)?;

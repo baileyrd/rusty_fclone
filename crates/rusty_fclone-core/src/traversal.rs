@@ -1,17 +1,33 @@
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use file_id::{get_file_id, FileId};
-use jwalk::WalkDir;
+use jwalk::{DirEntry, WalkDir};
 
 use crate::error::FileError;
 use crate::model::ScanOptions;
 
 /// A file found during traversal, stat-ed but not yet read.
+///
+/// Stored as its parent directory (an `Arc` shared by every sibling, handed
+/// out by jwalk for free) plus its own file name, rather than one full-path
+/// allocation per file: a scan holds every candidate in memory until
+/// traversal finishes, and on a tree of ~1M files the repeated directory
+/// prefixes alone were enough to get the process OOM-killed mid-walk.
+/// Callers that need the full path join it on demand with [`Self::path`].
 pub(crate) struct Candidate {
-    pub path: Arc<Path>,
+    pub parent: Arc<Path>,
+    pub name: Box<OsStr>,
     pub size: u64,
     pub file_id: FileId,
+}
+
+impl Candidate {
+    /// The candidate's full path (`parent` joined with `name`).
+    pub fn path(&self) -> PathBuf {
+        self.parent.join(&*self.name)
+    }
 }
 
 /// Walks `root` in parallel (via jwalk's built-in rayon-backed walker),
@@ -74,14 +90,13 @@ pub(crate) fn traverse(
             continue;
         }
 
-        let path: Arc<Path> = Arc::from(entry.path());
-
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(err) => {
+                let path: Arc<Path> = Arc::from(entry.path());
                 tracing::warn!(path = %path.display(), error = %err, "failed to stat file");
                 on_error(FileError {
-                    path: path.clone(),
+                    path,
                     source: err.into(),
                 });
                 continue;
@@ -89,22 +104,20 @@ pub(crate) fn traverse(
         };
 
         if !size_allowed(metadata.len(), options) {
-            tracing::trace!(path = %path.display(), size = metadata.len(), "skipped -- size filter");
+            tracing::trace!(path = %entry.path().display(), size = metadata.len(), "skipped -- size filter");
             continue;
         }
-        if !extension_allowed(&path, options) {
-            tracing::trace!(path = %path.display(), "skipped -- extension filter");
+        if !extension_allowed(Path::new(&entry.file_name), options) {
+            tracing::trace!(path = %entry.path().display(), "skipped -- extension filter");
             continue;
         }
 
-        let file_id = match get_file_id(&path) {
+        let file_id = match file_id_of(&entry, &metadata) {
             Ok(id) => id,
             Err(err) => {
+                let path: Arc<Path> = Arc::from(entry.path());
                 tracing::warn!(path = %path.display(), error = %err, "failed to read file id");
-                on_error(FileError {
-                    path: path.clone(),
-                    source: err,
-                });
+                on_error(FileError { path, source: err });
                 continue;
             }
         };
@@ -114,19 +127,43 @@ pub(crate) fn traverse(
             root_device,
             device_component(&file_id),
         ) {
-            tracing::trace!(path = %path.display(), "skipped -- different filesystem");
+            tracing::trace!(path = %entry.path().display(), "skipped -- different filesystem");
             continue;
         }
 
         candidate_count += 1;
         on_candidate(Candidate {
-            path,
+            parent: entry.parent_path,
+            name: entry.file_name.into_boxed_os_str(),
             size: metadata.len(),
             file_id,
         });
     }
 
     tracing::debug!(candidates = candidate_count, "traversal finished");
+}
+
+/// The file's identity for hardlink collapse. On Unix it's read straight
+/// from the metadata traversal already fetched (device + inode), saving a
+/// second `stat` per file -- which matters on slow filesystems such as
+/// ntfs-3g/FUSE mounts, where every `stat` is a userspace round trip.
+/// Elsewhere it falls back to `file_id::get_file_id`, which has to open
+/// the file to read its volume serial + file index.
+#[cfg(unix)]
+fn file_id_of(
+    _entry: &DirEntry<((), ())>,
+    metadata: &std::fs::Metadata,
+) -> std::io::Result<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(FileId::new_inode(metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id_of(
+    entry: &DirEntry<((), ())>,
+    _metadata: &std::fs::Metadata,
+) -> std::io::Result<FileId> {
+    get_file_id(entry.path())
 }
 
 /// Decides whether a candidate should be skipped for being on a different
@@ -262,7 +299,7 @@ mod tests {
             let options = ScanOptions::default();
             let candidates = traverse_collect(dir.path(), &options, |_| {});
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].path.file_name().unwrap(), "real.txt");
+            assert_eq!(&*candidates[0].name, "real.txt");
         }
     }
 
@@ -292,7 +329,7 @@ mod tests {
                 1,
                 "the broken symlink must not appear as a candidate"
             );
-            assert_eq!(candidates[0].path.file_name().unwrap(), "real.txt");
+            assert_eq!(&*candidates[0].name, "real.txt");
             assert_eq!(
                 errors.len(),
                 1,
@@ -491,7 +528,7 @@ mod tests {
         let candidates = traverse_collect(dir.path(), &options, |_| {});
 
         assert_eq!(candidates.len(), 1);
-        assert!(candidates[0].path.ends_with("kept.txt"));
+        assert!(candidates[0].path().ends_with("kept.txt"));
     }
 
     #[test]
@@ -507,6 +544,6 @@ mod tests {
         let candidates = traverse_collect(dir.path(), &options, |_| {});
 
         assert_eq!(candidates.len(), 1);
-        assert!(candidates[0].path.ends_with("kept.txt"));
+        assert!(candidates[0].path().ends_with("kept.txt"));
     }
 }

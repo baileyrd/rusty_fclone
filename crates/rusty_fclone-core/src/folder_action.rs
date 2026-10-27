@@ -128,7 +128,7 @@ pub fn plan_folder(
             if mismatch.is_some() {
                 return;
             }
-            let path = candidate.path.to_path_buf();
+            let path = candidate.path();
 
             if select::is_protected(&path, reference_paths) {
                 protected_files_skipped += 1;

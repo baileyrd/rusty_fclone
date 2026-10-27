@@ -105,7 +105,7 @@ pub fn find_similar_images(
             // just mean that file contributes no signal -- see this
             // function's own doc comment.
         },
-        |candidate| candidate_paths.push(candidate.path.to_path_buf()),
+        |candidate| candidate_paths.push(candidate.path()),
     );
 
     let mut hashed: Vec<(PathBuf, u64)> = Vec::new();

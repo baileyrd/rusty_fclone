@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use file_id::FileId;
 use rayon::prelude::*;
 
 use crate::cache::{self, HashCache};
@@ -16,7 +15,7 @@ use crate::fclones_import::{self, FclonesImportCache};
 use crate::hash::{hash_chunks, sample_ranges};
 use crate::io_pool::IoPool;
 use crate::model::{DuplicateGroup, ScanEvent, ScanOptions, ScanProgress, ScanSummary};
-use crate::traversal::traverse;
+use crate::traversal::{traverse, Candidate};
 
 /// How often (in files scanned) to emit a [`ScanEvent::Progress`]
 /// checkpoint during traversal (ADR-0015). A count-based threshold rather
@@ -109,13 +108,11 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         }
     });
 
-    // Traversal and hardlink-collapse run as one streaming pass
-    // (DETECTION-STREAMING-OVERLAP): each candidate is folded into
-    // `by_file_id` as soon as jwalk produces it, rather than first
-    // materializing a `Vec<Candidate>` and looping over it separately.
-    // Files sharing a (device, inode) / file-id already share storage, so
-    // only one representative per id needs hashing.
-    let mut by_file_id: HashMap<FileId, (u64, Vec<Arc<Path>>)> = HashMap::new();
+    // Traversal only records compact candidates (shared parent dir + file
+    // name); full paths are materialized afterwards, and only for files
+    // whose size is shared by another file -- on a typical tree most sizes
+    // are unique, so most files never get a full-path allocation at all.
+    let mut candidates: Vec<Candidate> = Vec::new();
     traverse(
         &root,
         &options,
@@ -125,11 +122,7 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         |candidate| {
             summary.files_scanned += 1;
             summary.bytes_scanned += candidate.size;
-            by_file_id
-                .entry(candidate.file_id)
-                .or_insert_with(|| (candidate.size, Vec::new()))
-                .1
-                .push(candidate.path);
+            candidates.push(candidate);
             if summary.files_scanned % PROGRESS_INTERVAL_FILES == 0 {
                 let _ = event_tx.send(ScanEvent::Progress(ScanProgress {
                     files_scanned: summary.files_scanned,
@@ -145,22 +138,7 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         "traversal complete"
     );
 
-    // Group representatives by size — only sizes shared by 2+ distinct
-    // files can possibly be duplicates.
-    let mut by_size: HashMap<u64, Vec<FileGroup>> = HashMap::new();
-    for (size, mut aliases) in by_file_id.into_values() {
-        aliases.sort();
-        let representative = aliases[0].clone();
-        by_size
-            .entry(size)
-            .or_default()
-            .push((representative, aliases));
-    }
-
-    let candidate_groups: Vec<(u64, Vec<FileGroup>)> = by_size
-        .into_iter()
-        .filter(|(_, members)| members.len() > 1)
-        .collect();
+    let candidate_groups = size_groups(candidates);
     tracing::debug!(
         size_groups = candidate_groups.len(),
         "size-grouping complete, starting staged hashing"
@@ -209,6 +187,40 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         "scan finished"
     );
     let _ = event_tx.send(ScanEvent::Finished(summary));
+}
+
+/// Groups traversal candidates into size-groups of 2+ distinct files, each
+/// file being one [`FileGroup`]: hardlink aliases (same `FileId`) are
+/// collapsed into one entry, since they already share storage and only one
+/// representative per id needs hashing. Sizes held by a single distinct
+/// file can't be duplicates and are dropped before any full path is built.
+///
+/// Sort-and-run rather than nested hash maps: sorting by `(size, file_id)`
+/// in place needs no extra allocation, and leaves both levels of grouping
+/// as adjacent runs.
+fn size_groups(mut candidates: Vec<Candidate>) -> Vec<(u64, Vec<FileGroup>)> {
+    candidates.sort_unstable_by_key(|c| (c.size, c.file_id));
+
+    let mut groups = Vec::new();
+    for same_size in candidates.chunk_by(|a, b| a.size == b.size) {
+        let members: Vec<FileGroup> = same_size
+            .chunk_by(|a, b| a.file_id == b.file_id)
+            .map(file_group)
+            .collect();
+        if members.len() > 1 {
+            groups.push((same_size[0].size, members));
+        }
+    }
+    groups
+}
+
+/// One distinct file's [`FileGroup`] from every candidate sharing its
+/// `FileId` (its hardlink aliases), with the alphabetically-first alias
+/// as representative.
+fn file_group(aliases: &[Candidate]) -> FileGroup {
+    let mut paths: Vec<Arc<Path>> = aliases.iter().map(|c| Arc::from(c.path())).collect();
+    paths.sort();
+    (paths[0].clone(), paths)
 }
 
 /// Runs the staged-hashing pipeline (ADR-0001) for one size-group: partial
@@ -425,6 +437,7 @@ fn verify_representatives(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use file_id::FileId;
     use std::fs;
 
     fn collect_groups(dir: &std::path::Path, options: ScanOptions) -> Vec<DuplicateGroup> {
@@ -435,6 +448,46 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn candidate(name: &str, size: u64, inode: u64) -> Candidate {
+        Candidate {
+            parent: Arc::from(Path::new("/root")),
+            name: std::ffi::OsStr::new(name).into(),
+            size,
+            file_id: FileId::new_inode(1, inode),
+        }
+    }
+
+    #[test]
+    fn size_groups_drops_unique_sizes_and_collapses_hardlinks() {
+        let groups = size_groups(vec![
+            candidate("unique", 7, 1),
+            candidate("b-link", 5, 2),
+            candidate("c", 5, 3),
+            candidate("a-link", 5, 2),
+            candidate("lonely-x", 9, 4),
+            candidate("lonely-y", 9, 4),
+        ]);
+
+        // Size 7 is unique; size 9 is one inode under two names, so only
+        // one distinct file -- neither can hold a duplicate.
+        assert_eq!(groups.len(), 1);
+        let (size, members) = &groups[0];
+        assert_eq!(*size, 5);
+        assert_eq!(members.len(), 2);
+        let linked = members
+            .iter()
+            .find(|(_, aliases)| aliases.len() == 2)
+            .unwrap();
+        assert_eq!(&*linked.0, Path::new("/root/a-link"));
+        assert_eq!(
+            linked.1,
+            vec![
+                Arc::from(Path::new("/root/a-link")),
+                Arc::from(Path::new("/root/b-link"))
+            ]
+        );
     }
 
     #[test]
