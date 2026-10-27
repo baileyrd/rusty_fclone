@@ -96,6 +96,19 @@ pub fn scan(root: impl Into<PathBuf>, options: ScanOptions) -> Result<ScanHandle
 fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
     let mut summary = ScanSummary::default();
 
+    // Opened before traversal (not after) so the file exists, and a bad
+    // path or permissions problem surfaces, immediately rather than after a
+    // potentially hours-long walk of a large tree (ADR-0016 addendum).
+    let cache = options.cache_path.as_ref().and_then(|path| {
+        match HashCache::open(path) {
+            Ok(cache) => Some(cache),
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "failed to open hash cache, continuing without it");
+                None
+            }
+        }
+    });
+
     // Traversal and hardlink-collapse run as one streaming pass
     // (DETECTION-STREAMING-OVERLAP): each candidate is folded into
     // `by_file_id` as soon as jwalk produces it, rather than first
@@ -165,15 +178,6 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
     let duplicate_groups = AtomicU64::new(0);
     let duplicate_files = AtomicU64::new(0);
 
-    let cache = options.cache_path.as_ref().and_then(|path| {
-        match HashCache::open(path) {
-            Ok(cache) => Some(cache),
-            Err(err) => {
-                tracing::warn!(path = %path.display(), error = %err, "failed to open hash cache, continuing without it");
-                None
-            }
-        }
-    });
     let fclones_import = options
         .fclones_import_path
         .as_ref()
@@ -257,12 +261,17 @@ fn process_size_group(
 
     // Cache lookups/misses are collected as plain data rather than written
     // inside the parallel closure below: redb write transactions are
-    // exclusive, so batching every miss from this size-group into one
-    // transaction (after the parallel stage completes) avoids serializing
-    // hashing threads on a per-file write lock.
-    let full_hashed: Vec<FullHashResult> = full_hash_input
-        .into_par_iter()
-        .filter_map(|(representative, aliases)| {
+    // exclusive, so batching misses into a transaction (after each parallel
+    // chunk completes) avoids serializing hashing threads on a per-file
+    // write lock. The group is hashed in chunks, committing after each, so
+    // an interrupted scan keeps every completed chunk's hashes instead of
+    // losing the whole size group (ADR-0016 addendum).
+    let mut full_hashed: Vec<FullHashResult> = Vec::new();
+    for chunk in full_hash_input.chunks(cache_chunk_len(size)) {
+        let chunk_results: Vec<FullHashResult> = chunk
+            .to_vec()
+            .into_par_iter()
+            .filter_map(|(representative, aliases)| {
             let stat = (cache.is_some() || fclones_import.is_some())
                 .then(|| cache::stat(&representative))
                 .flatten();
@@ -304,14 +313,16 @@ fn process_size_group(
                 }
             }
         })
-        .collect();
-
-    if let Some(cache) = cache {
-        let updates: Vec<(Arc<Path>, cache::FileStat, u128)> = full_hashed
-            .iter()
-            .filter_map(|r| r.cache_write.map(|stat| (r.group.0.clone(), stat, r.hash)))
             .collect();
-        cache.put_batch(&updates);
+
+        if let Some(cache) = cache {
+            let updates: Vec<(Arc<Path>, cache::FileStat, u128)> = chunk_results
+                .iter()
+                .filter_map(|r| r.cache_write.map(|stat| (r.group.0.clone(), stat, r.hash)))
+                .collect();
+            cache.put_batch(&updates);
+        }
+        full_hashed.extend(chunk_results);
     }
 
     let mut by_full: HashMap<u128, Vec<FileGroup>> = HashMap::new();
@@ -337,6 +348,20 @@ fn process_size_group(
             Some(DuplicateGroup { size, paths })
         })
         .collect()
+}
+
+/// Max files hashed between cache commits within one size group.
+const CACHE_CHUNK_MAX_FILES: usize = 256;
+/// Max bytes hashed between cache commits (every file in a size group has
+/// the same size, so this bounds work lost to an interrupt for huge files).
+const CACHE_CHUNK_MAX_BYTES: u64 = 1 << 30;
+
+/// Files per cache-commit chunk for a size group of `size`-byte files.
+fn cache_chunk_len(size: u64) -> usize {
+    let by_bytes = (CACHE_CHUNK_MAX_BYTES / size.max(1)).max(1);
+    usize::try_from(by_bytes)
+        .unwrap_or(CACHE_CHUNK_MAX_FILES)
+        .min(CACHE_CHUNK_MAX_FILES)
 }
 
 /// Sends a [`ScanEvent::Error`] for a file that failed to read during
@@ -668,6 +693,57 @@ mod tests {
 
         assert_eq!(uncached, first_cached_run);
         assert_eq!(uncached, second_cached_run);
+    }
+
+    #[test]
+    fn cache_chunk_len_is_bounded_by_files_and_bytes() {
+        assert_eq!(cache_chunk_len(0), CACHE_CHUNK_MAX_FILES);
+        assert_eq!(cache_chunk_len(1), CACHE_CHUNK_MAX_FILES);
+        assert_eq!(cache_chunk_len(CACHE_CHUNK_MAX_BYTES / 4), 4);
+        assert_eq!(cache_chunk_len(CACHE_CHUNK_MAX_BYTES * 10), 1);
+    }
+
+    #[test]
+    fn a_size_group_spanning_several_cache_chunks_is_fully_cached() {
+        // More same-size files than one chunk, so the group is hashed and
+        // committed in multiple transactions; every file must still be
+        // grouped correctly and cached for the next run.
+        let dir = tempfile::tempdir().unwrap();
+        let count = CACHE_CHUNK_MAX_FILES * 2 + 5;
+        for i in 0..count {
+            fs::write(dir.path().join(format!("f{i}.bin")), vec![5u8; 64]).unwrap();
+        }
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache_path = cache_dir.path().join("cache.redb");
+        let options = ScanOptions {
+            cache_path: Some(cache_path.clone()),
+            ..ScanOptions::default()
+        };
+
+        let groups = collect_groups(dir.path(), options);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].paths.len(), count);
+
+        let cache = HashCache::open(&cache_path).unwrap();
+        for path in &groups[0].paths {
+            let stat = cache::stat(path).unwrap();
+            assert!(cache.get(path, stat).is_some(), "{path:?} not cached");
+        }
+    }
+
+    #[test]
+    fn cache_file_is_created_even_when_the_scan_finds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("only.txt"), b"alone").unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache_path = cache_dir.path().join("cache.redb");
+        let options = ScanOptions {
+            cache_path: Some(cache_path.clone()),
+            ..ScanOptions::default()
+        };
+
+        assert!(collect_groups(dir.path(), options).is_empty());
+        assert!(cache_path.exists());
     }
 
     #[test]

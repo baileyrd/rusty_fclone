@@ -2,6 +2,11 @@
 - Last verified main commit: `46d0114` — merged `ACTION-PLAN-FILE`
   (PR #54): reviewable plan files, apply journal, undo for moves;
   ADR-0032. CI green on the pinned toolchain, including the GUI crate.
+- In progress (branch `cache-incremental-writes`, not yet merged): hash
+  cache opened before traversal and committed in chunks within a size
+  group (ADR-0016 addendum). Six `fclones_import::tests::*` tests fail on
+  Windows on `main` as well (panic at `fclones_import.rs:227`), unrelated
+  to this change.
 - Previous checkpoint note: `51f9cb6` — merged `GUI-REVIEW-PANELS`
   (PR #52). Prompted by a refreshed `Deduplication app UI design.zip`
   (v2 handoff) committed to the repo root; see the Completed entry below
