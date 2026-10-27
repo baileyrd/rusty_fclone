@@ -107,3 +107,26 @@ folders) skips the dominant cost of a re-scan.
   concurrent access safely (one writer, multiple readers), so this
   wouldn't corrupt the cache, but no attempt was made to verify or
   optimize for that scenario.
+
+## Addendum (2026-10-26): earlier open, chunked commits
+
+Two changes so an interrupted scan of a large tree loses less and fails
+earlier; the on-disk format and invalidation rule are unchanged.
+
+- **Open before traversal.** `HashCache::open` now runs at the start of
+  `run_scan`, not after size-grouping. Previously the cache file did not
+  exist until the whole walk finished, so a bad path or permissions error
+  surfaced only after a potentially hours-long traversal, and the file was
+  invisible while it ran. An open failure is still best-effort (warn, scan
+  continues without a cache).
+- **Chunked commits inside a size group.** "Writes are batched per
+  size-group" is superseded: a group's full-hash stage now runs in chunks
+  of at most 256 files or ~1 GiB (every file in a group has the same size,
+  so the chunk length is `min(256, 1 GiB / size)`, at least 1), committing
+  one write transaction per chunk. A huge group therefore keeps every
+  completed chunk's hashes if the scan is interrupted, instead of none.
+  Cost: more write transactions (each fsyncs) for groups over 256 small
+  files; still never one per file.
+- Not changed, deliberately: traversal results are not persisted (the
+  per-file `stat` that validates them is the same cost as the walk), and
+  partial hashes are still not cached (see the original decision).
