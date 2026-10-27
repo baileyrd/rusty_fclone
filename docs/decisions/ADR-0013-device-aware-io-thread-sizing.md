@@ -72,3 +72,13 @@ roadmap for (1), tracked separately.
 - io_uring/`FIEMAP` extent-ordered reads remain a separate, still-open
   roadmap item — this ADR only closes the thread-sizing half of
   `DETECTION-LINUX-FASTPATH`.
+
+## Addendum (2026-10-27): FUSE mounts
+
+A FUSE mount such as ntfs-3g (`fuseblk`) reports an anonymous `0:N` device
+id with no block device in sysfs, so detection always fell back to `cores`
+there. When the mount's own id doesn't resolve, detection now reads the
+mount source from `/proc/self/mountinfo` (e.g. `/dev/sdb1`), resolves any
+`/dev/disk/by-*` symlink, and checks `/sys/class/block/<name>` (or its
+whole-disk parent). Sources that aren't `/dev/` nodes (sshfs, tmpfs) still
+fall back to `cores`.
