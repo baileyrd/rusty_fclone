@@ -48,6 +48,14 @@ pub struct ScanOptions {
     /// persisted for future rusty-fclone-only re-scans (ADR-0019).
     pub fclones_import_path: Option<PathBuf>,
 
+    /// Ignore the walk index stored alongside `cache_path` and `stat` every
+    /// file, refreshing the index as it goes. Default `false`: with a cache
+    /// set, a directory whose mtime is unchanged since the last walk reuses
+    /// its recorded file sizes, which misses a file rewritten in place in an
+    /// otherwise untouched directory (ADR-0034). No effect without
+    /// `cache_path`.
+    pub rescan_all: bool,
+
     /// Files smaller than this (in bytes) are skipped during traversal,
     /// before any hashing. `None` (default) disables the check
     /// (`DETECTION-SCAN-FILTERS`).
@@ -86,6 +94,7 @@ impl Default for ScanOptions {
             io_threads: None,
             cache_path: None,
             fclones_import_path: None,
+            rescan_all: false,
             min_size: None,
             max_size: None,
             include_extensions: None,

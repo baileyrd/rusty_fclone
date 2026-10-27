@@ -113,6 +113,7 @@ pub fn plan_folder(
     traversal::traverse(
         removed,
         options,
+        None,
         |_err| {
             // A per-file traversal error here means that file can't even
             // be identified, let alone confirmed as a duplicate -- it

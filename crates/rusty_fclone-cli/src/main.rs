@@ -166,6 +166,14 @@ struct Cli {
     #[arg(long)]
     import_fclones_cache: Option<PathBuf>,
 
+    /// With --cache, ignore the walk index stored there and stat every
+    /// file, refreshing the index. By default a directory whose modified
+    /// time is unchanged since the last scan reuses its recorded file
+    /// sizes, which misses a file rewritten in place in an otherwise
+    /// untouched directory (ADR-0034).
+    #[arg(long)]
+    rescan_all: bool,
+
     /// Path to a SQLite scan-history database (created if it doesn't
     /// exist). When set, a summary of this scan (files/bytes scanned,
     /// duplicate groups/files, and any action's result) is appended as one
@@ -601,6 +609,7 @@ fn run(cli: Cli) -> ExitCode {
         io_threads: cli.io_threads,
         cache_path: cli.cache,
         fclones_import_path: cli.import_fclones_cache,
+        rescan_all: cli.rescan_all,
         min_size: cli.min_size,
         max_size: cli.max_size,
         include_extensions: (!cli.include_extensions.is_empty()).then_some(cli.include_extensions),
@@ -1604,6 +1613,7 @@ mod tests {
             io_threads: ScanOptions::default().io_threads,
             cache: ScanOptions::default().cache_path,
             import_fclones_cache: ScanOptions::default().fclones_import_path,
+            rescan_all: false,
             history: None,
             plan_out: None,
             min_size: ScanOptions::default().min_size,

@@ -16,6 +16,7 @@ use crate::hash::{hash_chunks, sample_ranges};
 use crate::io_pool::IoPool;
 use crate::model::{DuplicateGroup, ScanEvent, ScanOptions, ScanProgress, ScanSummary};
 use crate::traversal::{traverse, Candidate};
+use crate::walk_index::WalkIndex;
 
 /// How often (in files scanned) to emit a [`ScanEvent::Progress`]
 /// checkpoint during traversal (ADR-0015). A count-based threshold rather
@@ -112,10 +113,22 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
     // name); full paths are materialized afterwards, and only for files
     // whose size is shared by another file -- on a typical tree most sizes
     // are unique, so most files never get a full-path allocation at all.
+    let walk_index = cache.as_ref().and_then(|cache| {
+        match WalkIndex::open(cache.database(), !options.rescan_all) {
+            Ok((index, writer)) => Some((Arc::new(index), writer)),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to open walk index, walking without it");
+                None
+            }
+        }
+    });
+    let (index, index_writer) = walk_index.unzip();
+
     let mut candidates: Vec<Candidate> = Vec::new();
     traverse(
         &root,
         &options,
+        index,
         |err| {
             let _ = event_tx.send(ScanEvent::Error(err));
         },
@@ -137,6 +150,9 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         bytes_scanned = summary.bytes_scanned,
         "traversal complete"
     );
+    if let Some(writer) = index_writer {
+        writer.finish();
+    }
 
     let candidate_groups = size_groups(candidates);
     tracing::debug!(

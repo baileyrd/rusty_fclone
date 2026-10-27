@@ -64,7 +64,7 @@ pub(crate) fn stat(path: &Path) -> Option<FileStat> {
 const DB_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) struct HashCache {
-    db: Database,
+    db: Arc<Database>,
 }
 
 impl HashCache {
@@ -80,7 +80,12 @@ impl HashCache {
             let _ = write_txn.open_table(TABLE)?;
         }
         write_txn.commit()?;
-        Ok(Self { db })
+        Ok(Self { db: Arc::new(db) })
+    }
+
+    /// The underlying database, shared with the walk index (ADR-0034).
+    pub(crate) fn database(&self) -> Arc<Database> {
+        self.db.clone()
     }
 
     /// Returns the cached full hash for `path` if present and its stored

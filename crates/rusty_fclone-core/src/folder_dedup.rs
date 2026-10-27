@@ -219,6 +219,7 @@ fn build_tree(
     traversal::traverse(
         root,
         options,
+        None,
         |_err| {
             // A per-file error here just means that file is missing from
             // the folder-level picture, same tolerance as the main scan

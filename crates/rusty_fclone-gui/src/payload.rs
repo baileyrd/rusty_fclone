@@ -81,6 +81,7 @@ impl From<ScanOptionsPayload> for ScanOptions {
                 .as_deref()
                 .map(normalize_path_input)
                 .map(PathBuf::from),
+            rescan_all: defaults.rescan_all,
             min_size: p.min_size,
             max_size: p.max_size,
             include_extensions: p.include_extensions,

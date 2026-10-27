@@ -22,6 +22,7 @@ mod perceptual;
 mod pipeline;
 pub mod select;
 mod traversal;
+mod walk_index;
 
 pub use error::{FileError, FolderActionError, ScanError};
 pub use folder_dedup::{find_folder_duplicates, FolderMatch};
