@@ -1,6 +1,6 @@
 # ADR-0034: Durable per-directory walk index
 
-- Status: Accepted
+- Status: Accepted (records extended with subdirectories, ADR-0036)
 - Date: 2026-10-27
 - Related: ADR-0012 (traversal must finish before hashing), ADR-0016 (redb
   hash cache), ADR-0033 (compact traversal storage)

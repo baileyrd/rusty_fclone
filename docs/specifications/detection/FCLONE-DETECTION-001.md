@@ -228,10 +228,11 @@ pub struct PerceptualOptions { pub max_hamming_distance: u32 } // default 10
 pub struct SimilarGroup { pub paths: Vec<PathBuf>, pub max_distance: u32 }
 ```
 
-Internal modules: `traversal` (jwalk-based walk + file-id; also applies
+Internal modules: `traversal` (parallel walk on rayon's pool + file-id,
+driven by the walk index when one is open, ADR-0036; also applies
 `min_size`/`max_size`/`include_extensions`/`exclude_extensions` per file and
-prunes `exclude_paths` subtrees via jwalk's `process_read_dir` before
-descending, `DETECTION-SCAN-FILTERS`), `io_pool`
+prunes `exclude_paths` subtrees before descending,
+`DETECTION-SCAN-FILTERS`), `io_pool`
 (hand-rolled blocking read workers), `hash` (xxh3-128 + sampling), `device`
 (Linux rotational-disk detection for `io_threads` auto-sizing), `cache`
 (`redb`-backed full-hash cache, ADR-0016), `fclones_import` (reads an

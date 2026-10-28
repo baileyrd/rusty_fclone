@@ -8,7 +8,6 @@ description = "Duplicate file detection engine for rusty_fclone"
 publish = false
 
 [dependencies]
-jwalk.workspace = true
 rayon.workspace = true
 crossbeam-channel.workspace = true
 xxhash-rust.workspace = true
