@@ -182,7 +182,7 @@ const state = {
   profileError: null,
   scanning: false,
   scanError: null,
-  progress: { filesScanned: 0, bytesScanned: 0 },
+  progress: { filesScanned: 0, bytesScanned: 0, hashing: null },
   groups: [],
   folderMatches: [],
   findingFolders: false,
@@ -1041,7 +1041,11 @@ function reviewItems() {
 }
 
 function scanningSubtitle() {
-  return `Scanning... ${state.progress.filesScanned} files, ${bytesHuman(state.progress.bytesScanned)} scanned so far.`;
+  const { filesScanned, bytesScanned, hashing } = state.progress;
+  if (hashing) {
+    return `Hashing ${filesScanned} scanned files... ${hashing.filesRead} file reads, ${bytesHuman(hashing.bytesRead)} read so far.`;
+  }
+  return `Scanning... ${filesScanned} files, ${bytesHuman(bytesScanned)} scanned so far.`;
 }
 
 function errorsPanel() {
@@ -1798,7 +1802,7 @@ async function startScan() {
     folderMatches: [],
     similarGroups: [],
     errors: [],
-    progress: { filesScanned: 0, bytesScanned: 0 },
+    progress: { filesScanned: 0, bytesScanned: 0, hashing: null },
     groupIndex: 0,
     keepChoice: {},
     ruleKeepChoice: {},
@@ -1934,7 +1938,10 @@ listen("scan-event", (event) => {
       setState({ groups: [...state.groups, { size: payload.size, paths: payload.paths }] });
       break;
     case "progress":
-      setState({ progress: { filesScanned: payload.filesScanned, bytesScanned: payload.bytesScanned } });
+      setState({ progress: { filesScanned: payload.filesScanned, bytesScanned: payload.bytesScanned, hashing: null } });
+      break;
+    case "hash_progress":
+      setState({ progress: { ...state.progress, hashing: { filesRead: payload.filesRead, bytesRead: payload.bytesRead } } });
       break;
     case "error":
       setState({ errors: [...state.errors, payload] });

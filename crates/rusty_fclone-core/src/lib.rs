@@ -27,6 +27,6 @@ mod walk_index;
 
 pub use error::{FileError, FolderActionError, ScanError};
 pub use folder_dedup::{find_folder_duplicates, FolderMatch};
-pub use model::{DuplicateGroup, ScanEvent, ScanOptions, ScanProgress, ScanSummary};
+pub use model::{DuplicateGroup, HashProgress, ScanEvent, ScanOptions, ScanProgress, ScanSummary};
 pub use perceptual::{find_similar_images, PerceptualOptions, SimilarGroup};
 pub use pipeline::{scan, ScanHandle};

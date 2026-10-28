@@ -14,7 +14,8 @@ use rusty_fclone_core::action::{ActionKind, ActionPlan, ApplyReport, FileAction}
 use rusty_fclone_core::folder_action::{FolderActionPlan, FolderApplyReport};
 use rusty_fclone_core::select::Rule as SelectRule;
 use rusty_fclone_core::{
-    DuplicateGroup, FileError, FolderMatch, ScanOptions, ScanProgress, ScanSummary, SimilarGroup,
+    DuplicateGroup, FileError, FolderMatch, HashProgress, ScanOptions, ScanProgress, ScanSummary,
+    SimilarGroup,
 };
 
 /// Scan tunables sent from the frontend. Mirrors [`ScanOptions`]; every
@@ -110,6 +111,11 @@ pub enum ScanEventPayload {
         files_scanned: u64,
         bytes_scanned: u64,
     },
+    #[serde(rename_all = "camelCase")]
+    HashProgress {
+        files_read: u64,
+        bytes_read: u64,
+    },
     Finished(ScanSummaryPayload),
 }
 
@@ -149,6 +155,15 @@ impl From<ScanProgress> for ScanEventPayload {
         ScanEventPayload::Progress {
             files_scanned: p.files_scanned,
             bytes_scanned: p.bytes_scanned,
+        }
+    }
+}
+
+impl From<HashProgress> for ScanEventPayload {
+    fn from(p: HashProgress) -> Self {
+        ScanEventPayload::HashProgress {
+            files_read: p.files_read,
+            bytes_read: p.bytes_read,
         }
     }
 }
@@ -680,6 +695,18 @@ mod tests {
         assert_eq!(json["type"], "progress");
         assert_eq!(json["filesScanned"], 3);
         assert_eq!(json["bytesScanned"], 100);
+    }
+
+    #[test]
+    fn hash_progress_payload_serializes_with_camel_case_fields() {
+        let payload = ScanEventPayload::from(HashProgress {
+            files_read: 7,
+            bytes_read: 900,
+        });
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["type"], "hash_progress");
+        assert_eq!(json["filesRead"], 7);
+        assert_eq!(json["bytesRead"], 900);
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use crossbeam_channel::{bounded, Sender};
@@ -21,6 +23,33 @@ const STREAM_CHUNK_SIZE: usize = 1024 * 1024;
 pub(crate) struct IoPool {
     tx: Option<Sender<ReadJob>>,
     workers: Vec<JoinHandle<()>>,
+    stats: Arc<IoStats>,
+}
+
+/// Running totals of the reads the pool has finished, for progress output.
+#[derive(Debug, Default)]
+pub(crate) struct IoStats {
+    files: AtomicU64,
+    bytes: AtomicU64,
+}
+
+impl IoStats {
+    /// `(files read, bytes read)` so far. A file read twice (partial, then
+    /// full hash) counts twice.
+    pub(crate) fn totals(&self) -> (u64, u64) {
+        (
+            self.files.load(Ordering::Relaxed),
+            self.bytes.load(Ordering::Relaxed),
+        )
+    }
+
+    fn add_bytes(&self, bytes: usize) {
+        self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn add_files(&self, files: u64) {
+        self.files.fetch_add(files, Ordering::Relaxed);
+    }
 }
 
 enum ReadJob {
@@ -44,26 +73,14 @@ impl IoPool {
     pub(crate) fn new(threads: usize) -> Self {
         let threads = threads.max(1);
         let (tx, rx) = bounded::<ReadJob>(threads * 4);
+        let stats = Arc::new(IoStats::default());
         let workers = (0..threads)
             .map(|_| {
                 let rx = rx.clone();
+                let stats = Arc::clone(&stats);
                 std::thread::spawn(move || {
                     for job in rx.iter() {
-                        match job {
-                            ReadJob::Ranges {
-                                path,
-                                ranges,
-                                reply,
-                            } => {
-                                let _ = reply.send(read_ranges(&path, &ranges));
-                            }
-                            ReadJob::HashFull { path, reply } => {
-                                let _ = reply.send(hash_full_file(&path));
-                            }
-                            ReadJob::FilesEqual { a, b, reply } => {
-                                let _ = reply.send(files_equal(&a, &b));
-                            }
-                        }
+                        run_job(job, &stats);
                     }
                 })
             })
@@ -71,7 +88,13 @@ impl IoPool {
         Self {
             tx: Some(tx),
             workers,
+            stats,
         }
+    }
+
+    /// The pool's running read totals.
+    pub(crate) fn stats(&self) -> Arc<IoStats> {
+        Arc::clone(&self.stats)
     }
 
     /// Reads and concatenates each `(offset, length)` range from `path`, in
@@ -129,6 +152,32 @@ impl IoPool {
     }
 }
 
+/// Runs one job, counting it in `stats` before replying so a caller that
+/// has its result also sees it counted.
+fn run_job(job: ReadJob, stats: &IoStats) {
+    match job {
+        ReadJob::Ranges {
+            path,
+            ranges,
+            reply,
+        } => {
+            let result = read_ranges(&path, &ranges, stats);
+            stats.add_files(1);
+            let _ = reply.send(result);
+        }
+        ReadJob::HashFull { path, reply } => {
+            let result = hash_full_file(&path, stats);
+            stats.add_files(1);
+            let _ = reply.send(result);
+        }
+        ReadJob::FilesEqual { a, b, reply } => {
+            let result = files_equal(&a, &b, stats);
+            stats.add_files(2);
+            let _ = reply.send(result);
+        }
+    }
+}
+
 impl Drop for IoPool {
     fn drop(&mut self) {
         // Drop the sender first so workers' `rx.iter()` loops see the
@@ -140,20 +189,21 @@ impl Drop for IoPool {
     }
 }
 
-fn read_ranges(path: &Path, ranges: &[(u64, usize)]) -> io::Result<Vec<u8>> {
+fn read_ranges(path: &Path, ranges: &[(u64, usize)], stats: &IoStats) -> io::Result<Vec<u8>> {
     let mut file = File::open(path)?;
     let mut buf = Vec::new();
     for &(offset, len) in ranges {
         file.seek(SeekFrom::Start(offset))?;
         let mut chunk = vec![0u8; len];
         let read = read_up_to(&mut file, &mut chunk)?;
+        stats.add_bytes(read);
         chunk.truncate(read);
         buf.extend_from_slice(&chunk);
     }
     Ok(buf)
 }
 
-fn hash_full_file(path: &Path) -> io::Result<u128> {
+fn hash_full_file(path: &Path, stats: &IoStats) -> io::Result<u128> {
     let mut file = File::open(path)?;
     let mut hasher = Xxh3::new();
     let mut chunk = vec![0u8; STREAM_CHUNK_SIZE];
@@ -162,12 +212,13 @@ fn hash_full_file(path: &Path) -> io::Result<u128> {
         if read == 0 {
             break;
         }
+        stats.add_bytes(read);
         hasher.update(&chunk[..read]);
     }
     Ok(hasher.digest128())
 }
 
-fn files_equal(a: &Path, b: &Path) -> io::Result<bool> {
+fn files_equal(a: &Path, b: &Path, stats: &IoStats) -> io::Result<bool> {
     let mut file_a = File::open(a)?;
     let mut file_b = File::open(b)?;
     let mut chunk_a = vec![0u8; STREAM_CHUNK_SIZE];
@@ -175,6 +226,7 @@ fn files_equal(a: &Path, b: &Path) -> io::Result<bool> {
     loop {
         let read_a = read_up_to(&mut file_a, &mut chunk_a)?;
         let read_b = read_up_to(&mut file_b, &mut chunk_b)?;
+        stats.add_bytes(read_a + read_b);
         if read_a != read_b {
             return Ok(false); // different lengths
         }
@@ -205,6 +257,16 @@ fn read_up_to(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn stats_count_finished_reads_and_their_bytes() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"0123456789").unwrap();
+        let pool = IoPool::new(2);
+        pool.read_ranges(file.path(), vec![(0, 3), (7, 3)]).unwrap();
+        pool.hash_full_file(file.path()).unwrap();
+        assert_eq!(pool.stats().totals(), (2, 16));
+    }
 
     #[test]
     fn reads_ranges_in_order() {

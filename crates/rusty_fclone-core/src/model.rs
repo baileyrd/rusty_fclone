@@ -130,6 +130,10 @@ pub enum ScanEvent {
     /// consumers that only care about results can ignore it. Only ever
     /// appears before `Finished`, alongside `DuplicateGroup`/`Error`.
     Progress(ScanProgress),
+    /// A hashing progress checkpoint, emitted about once a second after
+    /// traversal ends and until `Finished` (ADR-0035). Informational, like
+    /// `Progress`.
+    HashProgress(HashProgress),
     /// The scan has finished; no further events follow.
     Finished(ScanSummary),
 }
@@ -142,6 +146,15 @@ pub enum ScanEvent {
 pub struct ScanProgress {
     pub files_scanned: u64,
     pub bytes_scanned: u64,
+}
+
+/// A hashing progress checkpoint. Counts are cumulative reads of file
+/// content; a file read for its partial and then its full hash counts
+/// twice. Files whose hash came from a cache aren't read and don't count.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HashProgress {
+    pub files_read: u64,
+    pub bytes_read: u64,
 }
 
 /// Aggregate counters reported once a scan completes.

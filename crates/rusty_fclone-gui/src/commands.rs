@@ -52,6 +52,7 @@ pub fn start_scan<R: Runtime>(
                 rusty_fclone_core::ScanEvent::DuplicateGroup(group) => group.into(),
                 rusty_fclone_core::ScanEvent::Error(err) => err.into(),
                 rusty_fclone_core::ScanEvent::Progress(p) => (*p).into(),
+                rusty_fclone_core::ScanEvent::HashProgress(p) => (*p).into(),
                 rusty_fclone_core::ScanEvent::Finished(summary) => summary.clone().into(),
             };
             if app.emit("scan-event", payload).is_err() {

@@ -51,3 +51,12 @@ synthetic 4M-file tree (peak RSS, `--cache`), two things grew with the tree:
 - Disk use while sorting is about 30 B plus the path length per file,
   roughly 2 GB for 16.9M files. If a spill fails (for example, the disk is
   full), the scan logs a warning and keeps candidates in memory, as before.
+
+## Addendum (2026-10-28): hashing progress
+
+On the 22M-file drive the walk finished and the scan then sat on its last
+`scanning...` line, at near-zero CPU, while it read small files one seek
+at a time; nothing printed until a whole size group was confirmed. Hashing
+now emits `ScanEvent::HashProgress` (file reads and bytes read, from
+`IoPool` counters) about once a second until `Finished`. Empty files are
+grouped without being read, since they're identical by definition.
