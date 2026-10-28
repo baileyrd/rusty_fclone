@@ -60,6 +60,11 @@ confirmation prompt as a second safety layer on top of `--apply`.
   emitted as `{"type":"error","path":<string>,"message":<string>}`.
 - `CLI-UX-001-FR-004`: In `--format json`, a progress checkpoint SHALL be
   emitted as `{"type":"progress","files_scanned":<u64>,"bytes_scanned":<u64>}`.
+- `CLI-UX-001-FR-004a`: In `--format json`, a hashing progress checkpoint
+  (about once a second after traversal) SHALL be emitted as
+  `{"type":"hash_progress","files_read":<u64>,"bytes_read":<u64>}`. In text
+  mode it replaces the `scanning...` line with `hashing... N file reads,
+  N bytes`.
 - `CLI-UX-001-FR-005`: In `--format json`, the scan's completion SHALL be
   emitted as `{"type":"finished","files_scanned":<u64>,"bytes_scanned":<u64>,"duplicate_groups":<u64>,"duplicate_files":<u64>}`,
   followed, if an action was requested, by

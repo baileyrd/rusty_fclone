@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use rayon::prelude::*;
 
 use crate::cache::{self, HashCache};
@@ -14,8 +15,10 @@ use crate::device::default_io_threads;
 use crate::error::{FileError, ScanError};
 use crate::fclones_import::{self, FclonesImportCache};
 use crate::hash::{hash_chunks, sample_ranges};
-use crate::io_pool::IoPool;
-use crate::model::{DuplicateGroup, ScanEvent, ScanOptions, ScanProgress, ScanSummary};
+use crate::io_pool::{IoPool, IoStats};
+use crate::model::{
+    DuplicateGroup, HashProgress, ScanEvent, ScanOptions, ScanProgress, ScanSummary,
+};
 use crate::traversal::traverse;
 use crate::walk_index::WalkIndex;
 
@@ -24,6 +27,11 @@ use crate::walk_index::WalkIndex;
 /// than a wall-clock timer: deterministic, no extra dependency, and cheap
 /// enough (a modulo check per file) not to matter next to the actual I/O.
 const PROGRESS_INTERVAL_FILES: u64 = 256;
+
+/// How often to emit a [`ScanEvent::HashProgress`] while hashing. Time-based
+/// rather than count-based: on a slow disk a few hundred reads can take
+/// minutes, and the point is to show the scan is alive.
+const HASH_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// One distinct file, identified by its representative path (the first
 /// alias, alphabetically) plus every path — including hardlink aliases —
@@ -198,20 +206,26 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         .as_ref()
         .and_then(|path| FclonesImportCache::open(path));
 
-    candidate_groups.par_bridge().for_each(|(size, members)| {
-        for group in process_size_group(
-            size,
-            members,
-            &io_pool,
-            &options,
-            cache.as_ref(),
-            fclones_import.as_ref(),
-            &event_tx,
-        ) {
-            duplicate_groups.fetch_add(1, Ordering::Relaxed);
-            duplicate_files.fetch_add(group.paths.len() as u64, Ordering::Relaxed);
-            let _ = event_tx.send(ScanEvent::DuplicateGroup(group));
-        }
+    let io_stats = io_pool.stats();
+    let (stop_progress, progress_stopped) = bounded::<()>(0);
+    std::thread::scope(|scope| {
+        scope.spawn(|| report_hash_progress(&io_stats, &progress_stopped, &event_tx));
+        candidate_groups.par_bridge().for_each(|(size, members)| {
+            for group in process_size_group(
+                size,
+                members,
+                &io_pool,
+                &options,
+                cache.as_ref(),
+                fclones_import.as_ref(),
+                &event_tx,
+            ) {
+                duplicate_groups.fetch_add(1, Ordering::Relaxed);
+                duplicate_files.fetch_add(group.paths.len() as u64, Ordering::Relaxed);
+                let _ = event_tx.send(ScanEvent::DuplicateGroup(group));
+            }
+        });
+        drop(stop_progress);
     });
 
     summary.duplicate_groups = duplicate_groups.load(Ordering::Relaxed);
@@ -234,6 +248,23 @@ fn spill_dir(options: &ScanOptions) -> PathBuf {
         .and_then(Path::parent)
         .filter(|dir| !dir.as_os_str().is_empty())
         .map_or_else(std::env::temp_dir, Path::to_path_buf)
+}
+
+/// Emits [`ScanEvent::HashProgress`] now, every [`HASH_PROGRESS_INTERVAL`],
+/// and once more with the final totals when `stop` disconnects.
+fn report_hash_progress(stats: &IoStats, stop: &Receiver<()>, event_tx: &Sender<ScanEvent>) {
+    let emit = || {
+        let (files_read, bytes_read) = stats.totals();
+        let _ = event_tx.send(ScanEvent::HashProgress(HashProgress {
+            files_read,
+            bytes_read,
+        }));
+    };
+    emit();
+    while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(HASH_PROGRESS_INTERVAL) {
+        emit();
+    }
+    emit();
 }
 
 fn report_spill_error(event_tx: &Sender<ScanEvent>, spill_dir: &Path, source: io::Error) {
@@ -320,6 +351,16 @@ fn process_size_group(
     fclones_import: Option<&FclonesImportCache>,
     event_tx: &Sender<ScanEvent>,
 ) -> Vec<DuplicateGroup> {
+    if size == 0 {
+        // Empty files are identical by definition: reading them proves
+        // nothing and, on a slow disk, costs a seek per file.
+        let mut paths: Vec<Arc<Path>> = members
+            .into_iter()
+            .flat_map(|(_, aliases)| aliases)
+            .collect();
+        paths.sort();
+        return vec![DuplicateGroup { size, paths }];
+    }
     let small_file = size <= options.small_file_threshold;
 
     let full_hash_input: Vec<FileGroup> = if small_file {
@@ -569,6 +610,40 @@ mod tests {
                 Arc::from(Path::new("/root/b-link"))
             ]
         );
+    }
+
+    #[test]
+    fn groups_empty_files_and_reports_hash_progress_before_finishing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a"), b"").unwrap();
+        fs::write(dir.path().join("b"), b"").unwrap();
+        fs::write(dir.path().join("c"), b"xy").unwrap();
+        fs::write(dir.path().join("d"), b"xy").unwrap();
+
+        let events: Vec<ScanEvent> = scan(dir.path(), ScanOptions::default()).unwrap().collect();
+        let groups: Vec<&DuplicateGroup> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::DuplicateGroup(g) => Some(g),
+                _ => None,
+            })
+            .collect();
+        let mut sizes: Vec<u64> = groups.iter().map(|g| g.size).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![0, 2]);
+
+        let progress = events
+            .iter()
+            .rposition(|e| matches!(e, ScanEvent::HashProgress(_)));
+        let finished = events
+            .iter()
+            .position(|e| matches!(e, ScanEvent::Finished(_)));
+        assert!(progress.unwrap() < finished.unwrap());
+        // Only the two 2-byte files were read; the empty ones never were.
+        let Some(ScanEvent::HashProgress(last)) = progress.map(|i| &events[i]) else {
+            unreachable!()
+        };
+        assert_eq!((last.files_read, last.bytes_read), (2, 4));
     }
 
     #[test]

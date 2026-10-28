@@ -12,7 +12,8 @@ use rusty_fclone_core::folder_action;
 use rusty_fclone_core::select::{self, Rule as SelectRule};
 use rusty_fclone_core::{
     find_folder_duplicates, find_similar_images, scan, DuplicateGroup, FileError, FolderMatch,
-    PerceptualOptions, ScanEvent, ScanOptions, ScanProgress, ScanSummary, SimilarGroup,
+    HashProgress, PerceptualOptions, ScanEvent, ScanOptions, ScanProgress, ScanSummary,
+    SimilarGroup,
 };
 use serde::Serialize;
 
@@ -675,6 +676,9 @@ fn run(cli: Cli) -> ExitCode {
             ScanEvent::Progress(progress) => {
                 report_progress(cli.format, &progress, &mut progress_line);
             }
+            ScanEvent::HashProgress(progress) => {
+                report_hash_progress(cli.format, &progress, &mut progress_line);
+            }
             ScanEvent::Finished(summary) => {
                 progress_line.finish();
                 report_finished(cli.format, &summary);
@@ -958,14 +962,10 @@ impl ProgressLine {
         }
     }
 
-    fn update(&mut self, progress: &ScanProgress) {
+    fn update(&mut self, line: &str) {
         if !self.active {
             return;
         }
-        let line = format!(
-            "scanning... {} files, {} bytes",
-            progress.files_scanned, progress.bytes_scanned
-        );
         let pad = " ".repeat(self.last_len.saturating_sub(line.len()));
         eprint!("\r{line}{pad}");
         let _ = io::stderr().flush();
@@ -984,10 +984,26 @@ impl ProgressLine {
 
 fn report_progress(format: Format, progress: &ScanProgress, progress_line: &mut ProgressLine) {
     match format {
-        Format::Text => progress_line.update(progress),
+        Format::Text => progress_line.update(&format!(
+            "scanning... {} files, {} bytes",
+            progress.files_scanned, progress.bytes_scanned
+        )),
         Format::Json => print_json(&JsonEvent::Progress {
             files_scanned: progress.files_scanned,
             bytes_scanned: progress.bytes_scanned,
+        }),
+    }
+}
+
+fn report_hash_progress(format: Format, progress: &HashProgress, progress_line: &mut ProgressLine) {
+    match format {
+        Format::Text => progress_line.update(&format!(
+            "hashing... {} file reads, {} bytes",
+            progress.files_read, progress.bytes_read
+        )),
+        Format::Json => print_json(&JsonEvent::HashProgress {
+            files_read: progress.files_read,
+            bytes_read: progress.bytes_read,
         }),
     }
 }
@@ -1524,6 +1540,10 @@ enum JsonEvent {
     Progress {
         files_scanned: u64,
         bytes_scanned: u64,
+    },
+    HashProgress {
+        files_read: u64,
+        bytes_read: u64,
     },
     Finished {
         files_scanned: u64,
