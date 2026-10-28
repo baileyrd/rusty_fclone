@@ -4,6 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crossbeam_channel::{bounded, Sender};
 use file_id::{get_file_id, FileId};
 use jwalk::{ClientState, DirEntry, WalkDirGeneric};
 
@@ -47,9 +48,24 @@ impl ClientState for WalkState {
 
 type Entry = DirEntry<WalkState>;
 
+/// Candidates and errors queued between jwalk's workers and the caller.
+/// Bounded so a walk that outruns its consumer blocks instead of buffering
+/// the tree in memory (ADR-0035).
+const FOUND_QUEUE: usize = 1 << 14;
+
+/// What a jwalk worker hands the consuming thread.
+enum Found {
+    Candidate(Candidate),
+    Error(FileError),
+}
+
 /// Walks `root` in parallel (via jwalk's built-in rayon-backed walker),
 /// stat-ing every regular file it finds and handing each one to
 /// `on_candidate` as soon as it's ready (ADR-0012).
+///
+/// Files are turned into candidates on jwalk's worker threads and sent
+/// over a bounded queue, unordered; only directories go through jwalk's
+/// own (ordered, unbounded) result queue.
 ///
 /// With an `index` (ADR-0034), a directory whose mtime matches its recorded
 /// one reuses the recorded file stats instead of `stat`-ing each file, and
@@ -68,80 +84,125 @@ pub(crate) fn traverse(
     mut on_error: impl FnMut(FileError),
     mut on_candidate: impl FnMut(Candidate),
 ) {
-    let root_device = get_file_id(root).ok().and_then(|id| device_component(&id));
+    let (tx, rx) = bounded::<Option<Found>>(FOUND_QUEUE);
+    let mut candidate_count = 0u64;
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            walk(root, options, index, &tx);
+            let _ = tx.send(None);
+        });
+        // `None` marks the end: jwalk may keep its callback (and the
+        // sender clone in it) alive past the walk, so the channel itself
+        // never disconnects in time.
+        for found in rx.iter().map_while(|found| found) {
+            match found {
+                Found::Candidate(candidate) => {
+                    candidate_count += 1;
+                    on_candidate(candidate);
+                }
+                Found::Error(err) => on_error(err),
+            }
+        }
+    });
+    tracing::debug!(candidates = candidate_count, "traversal finished");
+}
 
-    let exclude_paths = options.exclude_paths.clone();
+/// Drives jwalk over `root`, sending every candidate and error to `tx`.
+fn walk(
+    root: &Path,
+    options: &ScanOptions,
+    index: Option<Arc<WalkIndex>>,
+    tx: &Sender<Option<Found>>,
+) {
+    let root_device = get_file_id(root).ok().and_then(|id| device_component(&id));
+    let filter = Arc::new(options.clone());
+    let worker_tx = tx.clone();
     let walker = WalkDirGeneric::<WalkState>::new(root)
         .follow_links(options.follow_symlinks)
         .skip_hidden(false)
         .process_read_dir(move |depth, dir_path, _state, children| {
-            retain_unexcluded(&exclude_paths, children);
+            retain_unexcluded(&filter.exclude_paths, children);
             // `depth` is `None` only for the synthetic listing holding the
             // root entry itself -- not a real directory to index.
             let index = index.as_deref().filter(|_| depth.is_some());
             stat_children(dir_path, children, index);
+            send_files(children, &filter, root_device, &worker_tx);
         });
 
-    let mut candidate_count = 0u64;
     for entry in walker {
-        let mut entry = match entry {
-            Ok(entry) => entry,
-            Err(err) => {
-                let path: Arc<Path> = err.path().map(Arc::from).unwrap_or_else(|| Arc::from(root));
-                tracing::warn!(path = %path.display(), error = %err, "traversal entry error");
-                on_error(FileError {
-                    path,
-                    source: err.into(),
-                });
-                continue;
-            }
+        let Err(err) = entry else {
+            continue;
         };
+        let path: Arc<Path> = err.path().map(Arc::from).unwrap_or_else(|| Arc::from(root));
+        tracing::warn!(path = %path.display(), error = %err, "traversal entry error");
+        let _ = tx.send(Some(Found::Error(FileError {
+            path,
+            source: err.into(),
+        })));
+    }
+}
 
+/// Sends each regular file in `children` that passes the scan filters
+/// (or its `stat` error), then drops the files from `children` so jwalk
+/// doesn't also queue them.
+fn send_files(
+    children: &mut Vec<jwalk::Result<Entry>>,
+    options: &ScanOptions,
+    root_device: Option<u64>,
+    tx: &Sender<Option<Found>>,
+) {
+    for entry in children.iter_mut().flatten() {
         if !entry.file_type().is_file() {
             continue;
         }
-
-        let stat = match entry
+        let stat = entry
             .client_state
             .take()
-            .unwrap_or_else(|| stat_file(&entry))
-        {
-            Ok(stat) => stat,
+            .unwrap_or_else(|| stat_file(entry));
+        let found = match stat {
+            Ok(stat) => candidate(entry, stat, options, root_device).map(Found::Candidate),
             Err(err) => {
                 let path: Arc<Path> = Arc::from(entry.path());
                 tracing::warn!(path = %path.display(), error = %err, "failed to stat file");
-                on_error(FileError { path, source: err });
-                continue;
+                Some(Found::Error(FileError { path, source: err }))
             }
         };
-
-        if !size_allowed(stat.size, options) {
-            tracing::trace!(path = %entry.path().display(), size = stat.size, "skipped -- size filter");
-            continue;
+        if let Some(found) = found {
+            let _ = tx.send(Some(found));
         }
-        if !extension_allowed(Path::new(&entry.file_name), options) {
-            tracing::trace!(path = %entry.path().display(), "skipped -- extension filter");
-            continue;
-        }
-        if is_excluded_by_filesystem_boundary(
-            options.cross_filesystems,
-            root_device,
-            device_component(&stat.file_id),
-        ) {
-            tracing::trace!(path = %entry.path().display(), "skipped -- different filesystem");
-            continue;
-        }
-
-        candidate_count += 1;
-        on_candidate(Candidate {
-            parent: entry.parent_path,
-            name: entry.file_name.into_boxed_os_str(),
-            size: stat.size,
-            file_id: stat.file_id,
-        });
     }
+    children.retain(|entry| entry.as_ref().map_or(true, |e| !e.file_type().is_file()));
+}
 
-    tracing::debug!(candidates = candidate_count, "traversal finished");
+/// `entry` as a candidate, or `None` when a scan filter excludes it.
+fn candidate(
+    entry: &Entry,
+    stat: FileStat,
+    options: &ScanOptions,
+    root_device: Option<u64>,
+) -> Option<Candidate> {
+    if !size_allowed(stat.size, options) {
+        tracing::trace!(path = %entry.path().display(), size = stat.size, "skipped -- size filter");
+        return None;
+    }
+    if !extension_allowed(Path::new(&entry.file_name), options) {
+        tracing::trace!(path = %entry.path().display(), "skipped -- extension filter");
+        return None;
+    }
+    if is_excluded_by_filesystem_boundary(
+        options.cross_filesystems,
+        root_device,
+        device_component(&stat.file_id),
+    ) {
+        tracing::trace!(path = %entry.path().display(), "skipped -- different filesystem");
+        return None;
+    }
+    Some(Candidate {
+        parent: entry.parent_path.clone(),
+        name: entry.file_name.clone().into_boxed_os_str(),
+        size: stat.size,
+        file_id: stat.file_id,
+    })
 }
 
 /// Drops children under any of `exclude_paths` (`DETECTION-SCAN-FILTERS`),
