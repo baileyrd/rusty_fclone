@@ -1,25 +1,24 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use crossbeam_channel::{bounded, Sender};
 use file_id::{get_file_id, FileId};
-use jwalk::{ClientState, DirEntry, WalkDirGeneric};
 
 use crate::error::FileError;
 use crate::model::ScanOptions;
-use crate::walk_index::{DirFiles, FileStat, WalkIndex};
+use crate::walk_index::{DirFiles, DirRecord, FileStat, WalkIndex};
 
 /// A file found during traversal, stat-ed but not yet read.
 ///
-/// Stored as its parent directory (an `Arc` shared by every sibling, handed
-/// out by jwalk for free) plus its own file name, rather than one full-path
-/// allocation per file: a scan holds every candidate in memory until
-/// traversal finishes, and on a tree of ~1M files the repeated directory
-/// prefixes alone were enough to get the process OOM-killed mid-walk.
-/// Callers that need the full path join it on demand with [`Self::path`].
+/// Stored as its parent directory (an `Arc` shared by every sibling) plus
+/// its own file name, rather than one full-path allocation per file: on a
+/// tree of ~1M files the repeated directory prefixes alone were enough to
+/// get the process OOM-killed mid-walk (ADR-0033). Callers that need the
+/// full path join it on demand with [`Self::path`].
 pub(crate) struct Candidate {
     pub parent: Arc<Path>,
     pub name: Box<OsStr>,
@@ -34,42 +33,25 @@ impl Candidate {
     }
 }
 
-/// jwalk client state: each regular file's [`FileStat`] (or the error from
-/// getting it) is filled in by the `process_read_dir` callback, which runs
-/// on jwalk's worker threads -- so files are `stat`-ed in parallel, one
-/// directory per thread, instead of one at a time by the consuming loop.
-#[derive(Debug, Default)]
-struct WalkState;
-
-impl ClientState for WalkState {
-    type ReadDirState = ();
-    type DirEntryState = Option<io::Result<FileStat>>;
-}
-
-type Entry = DirEntry<WalkState>;
-
-/// Candidates and errors queued between jwalk's workers and the caller.
+/// Candidates and errors queued between the walk's workers and the caller.
 /// Bounded so a walk that outruns its consumer blocks instead of buffering
 /// the tree in memory (ADR-0035).
 const FOUND_QUEUE: usize = 1 << 14;
 
-/// What a jwalk worker hands the consuming thread.
+/// What a walk worker hands the consuming thread.
 enum Found {
     Candidate(Candidate),
     Error(FileError),
 }
 
-/// Walks `root` in parallel (via jwalk's built-in rayon-backed walker),
-/// stat-ing every regular file it finds and handing each one to
-/// `on_candidate` as soon as it's ready (ADR-0012).
+/// Walks `root` in parallel on rayon's pool, one directory per task,
+/// `stat`-ing every regular file it finds and handing each one to
+/// `on_candidate` as soon as it's ready (ADR-0012). Candidates arrive
+/// unordered, over a bounded queue.
 ///
-/// Files are turned into candidates on jwalk's worker threads and sent
-/// over a bounded queue, unordered; only directories go through jwalk's
-/// own (ordered, unbounded) result queue.
-///
-/// With an `index` (ADR-0034), a directory whose mtime matches its recorded
-/// one reuses the recorded file stats instead of `stat`-ing each file, and
-/// every directory stat-ed afresh is recorded for next time.
+/// With an `index` (ADR-0034, ADR-0036), a directory whose mtime matches
+/// its record is neither listed nor are its files `stat`-ed: the record
+/// supplies both. Every directory listed afresh is recorded for next time.
 ///
 /// Symlinks are skipped unless `options.follow_symlinks` is set, and the
 /// walk stays on the filesystem `root` lives on unless
@@ -88,12 +70,10 @@ pub(crate) fn traverse(
     let mut candidate_count = 0u64;
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            walk(root, options, index, &tx);
+            walk(root, options, index.as_deref(), &tx);
             let _ = tx.send(None);
         });
-        // `None` marks the end: jwalk may keep its callback (and the
-        // sender clone in it) alive past the walk, so the channel itself
-        // never disconnects in time.
+        // `None` marks the end, since `tx` itself outlives the walk.
         for found in rx.iter().map_while(|found| found) {
             match found {
                 Found::Candidate(candidate) => {
@@ -107,86 +87,302 @@ pub(crate) fn traverse(
     tracing::debug!(candidates = candidate_count, "traversal finished");
 }
 
-/// Drives jwalk over `root`, sending every candidate and error to `tx`.
-fn walk(
-    root: &Path,
-    options: &ScanOptions,
-    index: Option<Arc<WalkIndex>>,
-    tx: &Sender<Option<Found>>,
-) {
-    let root_device = get_file_id(root).ok().and_then(|id| device_component(&id));
-    let filter = Arc::new(options.clone());
-    let worker_tx = tx.clone();
-    let walker = WalkDirGeneric::<WalkState>::new(root)
-        .follow_links(options.follow_symlinks)
-        .skip_hidden(false)
-        .process_read_dir(move |depth, dir_path, _state, children| {
-            retain_unexcluded(&filter.exclude_paths, children);
-            // `depth` is `None` only for the synthetic listing holding the
-            // root entry itself -- not a real directory to index.
-            let index = index.as_deref().filter(|_| depth.is_some());
-            stat_children(dir_path, children, index);
-            send_files(children, &filter, root_device, &worker_tx);
-        });
+/// Walks `root`, sending every candidate and error to `tx`. A file `root`
+/// is its own only candidate.
+fn walk(root: &Path, options: &ScanOptions, index: Option<&WalkIndex>, tx: &Sender<Option<Found>>) {
+    let walker = Walker {
+        options,
+        index,
+        root_device: get_file_id(root).ok().and_then(|id| device_component(&id)),
+        tx,
+    };
+    let metadata = match fs::metadata(root) {
+        Ok(metadata) => metadata,
+        Err(err) => return walker.error(root, err),
+    };
+    if metadata.is_file() {
+        if let (Some(parent), Some(name)) = (root.parent(), root.file_name()) {
+            walker.send_file(&Arc::from(parent), name, stat_file(root));
+        }
+        return;
+    }
+    let ancestors = walker.ancestor(root, &metadata, None);
+    rayon::scope(|scope| walker.visit(scope, Arc::from(root), metadata.modified().ok(), ancestors));
+}
 
-    for entry in walker {
-        let Err(err) = entry else {
-            continue;
+/// The directory chain from the root down to a directory, by file id: lets
+/// a `follow_symlinks` walk refuse to descend into its own ancestor.
+struct Ancestor {
+    id: FileId,
+    parent: Option<Arc<Ancestor>>,
+}
+
+impl Ancestor {
+    fn contains(&self, id: &FileId) -> bool {
+        &self.id == id
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.contains(id))
+    }
+}
+
+/// What one directory holds that the walk cares about.
+struct Listing {
+    files: Vec<OsString>,
+    /// Subdirectories to descend into, including followed symlinks to them.
+    dirs: Vec<OsString>,
+    /// Whether `dirs` is exactly the directory's real subdirectories, so it
+    /// can be recorded (false when symlinks were followed).
+    recordable: bool,
+}
+
+/// Shared, read-only state of one walk.
+struct Walker<'a> {
+    options: &'a ScanOptions,
+    index: Option<&'a WalkIndex>,
+    root_device: Option<u64>,
+    tx: &'a Sender<Option<Found>>,
+}
+
+impl<'a> Walker<'a> {
+    /// Handles one directory -- its files here, each subdirectory as its own
+    /// task -- reusing its record when `mtime` matches.
+    fn visit<'s>(
+        &'s self,
+        scope: &rayon::Scope<'s>,
+        dir: Arc<Path>,
+        mtime: Option<SystemTime>,
+        ancestors: Option<Arc<Ancestor>>,
+    ) where
+        'a: 's,
+    {
+        let recorded = self
+            .index
+            .zip(mtime)
+            .and_then(|(index, mtime)| index.lookup(&dir, mtime));
+        let reusable = recorded
+            .as_ref()
+            .filter(|_| !self.options.follow_symlinks)
+            .and_then(Listing::recorded);
+        let listing = match reusable.map_or_else(|| self.list(&dir), Ok) {
+            Ok(listing) => listing,
+            Err(err) => return self.error(&dir, err),
         };
-        let path: Arc<Path> = err.path().map(Arc::from).unwrap_or_else(|| Arc::from(root));
-        tracing::warn!(path = %path.display(), error = %err, "traversal entry error");
-        let _ = tx.send(Some(Found::Error(FileError {
-            path,
-            source: err.into(),
+
+        let files = self.stat_files(&dir, &listing.files, recorded.as_ref());
+        let mut subdirs = Vec::with_capacity(listing.dirs.len());
+        for name in listing.dirs {
+            subdirs.push(name.to_str().map(str::to_owned));
+            let path = dir.join(&name);
+            if self.excluded(&path) {
+                continue;
+            }
+            if let Some((metadata, ancestors)) = self.enter(&path, ancestors.as_ref()) {
+                let mtime = metadata.modified().ok();
+                scope.spawn(move |scope| self.visit(scope, Arc::from(path), mtime, ancestors));
+            }
+        }
+
+        let subdirs = listing
+            .recordable
+            .then(|| subdirs.into_iter().collect::<Option<Vec<_>>>())
+            .flatten();
+        let fresh = files.map(|files| DirRecord { files, subdirs });
+        if let (Some(index), Some(mtime), Some(fresh)) = (self.index, mtime, fresh) {
+            if recorded.as_ref() != Some(&fresh) {
+                index.record(&dir, mtime, &fresh);
+            }
+        }
+    }
+
+    /// Reads `dir`'s listing, resolving symlinks when following them.
+    fn list(&self, dir: &Path) -> io::Result<Listing> {
+        let follow = self.options.follow_symlinks;
+        let mut listing = Listing {
+            files: Vec::new(),
+            dirs: Vec::new(),
+            recordable: !follow,
+        };
+        for entry in fs::read_dir(dir)? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    self.error(dir, err);
+                    continue;
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(err) => {
+                    self.error(&entry.path(), err);
+                    continue;
+                }
+            };
+            let (is_file, is_dir) = if file_type.is_symlink() {
+                if !follow {
+                    continue;
+                }
+                match fs::metadata(entry.path()) {
+                    Ok(target) => (target.is_file(), target.is_dir()),
+                    Err(err) => {
+                        self.error(&entry.path(), err);
+                        continue;
+                    }
+                }
+            } else {
+                (file_type.is_file(), file_type.is_dir())
+            };
+            if is_file {
+                listing.files.push(entry.file_name());
+            } else if is_dir {
+                listing.dirs.push(entry.file_name());
+            }
+        }
+        Ok(listing)
+    }
+
+    /// Stats and sends each unexcluded file, reusing `recorded` stats by
+    /// name. Returns the directory's complete file stats, or `None` when any
+    /// can't be recorded (an error, a non-UTF-8 name, or an exclusion).
+    fn stat_files(
+        &self,
+        dir: &Arc<Path>,
+        names: &[OsString],
+        recorded: Option<&DirRecord>,
+    ) -> Option<DirFiles> {
+        let mut fresh = Some(DirFiles::with_capacity(names.len()));
+        for name in names {
+            let path = dir.join(name);
+            if self.excluded(&path) {
+                fresh = None;
+                continue;
+            }
+            let key = name.to_str();
+            let reused = recorded
+                .zip(key)
+                .and_then(|(recorded, key)| recorded.files.get(key).copied());
+            let stat = reused.map_or_else(|| stat_file(&path), Ok);
+            match (&stat, key, fresh.as_mut()) {
+                (Ok(stat), Some(key), Some(files)) => {
+                    files.insert(key.to_owned(), *stat);
+                }
+                _ => fresh = None,
+            }
+            self.send_file(dir, name, stat);
+        }
+        fresh
+    }
+
+    /// `stat`s subdirectory `path` and decides whether to descend into it:
+    /// not onto another filesystem, nor (when following symlinks) into one
+    /// of its own ancestors. Returns its metadata and ancestor chain.
+    fn enter(
+        &self,
+        path: &Path,
+        ancestors: Option<&Arc<Ancestor>>,
+    ) -> Option<(fs::Metadata, Option<Arc<Ancestor>>)> {
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                self.error(path, err);
+                return None;
+            }
+        };
+        let id = file_id_of(path, &metadata).ok();
+        let device = id.as_ref().and_then(device_component);
+        if is_excluded_by_filesystem_boundary(
+            self.options.cross_filesystems,
+            self.root_device,
+            device,
+        ) {
+            tracing::trace!(path = %path.display(), "skipped -- different filesystem");
+            return None;
+        }
+        if let (Some(ancestors), Some(id)) = (ancestors, &id) {
+            if ancestors.contains(id) {
+                let err = io::Error::other("symlink loop: directory is its own ancestor");
+                self.error(path, err);
+                return None;
+            }
+        }
+        let ancestors = self.ancestor(path, &metadata, ancestors.cloned());
+        Some((metadata, ancestors))
+    }
+
+    /// `parent` extended by directory `path`, when following symlinks.
+    fn ancestor(
+        &self,
+        path: &Path,
+        metadata: &fs::Metadata,
+        parent: Option<Arc<Ancestor>>,
+    ) -> Option<Arc<Ancestor>> {
+        if !self.options.follow_symlinks {
+            return None;
+        }
+        let id = file_id_of(path, metadata).ok()?;
+        Some(Arc::new(Ancestor { id, parent }))
+    }
+
+    /// Whether `path` is under one of the scan's `exclude_paths`
+    /// (`DETECTION-SCAN-FILTERS`), so an excluded subtree is never read.
+    fn excluded(&self, path: &Path) -> bool {
+        self.options
+            .exclude_paths
+            .iter()
+            .any(|excluded| path.starts_with(excluded))
+    }
+
+    /// Sends file `name` in `dir` as a candidate (if the scan filters keep
+    /// it) or its `stat` error.
+    fn send_file(&self, dir: &Arc<Path>, name: &OsStr, stat: io::Result<FileStat>) {
+        match stat {
+            Ok(stat) => {
+                let candidate = candidate(dir, name, stat, self.options, self.root_device);
+                if let Some(candidate) = candidate {
+                    let _ = self.tx.send(Some(Found::Candidate(candidate)));
+                }
+            }
+            Err(err) => self.error(&dir.join(name), err),
+        }
+    }
+
+    fn error(&self, path: &Path, err: io::Error) {
+        tracing::warn!(path = %path.display(), error = %err, "traversal error");
+        let _ = self.tx.send(Some(Found::Error(FileError {
+            path: Arc::from(path),
+            source: err,
         })));
     }
 }
 
-/// Sends each regular file in `children` that passes the scan filters
-/// (or its `stat` error), then drops the files from `children` so jwalk
-/// doesn't also queue them.
-fn send_files(
-    children: &mut Vec<jwalk::Result<Entry>>,
-    options: &ScanOptions,
-    root_device: Option<u64>,
-    tx: &Sender<Option<Found>>,
-) {
-    for entry in children.iter_mut().flatten() {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let stat = entry
-            .client_state
-            .take()
-            .unwrap_or_else(|| stat_file(entry));
-        let found = match stat {
-            Ok(stat) => candidate(entry, stat, options, root_device).map(Found::Candidate),
-            Err(err) => {
-                let path: Arc<Path> = Arc::from(entry.path());
-                tracing::warn!(path = %path.display(), error = %err, "failed to stat file");
-                Some(Found::Error(FileError { path, source: err }))
-            }
-        };
-        if let Some(found) = found {
-            let _ = tx.send(Some(found));
-        }
+impl Listing {
+    /// `record`'s listing, if it holds one.
+    fn recorded(record: &DirRecord) -> Option<Self> {
+        let subdirs = record.subdirs.as_ref()?;
+        Some(Self {
+            files: record.files.keys().map(OsString::from).collect(),
+            dirs: subdirs.iter().map(OsString::from).collect(),
+            recordable: true,
+        })
     }
-    children.retain(|entry| entry.as_ref().map_or(true, |e| !e.file_type().is_file()));
 }
 
-/// `entry` as a candidate, or `None` when a scan filter excludes it.
+/// File `name` in `dir` as a candidate, or `None` when a scan filter
+/// excludes it.
 fn candidate(
-    entry: &Entry,
+    dir: &Arc<Path>,
+    name: &OsStr,
     stat: FileStat,
     options: &ScanOptions,
     root_device: Option<u64>,
 ) -> Option<Candidate> {
     if !size_allowed(stat.size, options) {
-        tracing::trace!(path = %entry.path().display(), size = stat.size, "skipped -- size filter");
+        tracing::trace!(dir = %dir.display(), ?name, size = stat.size, "skipped -- size filter");
         return None;
     }
-    if !extension_allowed(Path::new(&entry.file_name), options) {
-        tracing::trace!(path = %entry.path().display(), "skipped -- extension filter");
+    if !extension_allowed(Path::new(name), options) {
+        tracing::trace!(dir = %dir.display(), ?name, "skipped -- extension filter");
         return None;
     }
     if is_excluded_by_filesystem_boundary(
@@ -194,77 +390,23 @@ fn candidate(
         root_device,
         device_component(&stat.file_id),
     ) {
-        tracing::trace!(path = %entry.path().display(), "skipped -- different filesystem");
+        tracing::trace!(dir = %dir.display(), ?name, "skipped -- different filesystem");
         return None;
     }
     Some(Candidate {
-        parent: entry.parent_path.clone(),
-        name: entry.file_name.clone().into_boxed_os_str(),
+        parent: dir.clone(),
+        name: name.into(),
         size: stat.size,
         file_id: stat.file_id,
     })
 }
 
-/// Drops children under any of `exclude_paths` (`DETECTION-SCAN-FILTERS`),
-/// so excluded subtrees are never even read.
-fn retain_unexcluded(exclude_paths: &[PathBuf], children: &mut Vec<jwalk::Result<Entry>>) {
-    if exclude_paths.is_empty() {
-        return;
-    }
-    children.retain(|entry_result| {
-        let Ok(entry) = entry_result else {
-            return true;
-        };
-        let entry_path = entry.parent_path.join(&entry.file_name);
-        !exclude_paths
-            .iter()
-            .any(|excluded| entry_path.starts_with(excluded))
-    });
-}
-
-/// Fills in every regular file's [`FileStat`] in one directory listing:
-/// from the index when `dir`'s mtime matches its record, otherwise with a
-/// `stat` per file -- recording the result when every file succeeded.
-fn stat_children(dir: &Path, children: &mut [jwalk::Result<Entry>], index: Option<&WalkIndex>) {
-    let dir_mtime = index.and_then(|_| fs::metadata(dir).and_then(|m| m.modified()).ok());
-    let recorded = index
-        .zip(dir_mtime)
-        .and_then(|(index, mtime)| index.lookup(dir, mtime));
-
-    let mut fresh = DirFiles::new();
-    let mut complete = true;
-    let files = children
-        .iter_mut()
-        .flatten()
-        .filter(|e| e.file_type().is_file());
-    for entry in files {
-        let reused = recorded
-            .as_ref()
-            .zip(entry.file_name.to_str())
-            .and_then(|(recorded, name)| recorded.get(name).copied());
-        let result = reused.map_or_else(|| stat_file(entry), Ok);
-        match (&result, entry.file_name.to_str()) {
-            (Ok(stat), Some(name)) => {
-                fresh.insert(name.to_owned(), *stat);
-            }
-            _ => complete = false,
-        }
-        entry.client_state = Some(result);
-    }
-
-    let unchanged = recorded.is_some_and(|recorded| recorded == fresh);
-    if let (Some(index), Some(mtime), true, false) = (index, dir_mtime, complete, unchanged) {
-        index.record(dir, mtime, &fresh);
-    }
-}
-
-/// `stat`s one regular file (following it if it's a followed symlink).
-fn stat_file(entry: &Entry) -> io::Result<FileStat> {
-    let metadata = entry.metadata().map_err(io::Error::from)?;
-    let file_id = file_id_of(entry, &metadata)?;
+/// `stat`s one regular file, following a symlink to it.
+fn stat_file(path: &Path) -> io::Result<FileStat> {
+    let metadata = fs::metadata(path)?;
     Ok(FileStat {
         size: metadata.len(),
-        file_id,
+        file_id: file_id_of(path, &metadata)?,
     })
 }
 
@@ -275,14 +417,14 @@ fn stat_file(entry: &Entry) -> io::Result<FileStat> {
 /// back to `file_id::get_file_id`, which has to open the file to read its
 /// volume serial + file index.
 #[cfg(unix)]
-fn file_id_of(_entry: &Entry, metadata: &fs::Metadata) -> io::Result<FileId> {
+fn file_id_of(_path: &Path, metadata: &fs::Metadata) -> io::Result<FileId> {
     use std::os::unix::fs::MetadataExt;
     Ok(FileId::new_inode(metadata.dev(), metadata.ino()))
 }
 
 #[cfg(not(unix))]
-fn file_id_of(entry: &Entry, _metadata: &fs::Metadata) -> io::Result<FileId> {
-    get_file_id(entry.path())
+fn file_id_of(path: &Path, _metadata: &fs::Metadata) -> io::Result<FileId> {
+    get_file_id(path)
 }
 
 /// Decides whether a candidate should be skipped for being on a different
@@ -395,11 +537,20 @@ mod tests {
     /// `(file name, size)` sorted by name. Each call opens and finishes its
     /// own index, like one scan.
     fn walk_with_index(root: &Path, db: &Arc<redb::Database>, reuse: bool) -> Vec<(String, u64)> {
+        walk_with_index_and(root, db, reuse, &ScanOptions::default())
+    }
+
+    fn walk_with_index_and(
+        root: &Path,
+        db: &Arc<redb::Database>,
+        reuse: bool,
+        options: &ScanOptions,
+    ) -> Vec<(String, u64)> {
         let (index, writer) = WalkIndex::open(db.clone(), reuse).unwrap();
         let mut found = Vec::new();
         traverse(
             root,
-            &ScanOptions::default(),
+            options,
             Some(Arc::new(index)),
             |_| {},
             |c| {
@@ -466,6 +617,97 @@ mod tests {
             walk_with_index(tree.path(), &db, true),
             vec![("a.bin".into(), 1), ("b.bin".into(), 2)]
         );
+    }
+
+    fn temp_db() -> (tempfile::TempDir, Arc<redb::Database>) {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(db_dir.path().join("cache.redb")).unwrap());
+        (db_dir, db)
+    }
+
+    #[test]
+    fn walk_index_skips_listing_an_unchanged_directory() {
+        let tree = tempfile::tempdir().unwrap();
+        let (_db_dir, db) = temp_db();
+        fs::write(tree.path().join("a.bin"), b"a").unwrap();
+        backdate(tree.path());
+        walk_with_index(tree.path(), &db, true);
+
+        // Added behind the index's back: the directory's mtime is put back,
+        // so a walk that still listed it would find the new file.
+        fs::write(tree.path().join("b.bin"), b"bb").unwrap();
+        backdate(tree.path());
+        assert_eq!(
+            walk_with_index(tree.path(), &db, true),
+            vec![("a.bin".into(), 1)]
+        );
+        assert_eq!(
+            walk_with_index(tree.path(), &db, false),
+            vec![("a.bin".into(), 1), ("b.bin".into(), 2)]
+        );
+    }
+
+    #[test]
+    fn reused_directories_still_descend_into_changed_subdirectories() {
+        let tree = tempfile::tempdir().unwrap();
+        let (_db_dir, db) = temp_db();
+        let deep = tree.path().join("x/y");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(tree.path().join("top.bin"), b"t").unwrap();
+        fs::write(tree.path().join("x/mid.bin"), b"mm").unwrap();
+        fs::write(deep.join("low.bin"), b"lll").unwrap();
+        for dir in [deep.as_path(), &tree.path().join("x"), tree.path()] {
+            backdate(dir);
+        }
+        assert_eq!(walk_with_index(tree.path(), &db, true).len(), 3);
+
+        fs::write(deep.join("new.bin"), b"nnnn").unwrap();
+        assert_eq!(
+            walk_with_index(tree.path(), &db, true),
+            vec![
+                ("low.bin".into(), 3),
+                ("mid.bin".into(), 2),
+                ("new.bin".into(), 4),
+                ("top.bin".into(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn exclude_paths_apply_to_a_reused_listing() {
+        let tree = tempfile::tempdir().unwrap();
+        let (_db_dir, db) = temp_db();
+        let sub = tree.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(tree.path().join("kept.bin"), b"k").unwrap();
+        fs::write(sub.join("inside.bin"), b"ii").unwrap();
+        fs::write(tree.path().join("skip.bin"), b"sss").unwrap();
+        backdate(&sub);
+        backdate(tree.path());
+        assert_eq!(walk_with_index(tree.path(), &db, true).len(), 3);
+
+        let options = ScanOptions {
+            exclude_paths: vec![sub, tree.path().join("skip.bin")],
+            ..ScanOptions::default()
+        };
+        assert_eq!(
+            walk_with_index_and(tree.path(), &db, true, &options),
+            vec![("kept.bin".into(), 1)]
+        );
+        // The excluded walk must not have narrowed the record.
+        assert_eq!(walk_with_index(tree.path(), &db, true).len(), 3);
+    }
+
+    #[test]
+    fn a_file_root_is_its_own_only_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("only.bin");
+        fs::write(&file, b"data").unwrap();
+        fs::write(dir.path().join("other.bin"), b"other").unwrap();
+
+        let candidates = traverse_collect(&file, &ScanOptions::default(), |_| {});
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path(), file);
     }
 
     #[test]
@@ -536,7 +778,7 @@ mod tests {
 
     /// A symlink cycle (a directory containing a symlink back to one of its
     /// own ancestors) with `follow_symlinks = true` must not hang the scan.
-    /// This relies entirely on jwalk's own loop detection (ADR-0003); this
+    /// This relies entirely on the walk's ancestor check (ADR-0036); this
     /// test's real job is proving that reliance is justified, with a
     /// bounded timeout so a regression fails the test instead of hanging
     /// the whole suite (and CI) forever.
@@ -549,7 +791,7 @@ mod tests {
             fs::write(root.join("real.txt"), b"data").unwrap();
             fs::create_dir(root.join("sub")).unwrap();
             // sub/loop -> root, so descending into it forever would revisit
-            // sub/loop/sub/loop/... without jwalk's cycle detection.
+            // sub/loop/sub/loop/... without the ancestor check.
             std::os::unix::fs::symlink(&root, root.join("sub").join("loop")).unwrap();
 
             let options = ScanOptions {
@@ -565,14 +807,16 @@ mod tests {
             });
 
             match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-                Ok((candidate_count, _error_count)) => {
+                Ok((candidate_count, error_count)) => {
                     // real.txt should still be found exactly once despite
-                    // the cycle -- jwalk must not revisit it repeatedly.
+                    // the cycle -- the walk must not revisit it repeatedly --
+                    // and the refused loop is reported, not hidden.
                     assert_eq!(candidate_count, 1);
+                    assert_eq!(error_count, 1);
                 }
                 Err(_) => panic!(
                     "traverse() did not terminate within 10s on a symlink cycle -- \
-                     jwalk's loop detection regressed or was never actually protecting us"
+                     the walk's loop detection regressed"
                 ),
             }
         }

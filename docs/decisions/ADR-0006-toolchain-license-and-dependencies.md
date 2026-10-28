@@ -1,6 +1,6 @@
 # ADR-0006: Toolchain policy, license, and foundational dependencies
 
-- Status: Accepted
+- Status: Accepted (`jwalk` replaced by an in-crate walker, ADR-0036)
 - Date: 2026-08-24
 
 ## Context

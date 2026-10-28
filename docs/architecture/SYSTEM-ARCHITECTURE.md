@@ -30,7 +30,7 @@ root path
    │
    ▼
 ┌─────────────────────────────┐
-│ traversal (jwalk, parallel) │  skip symlinks / stay on filesystem by default
+│ traversal (rayon, parallel) │  skip symlinks / stay on filesystem by default
 └──────────────┬──────────────┘  (ADR-0003)
                ▼
 ┌─────────────────────────────┐
@@ -90,15 +90,15 @@ Two separate thread pools, connected by `crossbeam-channel`:
   and for parallelizing across size-groups and group members
   (`into_par_iter()`).
 
-Directory traversal parallelizes itself via jwalk's own rayon-backed walker
-— no separate pool needed for that stage.
+Directory traversal runs one rayon task per directory (ADR-0036) — no
+separate pool needed for that stage.
 
 ## Data flow / ownership
 
 - `traversal::traverse` is the only stage that walks the filesystem tree
   structure itself. It doesn't collect a `Vec<Candidate>` — each
   `Candidate` (path, size, file-id) is handed to an `on_candidate` callback
-  as soon as jwalk produces it, so `pipeline::run_scan` can fold hardlink
+  as soon as a walk task produces it, so `pipeline::run_scan` can fold hardlink
   collapse into that same streaming pass instead of looping over a
   materialized list afterward (ADR-0012).
 - `pipeline::run_scan` owns all grouping (hardlink collapse → size-group →

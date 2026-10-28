@@ -13,7 +13,6 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_fclone"
 
 [workspace.dependencies]
-jwalk = "0.8"
 rayon = "1"
 crossbeam-channel = "0.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

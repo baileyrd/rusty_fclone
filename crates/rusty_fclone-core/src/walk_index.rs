@@ -2,12 +2,13 @@
 //!
 //! Lives in the same redb file as the hash cache (`ScanOptions::cache_path`).
 //! Each fully-stat-ed directory is recorded as its own mtime plus the
-//! `(name, size, file id)` of every regular file in it, committed in batches
-//! while the walk is still running. A later walk -- a re-run, or the retry
-//! of a killed one -- that finds a directory's mtime unchanged reuses the
-//! record instead of `stat`-ing each file again: adding, removing, or
-//! renaming an entry always bumps the directory's mtime, so its listing is
-//! known to be the same.
+//! `(name, size, file id)` of every regular file in it and the names of its
+//! subdirectories, committed in batches while the walk is still running. A
+//! later walk -- a re-run, or the retry of a killed one -- that finds a
+//! directory's mtime unchanged reuses the record instead of listing the
+//! directory and `stat`-ing each file again: adding, removing, or renaming
+//! an entry always bumps the directory's mtime, so its listing is known to
+//! be the same (ADR-0036).
 //!
 //! What a record can't see is a file rewritten in place, which changes the
 //! file's size/mtime but not its directory's. Such a file is grouped under
@@ -46,11 +47,21 @@ pub(crate) struct FileStat {
 /// Recorded files of one directory, keyed by name.
 pub(crate) type DirFiles = HashMap<String, FileStat>;
 
-/// Read side of the index, shared by jwalk's worker threads.
+/// One directory's recorded listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirRecord {
+    pub files: DirFiles,
+    /// Names of its subdirectories (not symlinks to them). `None` in a
+    /// record written before they were stored (ADR-0034) or by a
+    /// `follow_symlinks` walk: the directory must still be listed.
+    pub subdirs: Option<Vec<String>>,
+}
+
+/// Read side of the index, shared by the walk's worker threads.
 ///
-/// Holds the database weakly: jwalk can drop its callback (and this with
-/// it) a little after the walk ends, and a strong reference there would
-/// keep the redb file locked against the next scan in the same process.
+/// Holds the database weakly, so an index a caller keeps past the walk
+/// never keeps the redb file locked against the next scan in the same
+/// process.
 pub(crate) struct WalkIndex {
     db: Weak<Database>,
     reuse: bool,
@@ -69,7 +80,7 @@ pub(crate) struct IndexWriter {
 enum WriterMsg {
     Record(String, Vec<u8>),
     /// Commit what's queued and exit. Explicit rather than waiting for every
-    /// sender to drop, since jwalk owns the clones held by its callback.
+    /// sender to drop, since `WalkIndex` holds one too.
     Finish,
 }
 
@@ -103,8 +114,8 @@ impl WalkIndex {
         Ok((index, writer))
     }
 
-    /// The recorded files of `dir`, if it was recorded with exactly `mtime`.
-    pub(crate) fn lookup(&self, dir: &Path, mtime: SystemTime) -> Option<DirFiles> {
+    /// The record of `dir`, if it was recorded with exactly `mtime`.
+    pub(crate) fn lookup(&self, dir: &Path, mtime: SystemTime) -> Option<DirRecord> {
         let found = self.reuse.then(|| self.find(dir, mtime)).flatten();
         let counter = if found.is_some() {
             &self.hits
@@ -115,13 +126,13 @@ impl WalkIndex {
         found
     }
 
-    fn find(&self, dir: &Path, mtime: SystemTime) -> Option<DirFiles> {
+    fn find(&self, dir: &Path, mtime: SystemTime) -> Option<DirRecord> {
         let key = dir.to_str()?;
         let read_txn = self.db.upgrade()?.begin_read().ok()?;
         let table = read_txn.open_table(TABLE).ok()?;
         let guard = table.get(key).ok()??;
-        let (recorded_mtime, files) = decode(guard.value())?;
-        (recorded_mtime == split_mtime(mtime)?).then_some(files)
+        let (recorded_mtime, record) = decode(guard.value())?;
+        (recorded_mtime == split_mtime(mtime)?).then_some(record)
     }
 
     /// Directories looked up so far: `(reused, stat-ed afresh)`.
@@ -132,17 +143,17 @@ impl WalkIndex {
         )
     }
 
-    /// Queues `dir`'s complete file list for the writer. Skipped when the
+    /// Queues `dir`'s complete listing for the writer. Skipped when the
     /// directory can't be keyed or encoded, or was modified too recently to
     /// trust its mtime.
-    pub(crate) fn record(&self, dir: &Path, mtime: SystemTime, files: &DirFiles) {
+    pub(crate) fn record(&self, dir: &Path, mtime: SystemTime, record: &DirRecord) {
         let racy = SystemTime::now()
             .duration_since(mtime)
             .map_or(true, |age| age < RACY_WINDOW);
         if racy {
             return;
         }
-        let (Some(key), Some(value)) = (dir.to_str(), encode(mtime, files)) else {
+        let (Some(key), Some(value)) = (dir.to_str(), encode(mtime, record)) else {
             return;
         };
         let _ = self.tx.send(WriterMsg::Record(key.to_owned(), value));
@@ -210,15 +221,18 @@ fn split_mtime(mtime: SystemTime) -> Option<(u64, u32)> {
 }
 
 /// Layout: mtime secs (u64), nanos (u32), file count (u32), then per file:
-/// name length (u32), UTF-8 name, size (u64), device (u64), inode (u64).
-/// Only `FileId::Inode` is encodable (Unix); anything else isn't recorded.
-fn encode(mtime: SystemTime, files: &DirFiles) -> Option<Vec<u8>> {
+/// name, size (u64), device (u64), inode (u64); then, when `subdirs` is
+/// set, subdirectory count (u32) and each name. A name is its length (u32)
+/// plus UTF-8 bytes. A record ending after the files is a v0.4 record
+/// (ADR-0034), read as `subdirs: None`. Only `FileId::Inode` is encodable
+/// (Unix); anything else isn't recorded.
+fn encode(mtime: SystemTime, record: &DirRecord) -> Option<Vec<u8>> {
     let (secs, nanos) = split_mtime(mtime)?;
-    let mut buf = Vec::with_capacity(16 + files.len() * 48);
+    let mut buf = Vec::with_capacity(16 + record.files.len() * 48);
     buf.extend_from_slice(&secs.to_le_bytes());
     buf.extend_from_slice(&nanos.to_le_bytes());
-    buf.extend_from_slice(&u32::try_from(files.len()).ok()?.to_le_bytes());
-    for (name, stat) in files {
+    buf.extend_from_slice(&u32::try_from(record.files.len()).ok()?.to_le_bytes());
+    for (name, stat) in &record.files {
         let FileId::Inode {
             device_id,
             inode_number,
@@ -226,30 +240,53 @@ fn encode(mtime: SystemTime, files: &DirFiles) -> Option<Vec<u8>> {
         else {
             return None;
         };
-        buf.extend_from_slice(&u32::try_from(name.len()).ok()?.to_le_bytes());
-        buf.extend_from_slice(name.as_bytes());
+        put_name(&mut buf, name)?;
         buf.extend_from_slice(&stat.size.to_le_bytes());
         buf.extend_from_slice(&device_id.to_le_bytes());
         buf.extend_from_slice(&inode_number.to_le_bytes());
     }
+    if let Some(subdirs) = &record.subdirs {
+        buf.extend_from_slice(&u32::try_from(subdirs.len()).ok()?.to_le_bytes());
+        for name in subdirs {
+            put_name(&mut buf, name)?;
+        }
+    }
     Some(buf)
 }
 
-fn decode(mut buf: &[u8]) -> Option<((u64, u32), DirFiles)> {
+fn decode(mut buf: &[u8]) -> Option<((u64, u32), DirRecord)> {
     let secs = take_u64(&mut buf)?;
     let nanos = take_u32(&mut buf)?;
     let count = take_u32(&mut buf)? as usize;
     let mut files = HashMap::with_capacity(count.min(buf.len()));
     for _ in 0..count {
-        let name_len = take_u32(&mut buf)? as usize;
-        let name = std::str::from_utf8(take(&mut buf, name_len)?)
-            .ok()?
-            .to_owned();
+        let name = take_name(&mut buf)?;
         let size = take_u64(&mut buf)?;
         let file_id = FileId::new_inode(take_u64(&mut buf)?, take_u64(&mut buf)?);
         files.insert(name, FileStat { size, file_id });
     }
-    buf.is_empty().then_some(((secs, nanos), files))
+    let subdirs = if buf.is_empty() {
+        None
+    } else {
+        let count = take_u32(&mut buf)? as usize;
+        let names = (0..count)
+            .map(|_| take_name(&mut buf))
+            .collect::<Option<Vec<_>>>()?;
+        Some(names)
+    };
+    buf.is_empty()
+        .then_some(((secs, nanos), DirRecord { files, subdirs }))
+}
+
+fn put_name(buf: &mut Vec<u8>, name: &str) -> Option<()> {
+    buf.extend_from_slice(&u32::try_from(name.len()).ok()?.to_le_bytes());
+    buf.extend_from_slice(name.as_bytes());
+    Some(())
+}
+
+fn take_name(buf: &mut &[u8]) -> Option<String> {
+    let len = take_u32(buf)? as usize;
+    Some(std::str::from_utf8(take(buf, len)?).ok()?.to_owned())
 }
 
 fn take<'a>(buf: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
@@ -292,6 +329,13 @@ mod tests {
         ])
     }
 
+    fn record() -> DirRecord {
+        DirRecord {
+            files: files(),
+            subdirs: Some(vec!["2023".to_owned(), "2024".to_owned()]),
+        }
+    }
+
     fn old_mtime() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000, 123)
     }
@@ -303,15 +347,32 @@ mod tests {
 
     #[test]
     fn encode_decode_round_trip() {
-        let buf = encode(old_mtime(), &files()).unwrap();
+        let buf = encode(old_mtime(), &record()).unwrap();
         let (mtime, decoded) = decode(&buf).unwrap();
         assert_eq!(mtime, (1_700_000_000, 123));
-        assert_eq!(decoded, files());
+        assert_eq!(decoded, record());
+    }
+
+    #[test]
+    fn a_record_without_subdirs_decodes_as_needing_a_listing() {
+        let legacy = DirRecord {
+            files: files(),
+            subdirs: None,
+        };
+        let buf = encode(old_mtime(), &legacy).unwrap();
+        assert_eq!(decode(&buf).unwrap().1, legacy);
+
+        let empty = DirRecord {
+            files: files(),
+            subdirs: Some(Vec::new()),
+        };
+        let buf = encode(old_mtime(), &empty).unwrap();
+        assert_eq!(decode(&buf).unwrap().1, empty);
     }
 
     #[test]
     fn decode_rejects_truncated_and_trailing_bytes() {
-        let buf = encode(old_mtime(), &files()).unwrap();
+        let buf = encode(old_mtime(), &record()).unwrap();
         assert!(decode(&buf[..buf.len() - 1]).is_none());
         let mut longer = buf.clone();
         longer.push(0);
@@ -323,13 +384,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Path::new("/data/photos");
         let (index, writer) = open_index(tmp.path(), true);
-        index.record(dir, old_mtime(), &files());
+        index.record(dir, old_mtime(), &record());
         let db = index.db.upgrade().unwrap();
         drop(index);
         writer.finish();
 
         let (index, writer) = WalkIndex::open(db, true).unwrap();
-        assert_eq!(index.lookup(dir, old_mtime()), Some(files()));
+        assert_eq!(index.lookup(dir, old_mtime()), Some(record()));
         assert_eq!(
             index.lookup(dir, old_mtime() + Duration::from_nanos(1)),
             None
@@ -344,7 +405,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Path::new("/data/photos");
         let (index, writer) = open_index(tmp.path(), true);
-        index.record(dir, old_mtime(), &files());
+        index.record(dir, old_mtime(), &record());
         let db = index.db.upgrade().unwrap();
         drop(index);
         writer.finish();
@@ -361,7 +422,7 @@ mod tests {
         let dir = Path::new("/data/photos");
         let (index, writer) = open_index(tmp.path(), true);
         let now = SystemTime::now();
-        index.record(dir, now, &files());
+        index.record(dir, now, &record());
         let db = index.db.upgrade().unwrap();
         drop(index);
         writer.finish();
