@@ -1,6 +1,6 @@
 # ADR-0033: Compact traversal storage; full paths only for shared sizes
 
-- Status: Accepted
+- Status: Accepted (storage bounded by ADR-0035)
 - Date: 2026-10-27
 - Related: ADR-0004 and ADR-0011 (deferred prefix-compressed path storage
   "without benchmark evidence"), ADR-0012 (fused traversal + hardlink
@@ -47,5 +47,5 @@ At 1.3M files that is ~800 MB for the file list alone, before hashing.
   path, as before, since hashing needs one.
 - No public API change; `ScanEvent`/`DuplicateGroup` are unchanged.
 - Hashing still waits for traversal to finish (ADR-0012), so very large
-  trees still hold O(files) in memory. Spilling to disk stays out of scope
-  until a tree that size actually needs it.
+  trees still hold O(files) in memory. A 16.9M-file tree needed spilling
+  to disk; see ADR-0035.

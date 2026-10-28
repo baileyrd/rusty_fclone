@@ -10,6 +10,7 @@
 
 pub mod action;
 mod cache;
+mod candidate_sort;
 mod device;
 mod error;
 mod fclones_import;

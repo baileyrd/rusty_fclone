@@ -9,13 +9,14 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use rayon::prelude::*;
 
 use crate::cache::{self, HashCache};
+use crate::candidate_sort::{CandidateSorter, Sorted, DEFAULT_BUFFER as SORT_BUFFER};
 use crate::device::default_io_threads;
 use crate::error::{FileError, ScanError};
 use crate::fclones_import::{self, FclonesImportCache};
 use crate::hash::{hash_chunks, sample_ranges};
 use crate::io_pool::IoPool;
 use crate::model::{DuplicateGroup, ScanEvent, ScanOptions, ScanProgress, ScanSummary};
-use crate::traversal::{traverse, Candidate};
+use crate::traversal::traverse;
 use crate::walk_index::WalkIndex;
 
 /// How often (in files scanned) to emit a [`ScanEvent::Progress`]
@@ -124,18 +125,25 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
     });
     let (index, index_writer) = walk_index.unzip();
 
-    let mut candidates: Vec<Candidate> = Vec::new();
+    let spill_dir = spill_dir(&options);
+    let mut sorter = CandidateSorter::new(spill_dir.clone(), SORT_BUFFER);
+    let mut spill_failed = false;
     traverse(
         &root,
         &options,
-        index,
+        index.clone(),
         |err| {
             let _ = event_tx.send(ScanEvent::Error(err));
         },
         |candidate| {
             summary.files_scanned += 1;
             summary.bytes_scanned += candidate.size;
-            candidates.push(candidate);
+            if let Err(err) = sorter.push(candidate) {
+                if !spill_failed {
+                    tracing::warn!(error = %err, "failed to spill candidates to disk, keeping them in memory");
+                }
+                spill_failed = true;
+            }
             if summary.files_scanned % PROGRESS_INTERVAL_FILES == 0 {
                 let _ = event_tx.send(ScanEvent::Progress(ScanProgress {
                     files_scanned: summary.files_scanned,
@@ -150,15 +158,28 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         bytes_scanned = summary.bytes_scanned,
         "traversal complete"
     );
+    if let Some(index) = &index {
+        let (reused, walked) = index.reuse_counts();
+        tracing::info!(reused, walked, "walk index: directories reused vs. stat-ed");
+    }
     if let Some(writer) = index_writer {
         writer.finish();
     }
 
-    let candidate_groups = size_groups(candidates);
-    tracing::debug!(
-        size_groups = candidate_groups.len(),
-        "size-grouping complete, starting staged hashing"
-    );
+    let sorted = match sorter.finish() {
+        Ok(sorted) => sorted,
+        Err(err) => {
+            report_spill_error(&event_tx, &spill_dir, err);
+            let _ = event_tx.send(ScanEvent::Finished(summary));
+            return;
+        }
+    };
+    let spill_tx = event_tx.clone();
+    let candidate_groups = SizeGroups::new(sorted.map_while(move |record| {
+        record
+            .map_err(|err| report_spill_error(&spill_tx, &spill_dir, err))
+            .ok()
+    }));
 
     let io_threads = options.io_threads.unwrap_or_else(|| {
         let detected = default_io_threads(&root);
@@ -177,23 +198,21 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         .as_ref()
         .and_then(|path| FclonesImportCache::open(path));
 
-    candidate_groups
-        .into_par_iter()
-        .for_each(|(size, members)| {
-            for group in process_size_group(
-                size,
-                members,
-                &io_pool,
-                &options,
-                cache.as_ref(),
-                fclones_import.as_ref(),
-                &event_tx,
-            ) {
-                duplicate_groups.fetch_add(1, Ordering::Relaxed);
-                duplicate_files.fetch_add(group.paths.len() as u64, Ordering::Relaxed);
-                let _ = event_tx.send(ScanEvent::DuplicateGroup(group));
-            }
-        });
+    candidate_groups.par_bridge().for_each(|(size, members)| {
+        for group in process_size_group(
+            size,
+            members,
+            &io_pool,
+            &options,
+            cache.as_ref(),
+            fclones_import.as_ref(),
+            &event_tx,
+        ) {
+            duplicate_groups.fetch_add(1, Ordering::Relaxed);
+            duplicate_files.fetch_add(group.paths.len() as u64, Ordering::Relaxed);
+            let _ = event_tx.send(ScanEvent::DuplicateGroup(group));
+        }
+    });
 
     summary.duplicate_groups = duplicate_groups.load(Ordering::Relaxed);
     summary.duplicate_files = duplicate_files.load(Ordering::Relaxed);
@@ -205,36 +224,81 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
     let _ = event_tx.send(ScanEvent::Finished(summary));
 }
 
-/// Groups traversal candidates into size-groups of 2+ distinct files, each
-/// file being one [`FileGroup`]: hardlink aliases (same `FileId`) are
-/// collapsed into one entry, since they already share storage and only one
-/// representative per id needs hashing. Sizes held by a single distinct
-/// file can't be duplicates and are dropped before any full path is built.
-///
-/// Sort-and-run rather than nested hash maps: sorting by `(size, file_id)`
-/// in place needs no extra allocation, and leaves both levels of grouping
-/// as adjacent runs.
-fn size_groups(mut candidates: Vec<Candidate>) -> Vec<(u64, Vec<FileGroup>)> {
-    candidates.sort_unstable_by_key(|c| (c.size, c.file_id));
-
-    let mut groups = Vec::new();
-    for same_size in candidates.chunk_by(|a, b| a.size == b.size) {
-        let members: Vec<FileGroup> = same_size
-            .chunk_by(|a, b| a.file_id == b.file_id)
-            .map(file_group)
-            .collect();
-        if members.len() > 1 {
-            groups.push((same_size[0].size, members));
-        }
-    }
-    groups
+/// Where sorted candidate runs are spilled: next to the hash cache when
+/// there is one (so a tmpfs `/tmp` isn't filled with them), otherwise the
+/// system temp directory.
+fn spill_dir(options: &ScanOptions) -> PathBuf {
+    options
+        .cache_path
+        .as_deref()
+        .and_then(Path::parent)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map_or_else(std::env::temp_dir, Path::to_path_buf)
 }
 
-/// One distinct file's [`FileGroup`] from every candidate sharing its
+fn report_spill_error(event_tx: &Sender<ScanEvent>, spill_dir: &Path, source: io::Error) {
+    tracing::error!(error = %source, "reading spilled candidates failed, results are incomplete");
+    let _ = event_tx.send(ScanEvent::Error(FileError {
+        path: Arc::from(spill_dir),
+        source,
+    }));
+}
+
+/// Size-groups of 2+ distinct files, from candidates sorted by
+/// `(size, file_id)`, one group at a time: hardlink aliases (same
+/// `FileId`) are collapsed into one [`FileGroup`], since they already share
+/// storage and only one representative per id needs hashing. Sizes held by
+/// a single distinct file can't be duplicates and are skipped.
+///
+/// Lazy, so only the groups being hashed hold full paths (ADR-0035).
+struct SizeGroups<I: Iterator<Item = Sorted>> {
+    sorted: std::iter::Peekable<I>,
+}
+
+impl<I: Iterator<Item = Sorted>> SizeGroups<I> {
+    fn new(sorted: I) -> Self {
+        Self {
+            sorted: sorted.peekable(),
+        }
+    }
+
+    /// Every record of the next size, in order.
+    fn next_size(&mut self) -> Option<Vec<Sorted>> {
+        let first = self.sorted.next()?;
+        let size = first.size;
+        let mut same_size = vec![first];
+        while let Some(record) = self.sorted.next_if(|r| r.size == size) {
+            same_size.push(record);
+        }
+        Some(same_size)
+    }
+}
+
+impl<I: Iterator<Item = Sorted>> Iterator for SizeGroups<I> {
+    type Item = (u64, Vec<FileGroup>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let same_size = self.next_size()?;
+            let members: Vec<FileGroup> = same_size
+                .chunk_by(|a, b| a.file_id == b.file_id)
+                .map(file_group)
+                .collect();
+            if members.len() > 1 {
+                return Some((same_size[0].size, members));
+            }
+        }
+    }
+}
+
+/// One distinct file's [`FileGroup`] from every record sharing its
 /// `FileId` (its hardlink aliases), with the alphabetically-first alias
 /// as representative.
-fn file_group(aliases: &[Candidate]) -> FileGroup {
-    let mut paths: Vec<Arc<Path>> = aliases.iter().map(|c| Arc::from(c.path())).collect();
+fn file_group(aliases: &[Sorted]) -> FileGroup {
+    let mut paths: Vec<Arc<Path>> = aliases
+        .iter()
+        .map(|r| Arc::from(r.path.as_path()))
+        .collect();
     paths.sort();
     (paths[0].clone(), paths)
 }
@@ -466,25 +530,26 @@ mod tests {
             .collect()
     }
 
-    fn candidate(name: &str, size: u64, inode: u64) -> Candidate {
-        Candidate {
-            parent: Arc::from(Path::new("/root")),
-            name: std::ffi::OsStr::new(name).into(),
+    fn record(name: &str, size: u64, inode: u64) -> Sorted {
+        Sorted {
             size,
             file_id: FileId::new_inode(1, inode),
+            path: Path::new("/root").join(name),
         }
     }
 
     #[test]
-    fn size_groups_drops_unique_sizes_and_collapses_hardlinks() {
-        let groups = size_groups(vec![
-            candidate("unique", 7, 1),
-            candidate("b-link", 5, 2),
-            candidate("c", 5, 3),
-            candidate("a-link", 5, 2),
-            candidate("lonely-x", 9, 4),
-            candidate("lonely-y", 9, 4),
-        ]);
+    fn size_groups_skip_unique_sizes_and_collapse_hardlinks() {
+        let mut records = vec![
+            record("unique", 7, 1),
+            record("b-link", 5, 2),
+            record("c", 5, 3),
+            record("a-link", 5, 2),
+            record("lonely-x", 9, 4),
+            record("lonely-y", 9, 4),
+        ];
+        records.sort_by_key(|r| (r.size, r.file_id));
+        let groups: Vec<_> = SizeGroups::new(records.into_iter()).collect();
 
         // Size 7 is unique; size 9 is one inode under two names, so only
         // one distinct file -- neither can hold a duplicate.

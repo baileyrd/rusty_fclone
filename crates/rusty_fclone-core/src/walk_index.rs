@@ -16,11 +16,12 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
-use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender};
 use file_id::FileId;
 use redb::{Database, ReadableDatabase, TableDefinition};
 
@@ -54,6 +55,9 @@ pub(crate) struct WalkIndex {
     db: Weak<Database>,
     reuse: bool,
     tx: Sender<WriterMsg>,
+    /// Lookups that hit / missed, for confirming a re-run resumed.
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 /// Owns the background thread that commits recorded directories.
@@ -80,7 +84,9 @@ impl WalkIndex {
         }
         write_txn.commit()?;
 
-        let (tx, rx) = unbounded();
+        // Bounded so a writer slower than the walk stalls it rather than
+        // queueing the tree in memory (ADR-0035).
+        let (tx, rx) = bounded(4 * BATCH_DIRS);
         let weak_db = Arc::downgrade(&db);
         let join = std::thread::spawn(move || write_loop(&db, &rx));
         let writer = IndexWriter {
@@ -91,21 +97,39 @@ impl WalkIndex {
             db: weak_db,
             reuse,
             tx,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         };
         Ok((index, writer))
     }
 
     /// The recorded files of `dir`, if it was recorded with exactly `mtime`.
     pub(crate) fn lookup(&self, dir: &Path, mtime: SystemTime) -> Option<DirFiles> {
-        if !self.reuse {
-            return None;
-        }
+        let found = self.reuse.then(|| self.find(dir, mtime)).flatten();
+        let counter = if found.is_some() {
+            &self.hits
+        } else {
+            &self.misses
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        found
+    }
+
+    fn find(&self, dir: &Path, mtime: SystemTime) -> Option<DirFiles> {
         let key = dir.to_str()?;
         let read_txn = self.db.upgrade()?.begin_read().ok()?;
         let table = read_txn.open_table(TABLE).ok()?;
         let guard = table.get(key).ok()??;
         let (recorded_mtime, files) = decode(guard.value())?;
         (recorded_mtime == split_mtime(mtime)?).then_some(files)
+    }
+
+    /// Directories looked up so far: `(reused, stat-ed afresh)`.
+    pub(crate) fn reuse_counts(&self) -> (u64, u64) {
+        (
+            self.hits.load(Ordering::Relaxed),
+            self.misses.load(Ordering::Relaxed),
+        )
     }
 
     /// Queues `dir`'s complete file list for the writer. Skipped when the
