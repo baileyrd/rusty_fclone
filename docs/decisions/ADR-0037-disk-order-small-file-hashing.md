@@ -1,6 +1,6 @@
 # ADR-0037: Hash small files in disk order
 
-- Status: Accepted, amended 2026-10-29 (path order, see below)
+- Status: Reverted 2026-10-29 (see "Outcome" below)
 - Date: 2026-10-28
 - Related: ADR-0001 (staged hashing), ADR-0016 (hash cache), ADR-0035
   (bounded-memory traversal)
@@ -59,3 +59,22 @@ all of them. On NTFS, records created together in one folder also tend to
 sit together in the file table. Everything else in this decision stands:
 the batch size, the 256-file chunks, and the large-file path. The file id
 is no longer carried past hardlink collapse.
+
+## Outcome (2026-10-29): reverted
+
+Both orderings were measured on the 22M-file drive, against v0.4.2's
+size-by-size hashing, at the same point in the hashing phase:
+
+- v0.4.2 (size groups hashed concurrently): about 12.7k groups and 21-byte
+  files 41 minutes into hashing.
+- v0.4.3 (file-id order): 11-byte files after about 88 minutes, at about
+  37-67 groups a minute.
+- v0.4.4 (path order): 6.3k groups and 11-byte files after 60 minutes,
+  using a quarter of v0.4.3's read syscalls.
+
+Each file costs a metadata read whatever the order, so the order buys
+little. What did cost something is the batch: it is hashed in 256-file
+chunks one after another, while v0.4.2 hashed several size groups at once
+and kept more metadata reads queued on the disk. The batching is removed
+and hashing is back to v0.4.2's per-size-group path. The index-driven walk
+(ADR-0036) stays.
