@@ -33,12 +33,6 @@ const PROGRESS_INTERVAL_FILES: u64 = 256;
 /// minutes, and the point is to show the scan is alive.
 const HASH_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Distinct files per batch of small-file size groups (ADR-0037).
-/// Sorting a batch by path checks files that share a folder back to back,
-/// so the folder's index stays cached; at about 150 bytes a file, a batch
-/// holds roughly 40 MB.
-const DISK_ORDER_BATCH: usize = 1 << 18;
-
 /// One distinct file, identified by its representative path (the first
 /// alias, alphabetically) plus every path — including hardlink aliases —
 /// that shares its content. `Arc<Path>` so the representative and each
@@ -46,9 +40,6 @@ const DISK_ORDER_BATCH: usize = 1 << 18;
 /// hash grouping stages below, instead of re-allocating a `PathBuf` at
 /// every stage (ADR-0004's "path storage" note).
 type FileGroup = (Arc<Path>, Vec<Arc<Path>>);
-
-/// One size's distinct files (hardlinks already collapsed).
-type SizeGroup = (u64, Vec<FileGroup>);
 
 /// One file's full-hash result, plus whether (and what) to persist to the
 /// hash cache -- `None` when caching is disabled or this was already a
@@ -215,39 +206,24 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         .as_ref()
         .and_then(|path| FclonesImportCache::open(path));
 
-    let hashing = Hashing {
-        io_pool: &io_pool,
-        options: &options,
-        cache: cache.as_ref(),
-        fclones_import: fclones_import.as_ref(),
-        event_tx: &event_tx,
-    };
-    let emit = |groups: Vec<DuplicateGroup>| {
-        for group in groups {
-            duplicate_groups.fetch_add(1, Ordering::Relaxed);
-            duplicate_files.fetch_add(group.paths.len() as u64, Ordering::Relaxed);
-            let _ = event_tx.send(ScanEvent::DuplicateGroup(group));
-        }
-    };
     let io_stats = io_pool.stats();
     let (stop_progress, progress_stopped) = bounded::<()>(0);
     std::thread::scope(|scope| {
         scope.spawn(|| report_hash_progress(&io_stats, &progress_stopped, &event_tx));
-        // Sizes ascend, so every small-file group comes before the first
-        // large one.
-        let mut groups = candidate_groups.peekable();
-        loop {
-            let mut small = std::iter::from_fn(|| {
-                groups.next_if(|(size, _)| *size <= options.small_file_threshold)
-            });
-            let batch = next_batch(&mut small, DISK_ORDER_BATCH);
-            if batch.is_empty() {
-                break;
+        candidate_groups.par_bridge().for_each(|(size, members)| {
+            for group in process_size_group(
+                size,
+                members,
+                &io_pool,
+                &options,
+                cache.as_ref(),
+                fclones_import.as_ref(),
+                &event_tx,
+            ) {
+                duplicate_groups.fetch_add(1, Ordering::Relaxed);
+                duplicate_files.fetch_add(group.paths.len() as u64, Ordering::Relaxed);
+                let _ = event_tx.send(ScanEvent::DuplicateGroup(group));
             }
-            emit(hashing.small_batch(batch));
-        }
-        groups.par_bridge().for_each(|(size, members)| {
-            emit(hashing.size_group(size, members));
         });
         drop(stop_progress);
     });
@@ -330,7 +306,7 @@ impl<I: Iterator<Item = Sorted>> SizeGroups<I> {
 }
 
 impl<I: Iterator<Item = Sorted>> Iterator for SizeGroups<I> {
-    type Item = SizeGroup;
+    type Item = (u64, Vec<FileGroup>);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -358,118 +334,46 @@ fn file_group(aliases: &[Sorted]) -> FileGroup {
     (paths[0].clone(), paths)
 }
 
-/// Up to `limit` distinct files' worth of size groups from `groups` (more
-/// when one group alone is larger); empty once `groups` is.
-fn next_batch(groups: &mut impl Iterator<Item = SizeGroup>, limit: usize) -> Vec<SizeGroup> {
-    let mut batch = Vec::new();
-    let mut files = 0;
-    while files < limit {
-        let Some(group) = groups.next() else {
-            break;
-        };
-        files += group.1.len();
-        batch.push(group);
+/// Runs the staged-hashing pipeline (ADR-0001) for one size-group: partial
+/// hash to prune, full hash to confirm, optional byte-verify — returning
+/// every subgroup that survives as a [`DuplicateGroup`]. `cache`, when
+/// present, lets the full-hash stage reuse a previous scan's hash for a
+/// file whose `(size, mtime)` haven't changed (ADR-0016). `fclones_import`,
+/// when present, is tried after a `cache` miss, before any real hashing
+/// (ADR-0019).
+#[tracing::instrument(skip(members, io_pool, options, cache, fclones_import, event_tx), fields(members = members.len()))]
+fn process_size_group(
+    size: u64,
+    members: Vec<FileGroup>,
+    io_pool: &IoPool,
+    options: &ScanOptions,
+    cache: Option<&HashCache>,
+    fclones_import: Option<&FclonesImportCache>,
+    event_tx: &Sender<ScanEvent>,
+) -> Vec<DuplicateGroup> {
+    if size == 0 {
+        // Empty files are identical by definition: reading them proves
+        // nothing and, on a slow disk, costs a seek per file.
+        let mut paths: Vec<Arc<Path>> = members
+            .into_iter()
+            .flat_map(|(_, aliases)| aliases)
+            .collect();
+        paths.sort();
+        return vec![DuplicateGroup { size, paths }];
     }
-    batch
-}
+    let small_file = size <= options.small_file_threshold;
 
-/// What hashing a size group needs, shared by every group of one scan.
-struct Hashing<'a> {
-    io_pool: &'a IoPool,
-    options: &'a ScanOptions,
-    /// Lets the full-hash stage reuse a previous scan's hash for a file
-    /// whose `(size, mtime)` haven't changed (ADR-0016).
-    cache: Option<&'a HashCache>,
-    /// Tried after a `cache` miss, before any real hashing (ADR-0019).
-    fclones_import: Option<&'a FclonesImportCache>,
-    event_tx: &'a Sender<ScanEvent>,
-}
-
-impl Hashing<'_> {
-    /// Runs the staged-hashing pipeline (ADR-0001) for one size-group:
-    /// partial hash to prune, full hash to confirm, optional byte-verify —
-    /// returning every subgroup that survives as a [`DuplicateGroup`].
-    #[tracing::instrument(skip(self, members), fields(members = members.len()))]
-    fn size_group(&self, size: u64, members: Vec<FileGroup>) -> Vec<DuplicateGroup> {
-        if size == 0 {
-            return vec![empty_group(members)];
-        }
-        let small_file = size <= self.options.small_file_threshold;
-
-        let full_hash_input: Vec<FileGroup> = if small_file {
-            members
-        } else {
-            self.partial_survivors(size, members)
-        };
-
-        // The group is hashed in chunks, committing after each, so an
-        // interrupted scan keeps every completed chunk's hashes instead of
-        // losing the whole size group (ADR-0016 addendum).
-        let mut full_hashed: Vec<FullHashResult> = Vec::new();
-        for chunk in full_hash_input.chunks(cache_chunk_len(size)) {
-            let chunk_results: Vec<FullHashResult> = chunk
-                .to_vec()
-                .into_par_iter()
-                .filter_map(|(representative, aliases)| self.full_hash(representative, aliases))
-                .collect();
-            self.commit(&chunk_results);
-            full_hashed.extend(chunk_results);
-        }
-        self.confirm(size, full_hashed)
-    }
-
-    /// Full-hashes a batch of small-file size groups in path order rather
-    /// than size by size. Each file's cost is a metadata lookup through its
-    /// folder's index, so neighbours in a folder share one index read
-    /// (ADR-0037).
-    fn small_batch(&self, batch: Vec<SizeGroup>) -> Vec<DuplicateGroup> {
-        let mut found = Vec::new();
-        let mut sizes = Vec::with_capacity(batch.len());
-        let mut work: Vec<(usize, FileGroup)> = Vec::new();
-        for (index, (size, members)) in batch.into_iter().enumerate() {
-            sizes.push(size);
-            if size == 0 {
-                found.push(empty_group(members));
-                continue;
-            }
-            work.extend(members.into_iter().map(|group| (index, group)));
-        }
-        work.sort_unstable_by(|(_, (a, _)), (_, (b, _))| a.cmp(b));
-
-        let mut hashed: Vec<Vec<FullHashResult>> = sizes.iter().map(|_| Vec::new()).collect();
-        for chunk in work.chunks(CACHE_CHUNK_MAX_FILES) {
-            let results: Vec<(usize, FullHashResult)> = chunk
-                .to_vec()
-                .into_par_iter()
-                .filter_map(|(index, (representative, aliases))| {
-                    self.full_hash(representative, aliases).map(|r| (index, r))
-                })
-                .collect();
-            let (indexes, results): (Vec<usize>, Vec<FullHashResult>) = results.into_iter().unzip();
-            self.commit(&results);
-            for (index, result) in indexes.into_iter().zip(results) {
-                hashed[index].push(result);
-            }
-        }
-        for (size, results) in sizes.into_iter().zip(hashed) {
-            if size > 0 {
-                found.extend(self.confirm(size, results));
-            }
-        }
-        found
-    }
-
-    /// The members of a large-file size group whose sampled partial hash
-    /// matches another member's.
-    fn partial_survivors(&self, size: u64, members: Vec<FileGroup>) -> Vec<FileGroup> {
+    let full_hash_input: Vec<FileGroup> = if small_file {
+        members
+    } else {
         let partial: Vec<(u128, FileGroup)> = members
             .into_par_iter()
             .filter_map(|(representative, aliases)| {
-                let ranges = sample_ranges(size, self.options.partial_hash_sample_size);
-                match self.io_pool.read_ranges(&representative, ranges) {
+                let ranges = sample_ranges(size, options.partial_hash_sample_size);
+                match io_pool.read_ranges(&representative, ranges) {
                     Ok(bytes) => Some((hash_chunks(&[&bytes]), (representative, aliases))),
                     Err(source) => {
-                        report_error(self.event_tx, representative, source);
+                        report_error(event_tx, representative, source);
                         None
                     }
                 }
@@ -486,111 +390,97 @@ impl Hashing<'_> {
             .filter(|(_, group)| group.len() > 1)
             .flat_map(|(_, group)| group)
             .collect()
-    }
+    };
 
-    /// One file's full hash: from the cache, else the fclones import, else
-    /// read. `None` (with the error reported) when it can't be read.
-    fn full_hash(
-        &self,
-        representative: Arc<Path>,
-        aliases: Vec<Arc<Path>>,
-    ) -> Option<FullHashResult> {
-        let (cache, fclones_import) = (self.cache, self.fclones_import);
-        let stat = (cache.is_some() || fclones_import.is_some())
-            .then(|| cache::stat(&representative))
-            .flatten();
+    // Cache lookups/misses are collected as plain data rather than written
+    // inside the parallel closure below: redb write transactions are
+    // exclusive, so batching misses into a transaction (after each parallel
+    // chunk completes) avoids serializing hashing threads on a per-file
+    // write lock. The group is hashed in chunks, committing after each, so
+    // an interrupted scan keeps every completed chunk's hashes instead of
+    // losing the whole size group (ADR-0016 addendum).
+    let mut full_hashed: Vec<FullHashResult> = Vec::new();
+    for chunk in full_hash_input.chunks(cache_chunk_len(size)) {
+        let chunk_results: Vec<FullHashResult> = chunk
+            .to_vec()
+            .into_par_iter()
+            .filter_map(|(representative, aliases)| {
+            let stat = (cache.is_some() || fclones_import.is_some())
+                .then(|| cache::stat(&representative))
+                .flatten();
 
-        if let (Some(cache), Some(stat)) = (cache, stat) {
-            if let Some(hash) = cache.get(&representative, stat) {
-                tracing::trace!(path = %representative.display(), "full-hash cache hit");
-                return Some(FullHashResult {
-                    hash,
-                    group: (representative, aliases),
-                    cache_write: None,
-                });
-            }
-        }
-
-        if let (Some(fclones_import), Some(stat)) = (fclones_import, stat) {
-            let modified_ms = fclones_import::to_millis(stat.1);
-            if let Some(hash) =
-                fclones_import.lookup_full_hash(&representative, stat.0, modified_ms)
-            {
-                tracing::trace!(path = %representative.display(), "fclones cache import hit");
-                return Some(FullHashResult {
-                    hash,
-                    group: (representative, aliases),
-                    cache_write: cache.is_some().then_some(stat),
-                });
-            }
-        }
-
-        match self.io_pool.hash_full_file(&representative) {
-            Ok(hash) => Some(FullHashResult {
-                hash,
-                group: (representative, aliases),
-                cache_write: if cache.is_some() { stat } else { None },
-            }),
-            Err(source) => {
-                report_error(self.event_tx, representative, source);
-                None
-            }
-        }
-    }
-
-    /// Writes `results`' new hashes to the cache in one transaction. Cache
-    /// writes are collected rather than made per file: redb write
-    /// transactions are exclusive, so per-file writes would serialize the
-    /// hashing threads on its lock.
-    fn commit(&self, results: &[FullHashResult]) {
-        let Some(cache) = self.cache else {
-            return;
-        };
-        let updates: Vec<(Arc<Path>, cache::FileStat, u128)> = results
-            .iter()
-            .filter_map(|r| r.cache_write.map(|stat| (r.group.0.clone(), stat, r.hash)))
-            .collect();
-        cache.put_batch(&updates);
-    }
-
-    /// Groups one size's full-hash results into duplicate groups,
-    /// byte-verifying them first when asked to.
-    fn confirm(&self, size: u64, full_hashed: Vec<FullHashResult>) -> Vec<DuplicateGroup> {
-        let mut by_full: HashMap<u128, Vec<FileGroup>> = HashMap::new();
-        for result in full_hashed {
-            by_full.entry(result.hash).or_default().push(result.group);
-        }
-
-        by_full
-            .into_values()
-            .filter(|group| group.len() > 1)
-            .filter_map(|group| {
-                let group = if self.options.verify_matches {
-                    verify_representatives(group, self.io_pool, self.event_tx)
-                } else {
-                    group
-                };
-                if group.len() <= 1 {
-                    return None;
+            if let (Some(cache), Some(stat)) = (cache, stat) {
+                if let Some(hash) = cache.get(&representative, stat) {
+                    tracing::trace!(path = %representative.display(), "full-hash cache hit");
+                    return Some(FullHashResult {
+                        hash,
+                        group: (representative, aliases),
+                        cache_write: None,
+                    });
                 }
-                let mut paths: Vec<Arc<Path>> =
-                    group.into_iter().flat_map(|(_, aliases)| aliases).collect();
-                paths.sort();
-                Some(DuplicateGroup { size, paths })
-            })
-            .collect()
-    }
-}
+            }
 
-/// Empty files are identical by definition: reading them proves nothing
-/// and, on a slow disk, costs a seek per file.
-fn empty_group(members: Vec<FileGroup>) -> DuplicateGroup {
-    let mut paths: Vec<Arc<Path>> = members
-        .into_iter()
-        .flat_map(|(_, aliases)| aliases)
-        .collect();
-    paths.sort();
-    DuplicateGroup { size: 0, paths }
+            if let (Some(fclones_import), Some(stat)) = (fclones_import, stat) {
+                let modified_ms = fclones_import::to_millis(stat.1);
+                if let Some(hash) =
+                    fclones_import.lookup_full_hash(&representative, stat.0, modified_ms)
+                {
+                    tracing::trace!(path = %representative.display(), "fclones cache import hit");
+                    return Some(FullHashResult {
+                        hash,
+                        group: (representative, aliases),
+                        cache_write: cache.is_some().then_some(stat),
+                    });
+                }
+            }
+
+            match io_pool.hash_full_file(&representative) {
+                Ok(hash) => Some(FullHashResult {
+                    hash,
+                    group: (representative, aliases),
+                    cache_write: if cache.is_some() { stat } else { None },
+                }),
+                Err(source) => {
+                    report_error(event_tx, representative, source);
+                    None
+                }
+            }
+        })
+            .collect();
+
+        if let Some(cache) = cache {
+            let updates: Vec<(Arc<Path>, cache::FileStat, u128)> = chunk_results
+                .iter()
+                .filter_map(|r| r.cache_write.map(|stat| (r.group.0.clone(), stat, r.hash)))
+                .collect();
+            cache.put_batch(&updates);
+        }
+        full_hashed.extend(chunk_results);
+    }
+
+    let mut by_full: HashMap<u128, Vec<FileGroup>> = HashMap::new();
+    for result in full_hashed {
+        by_full.entry(result.hash).or_default().push(result.group);
+    }
+
+    by_full
+        .into_values()
+        .filter(|group| group.len() > 1)
+        .filter_map(|group| {
+            let group = if options.verify_matches {
+                verify_representatives(group, io_pool, event_tx)
+            } else {
+                group
+            };
+            if group.len() <= 1 {
+                return None;
+            }
+            let mut paths: Vec<Arc<Path>> =
+                group.into_iter().flat_map(|(_, aliases)| aliases).collect();
+            paths.sort();
+            Some(DuplicateGroup { size, paths })
+        })
+        .collect()
 }
 
 /// Max files hashed between cache commits within one size group.
@@ -909,95 +799,6 @@ mod tests {
         assert!(!survivor_paths.iter().any(|p| p.as_ref() == c.as_path()));
     }
 
-    fn size_group(size: u64, ids: &[u64]) -> SizeGroup {
-        let members = ids
-            .iter()
-            .map(|&id| {
-                let path: Arc<Path> = Arc::from(Path::new(&format!("/root/{size}-{id}")));
-                (path.clone(), vec![path])
-            })
-            .collect();
-        (size, members)
-    }
-
-    #[test]
-    fn next_batch_fills_up_to_the_limit_and_keeps_an_oversized_group_whole() {
-        let mut groups = vec![
-            size_group(1, &[1, 2]),
-            size_group(2, &[3, 4, 5]),
-            size_group(3, &[6, 7, 8, 9, 10]),
-            size_group(4, &[11, 12]),
-        ]
-        .into_iter();
-        let sizes =
-            |batch: Vec<SizeGroup>| batch.into_iter().map(|(size, _)| size).collect::<Vec<_>>();
-        assert_eq!(sizes(next_batch(&mut groups, 4)), vec![1, 2]);
-        assert_eq!(sizes(next_batch(&mut groups, 4)), vec![3]);
-        assert_eq!(sizes(next_batch(&mut groups, 4)), vec![4]);
-        assert!(next_batch(&mut groups, 4).is_empty());
-    }
-
-    #[test]
-    fn small_batch_groups_each_size_separately_across_interleaved_paths() {
-        let dir = tempfile::tempdir().unwrap();
-        let write = |name: &str, content: &[u8]| -> FileGroup {
-            let path: Arc<Path> = Arc::from(dir.path().join(name));
-            fs::write(&path, content).unwrap();
-            (path.clone(), vec![path])
-        };
-        let missing: Arc<Path> = Arc::from(dir.path().join("vanished"));
-        // Names interleave the sizes, so path order mixes them.
-        let batch = vec![
-            (0, vec![write("9-e1", b""), write("2-e2", b"")]),
-            (
-                3,
-                vec![
-                    write("1-a1", b"abc"),
-                    write("5-a2", b"abc"),
-                    write("7-a3", b"xyz"),
-                    (missing.clone(), vec![missing.clone()]),
-                ],
-            ),
-            (5, vec![write("6-b1", b"hello"), write("4-b2", b"hello")]),
-        ];
-
-        let io_pool = IoPool::new(2);
-        let options = ScanOptions::default();
-        let (tx, rx) = unbounded();
-        let hashing = Hashing {
-            io_pool: &io_pool,
-            options: &options,
-            cache: None,
-            fclones_import: None,
-            event_tx: &tx,
-        };
-        let mut groups = hashing.small_batch(batch);
-        drop(tx);
-        groups.sort_by_key(|g| g.size);
-
-        let names = |g: &DuplicateGroup| -> Vec<String> {
-            g.paths
-                .iter()
-                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-                .collect()
-        };
-        assert_eq!(
-            groups.iter().map(|g| g.size).collect::<Vec<_>>(),
-            vec![0, 3, 5]
-        );
-        assert_eq!(names(&groups[0]), vec!["2-e2", "9-e1"]);
-        assert_eq!(names(&groups[1]), vec!["1-a1", "5-a2"]);
-        assert_eq!(names(&groups[2]), vec!["4-b2", "6-b1"]);
-        let errors: Vec<Arc<Path>> = rx
-            .iter()
-            .filter_map(|event| match event {
-                ScanEvent::Error(err) => Some(err.path),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(errors, vec![missing]);
-    }
-
     #[test]
     fn read_failures_during_hashing_are_reported_and_do_not_abort_the_group() {
         let dir = tempfile::tempdir().unwrap();
@@ -1016,14 +817,7 @@ mod tests {
             (dup2.clone().into(), vec![dup2.clone().into()]),
         ];
 
-        let hashing = Hashing {
-            io_pool: &io_pool,
-            options: &options,
-            cache: None,
-            fclones_import: None,
-            event_tx: &tx,
-        };
-        let groups = hashing.size_group(3, members);
+        let groups = process_size_group(3, members, &io_pool, &options, None, None, &tx);
         drop(tx);
 
         assert_eq!(
