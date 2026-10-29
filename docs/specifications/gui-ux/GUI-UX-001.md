@@ -104,7 +104,8 @@ semantics, which are unchanged.
   the shape
   `{"type":"progress","filesScanned":<u64>,"bytesScanned":<u64>}`.
 - `GUI-UX-001-FR-005a`: A `scan-event` for `ScanEvent::HashProgress` SHALL
-  have the shape `{"type":"hash_progress","filesRead":<u64>,"bytesRead":<u64>}`.
+  have the shape
+  `{"type":"hash_progress","filesRead":<u64>,"bytesRead":<u64>,"filesChecked":<u64>,"filesTotal":<u64>}`.
 - `GUI-UX-001-FR-006`: A `scan-event` for `ScanEvent::Finished` SHALL have
   the shape
   `{"type":"finished","filesScanned":<u64>,"bytesScanned":<u64>,"duplicateGroups":<u64>,"duplicateFiles":<u64>}`

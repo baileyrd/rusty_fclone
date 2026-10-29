@@ -115,6 +115,8 @@ pub enum ScanEventPayload {
     HashProgress {
         files_read: u64,
         bytes_read: u64,
+        files_checked: u64,
+        files_total: u64,
     },
     Finished(ScanSummaryPayload),
 }
@@ -164,6 +166,8 @@ impl From<HashProgress> for ScanEventPayload {
         ScanEventPayload::HashProgress {
             files_read: p.files_read,
             bytes_read: p.bytes_read,
+            files_checked: p.files_checked,
+            files_total: p.files_total,
         }
     }
 }
@@ -702,11 +706,16 @@ mod tests {
         let payload = ScanEventPayload::from(HashProgress {
             files_read: 7,
             bytes_read: 900,
+            files_checked: 5,
+            files_total: 10,
+            ..HashProgress::default()
         });
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["type"], "hash_progress");
         assert_eq!(json["filesRead"], 7);
         assert_eq!(json["bytesRead"], 900);
+        assert_eq!(json["filesChecked"], 5);
+        assert_eq!(json["filesTotal"], 10);
     }
 
     #[test]
