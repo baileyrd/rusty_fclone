@@ -7,7 +7,6 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
-use file_id::FileId;
 use rayon::prelude::*;
 
 use crate::cache::{self, HashCache};
@@ -34,10 +33,10 @@ const PROGRESS_INTERVAL_FILES: u64 = 256;
 /// minutes, and the point is to show the scan is alive.
 const HASH_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Distinct files per disk-order batch of small-file size groups
-/// (ADR-0037). Sorting a batch by file id turns a random seek per file into
-/// short forward hops through the file table; at about 150 bytes a file,
-/// a batch holds roughly 40 MB.
+/// Distinct files per batch of small-file size groups (ADR-0037).
+/// Sorting a batch by path checks files that share a folder back to back,
+/// so the folder's index stays cached; at about 150 bytes a file, a batch
+/// holds roughly 40 MB.
 const DISK_ORDER_BATCH: usize = 1 << 18;
 
 /// One distinct file, identified by its representative path (the first
@@ -48,8 +47,8 @@ const DISK_ORDER_BATCH: usize = 1 << 18;
 /// every stage (ADR-0004's "path storage" note).
 type FileGroup = (Arc<Path>, Vec<Arc<Path>>);
 
-/// One size's distinct files, each with the [`FileId`] it was collapsed by.
-type SizeGroup = (u64, Vec<(FileId, FileGroup)>);
+/// One size's distinct files (hardlinks already collapsed).
+type SizeGroup = (u64, Vec<FileGroup>);
 
 /// One file's full-hash result, plus whether (and what) to persist to the
 /// hash cache -- `None` when caching is disabled or this was already a
@@ -248,7 +247,6 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
             emit(hashing.small_batch(batch));
         }
         groups.par_bridge().for_each(|(size, members)| {
-            let members = members.into_iter().map(|(_, group)| group).collect();
             emit(hashing.size_group(size, members));
         });
         drop(stop_progress);
@@ -337,9 +335,9 @@ impl<I: Iterator<Item = Sorted>> Iterator for SizeGroups<I> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let same_size = self.next_size()?;
-            let members: Vec<(FileId, FileGroup)> = same_size
+            let members: Vec<FileGroup> = same_size
                 .chunk_by(|a, b| a.file_id == b.file_id)
-                .map(|aliases| (aliases[0].file_id, file_group(aliases)))
+                .map(file_group)
                 .collect();
             if members.len() > 1 {
                 return Some((same_size[0].size, members));
@@ -420,31 +418,30 @@ impl Hashing<'_> {
         self.confirm(size, full_hashed)
     }
 
-    /// Full-hashes a batch of small-file size groups in file-id order
-    /// rather than size by size, so a disk reads its file table mostly
-    /// forward instead of seeking for every file (ADR-0037).
+    /// Full-hashes a batch of small-file size groups in path order rather
+    /// than size by size. Each file's cost is a metadata lookup through its
+    /// folder's index, so neighbours in a folder share one index read
+    /// (ADR-0037).
     fn small_batch(&self, batch: Vec<SizeGroup>) -> Vec<DuplicateGroup> {
         let mut found = Vec::new();
         let mut sizes = Vec::with_capacity(batch.len());
-        let mut work: Vec<(FileId, usize, FileGroup)> = Vec::new();
+        let mut work: Vec<(usize, FileGroup)> = Vec::new();
         for (index, (size, members)) in batch.into_iter().enumerate() {
             sizes.push(size);
             if size == 0 {
-                found.push(empty_group(
-                    members.into_iter().map(|(_, group)| group).collect(),
-                ));
+                found.push(empty_group(members));
                 continue;
             }
-            work.extend(members.into_iter().map(|(id, group)| (id, index, group)));
+            work.extend(members.into_iter().map(|group| (index, group)));
         }
-        work.sort_unstable_by_key(|(id, ..)| *id);
+        work.sort_unstable_by(|(_, (a, _)), (_, (b, _))| a.cmp(b));
 
         let mut hashed: Vec<Vec<FullHashResult>> = sizes.iter().map(|_| Vec::new()).collect();
         for chunk in work.chunks(CACHE_CHUNK_MAX_FILES) {
             let results: Vec<(usize, FullHashResult)> = chunk
                 .to_vec()
                 .into_par_iter()
-                .filter_map(|(_, index, (representative, aliases))| {
+                .filter_map(|(index, (representative, aliases))| {
                     self.full_hash(representative, aliases).map(|r| (index, r))
                 })
                 .collect();
@@ -711,11 +708,10 @@ mod tests {
         let (size, members) = &groups[0];
         assert_eq!(*size, 5);
         assert_eq!(members.len(), 2);
-        let (linked_id, linked) = members
+        let linked = members
             .iter()
-            .find(|(_, (_, aliases))| aliases.len() == 2)
+            .find(|(_, aliases)| aliases.len() == 2)
             .unwrap();
-        assert_eq!(*linked_id, FileId::new_inode(1, 2));
         assert_eq!(&*linked.0, Path::new("/root/a-link"));
         assert_eq!(
             linked.1,
@@ -918,7 +914,7 @@ mod tests {
             .iter()
             .map(|&id| {
                 let path: Arc<Path> = Arc::from(Path::new(&format!("/root/{size}-{id}")));
-                (FileId::new_inode(1, id), (path.clone(), vec![path]))
+                (path.clone(), vec![path])
             })
             .collect();
         (size, members)
@@ -942,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn small_batch_groups_each_size_separately_across_interleaved_file_ids() {
+    fn small_batch_groups_each_size_separately_across_interleaved_paths() {
         let dir = tempfile::tempdir().unwrap();
         let write = |name: &str, content: &[u8]| -> FileGroup {
             let path: Arc<Path> = Arc::from(dir.path().join(name));
@@ -950,34 +946,19 @@ mod tests {
             (path.clone(), vec![path])
         };
         let missing: Arc<Path> = Arc::from(dir.path().join("vanished"));
-        // File ids interleave the sizes, so disk order mixes them.
+        // Names interleave the sizes, so path order mixes them.
         let batch = vec![
-            (
-                0,
-                vec![
-                    (FileId::new_inode(1, 9), write("e1", b"")),
-                    (FileId::new_inode(1, 2), write("e2", b"")),
-                ],
-            ),
+            (0, vec![write("9-e1", b""), write("2-e2", b"")]),
             (
                 3,
                 vec![
-                    (FileId::new_inode(1, 1), write("a1", b"abc")),
-                    (FileId::new_inode(1, 5), write("a2", b"abc")),
-                    (FileId::new_inode(1, 7), write("a3", b"xyz")),
-                    (
-                        FileId::new_inode(1, 3),
-                        (missing.clone(), vec![missing.clone()]),
-                    ),
+                    write("1-a1", b"abc"),
+                    write("5-a2", b"abc"),
+                    write("7-a3", b"xyz"),
+                    (missing.clone(), vec![missing.clone()]),
                 ],
             ),
-            (
-                5,
-                vec![
-                    (FileId::new_inode(1, 6), write("b1", b"hello")),
-                    (FileId::new_inode(1, 4), write("b2", b"hello")),
-                ],
-            ),
+            (5, vec![write("6-b1", b"hello"), write("4-b2", b"hello")]),
         ];
 
         let io_pool = IoPool::new(2);
@@ -1004,9 +985,9 @@ mod tests {
             groups.iter().map(|g| g.size).collect::<Vec<_>>(),
             vec![0, 3, 5]
         );
-        assert_eq!(names(&groups[0]), vec!["e1", "e2"]);
-        assert_eq!(names(&groups[1]), vec!["a1", "a2"]);
-        assert_eq!(names(&groups[2]), vec!["b1", "b2"]);
+        assert_eq!(names(&groups[0]), vec!["2-e2", "9-e1"]);
+        assert_eq!(names(&groups[1]), vec!["1-a1", "5-a2"]);
+        assert_eq!(names(&groups[2]), vec!["4-b2", "6-b1"]);
         let errors: Vec<Arc<Path>> = rx
             .iter()
             .filter_map(|event| match event {
