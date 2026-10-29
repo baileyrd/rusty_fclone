@@ -148,13 +148,24 @@ pub struct ScanProgress {
     pub bytes_scanned: u64,
 }
 
-/// A hashing progress checkpoint. Counts are cumulative reads of file
-/// content; a file read for its partial and then its full hash counts
-/// twice. Files whose hash came from a cache aren't read and don't count.
+/// A hashing progress checkpoint.
+///
+/// `files_read`/`bytes_read` are cumulative reads of file content; a file
+/// read for its partial and then its full hash counts twice, and files
+/// whose hash came from a cache aren't read and don't count.
+/// `files_checked`/`bytes_checked` count scanned files that hashing has
+/// reached, cache hits and unique sizes included, out of
+/// `files_total`/`bytes_total` (every scanned file), so they give the
+/// fraction done. Files are reached smallest first, so the file fraction
+/// leads the byte fraction.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct HashProgress {
     pub files_read: u64,
     pub bytes_read: u64,
+    pub files_checked: u64,
+    pub files_total: u64,
+    pub bytes_checked: u64,
+    pub bytes_total: u64,
 }
 
 /// Aggregate counters reported once a scan completes.

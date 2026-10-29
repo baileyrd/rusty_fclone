@@ -1043,7 +1043,7 @@ function reviewItems() {
 function scanningSubtitle() {
   const { filesScanned, bytesScanned, hashing } = state.progress;
   if (hashing) {
-    return `Hashing ${filesScanned} scanned files... ${hashing.filesRead} file reads, ${bytesHuman(hashing.bytesRead)} read so far.`;
+    return `Hashing... ${hashing.filesChecked} of ${hashing.filesTotal} files checked, ${hashing.filesRead} file reads, ${bytesHuman(hashing.bytesRead)} read so far.`;
   }
   return `Scanning... ${filesScanned} files, ${bytesHuman(bytesScanned)} scanned so far.`;
 }
@@ -1941,7 +1941,7 @@ listen("scan-event", (event) => {
       setState({ progress: { filesScanned: payload.filesScanned, bytesScanned: payload.bytesScanned, hashing: null } });
       break;
     case "hash_progress":
-      setState({ progress: { ...state.progress, hashing: { filesRead: payload.filesRead, bytesRead: payload.bytesRead } } });
+      setState({ progress: { ...state.progress, hashing: { filesRead: payload.filesRead, bytesRead: payload.bytesRead, filesChecked: payload.filesChecked, filesTotal: payload.filesTotal } } });
       break;
     case "error":
       setState({ errors: [...state.errors, payload] });

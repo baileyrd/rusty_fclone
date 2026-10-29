@@ -183,11 +183,16 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
         }
     };
     let spill_tx = event_tx.clone();
-    let candidate_groups = SizeGroups::new(sorted.map_while(move |record| {
-        record
-            .map_err(|err| report_spill_error(&spill_tx, &spill_dir, err))
-            .ok()
-    }));
+    let checked = Checked::default();
+    let candidate_groups = SizeGroups::new(
+        sorted
+            .map_while(move |record| {
+                record
+                    .map_err(|err| report_spill_error(&spill_tx, &spill_dir, err))
+                    .ok()
+            })
+            .inspect(|record| checked.add(record.size)),
+    );
 
     let io_threads = options.io_threads.unwrap_or_else(|| {
         let detected = default_io_threads(&root);
@@ -209,7 +214,9 @@ fn run_scan(root: PathBuf, options: ScanOptions, event_tx: Sender<ScanEvent>) {
     let io_stats = io_pool.stats();
     let (stop_progress, progress_stopped) = bounded::<()>(0);
     std::thread::scope(|scope| {
-        scope.spawn(|| report_hash_progress(&io_stats, &progress_stopped, &event_tx));
+        scope.spawn(|| {
+            report_hash_progress(&io_stats, &checked, &summary, &progress_stopped, &event_tx)
+        });
         candidate_groups.par_bridge().for_each(|(size, members)| {
             for group in process_size_group(
                 size,
@@ -250,14 +257,39 @@ fn spill_dir(options: &ScanOptions) -> PathBuf {
         .map_or_else(std::env::temp_dir, Path::to_path_buf)
 }
 
+/// Scanned files that hashing has reached so far: every sorted record
+/// as [`SizeGroups`] consumes it, unique sizes included.
+#[derive(Default)]
+struct Checked {
+    files: AtomicU64,
+    bytes: AtomicU64,
+}
+
+impl Checked {
+    fn add(&self, size: u64) {
+        self.files.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(size, Ordering::Relaxed);
+    }
+}
+
 /// Emits [`ScanEvent::HashProgress`] now, every [`HASH_PROGRESS_INTERVAL`],
 /// and once more with the final totals when `stop` disconnects.
-fn report_hash_progress(stats: &IoStats, stop: &Receiver<()>, event_tx: &Sender<ScanEvent>) {
+fn report_hash_progress(
+    stats: &IoStats,
+    checked: &Checked,
+    scanned: &ScanSummary,
+    stop: &Receiver<()>,
+    event_tx: &Sender<ScanEvent>,
+) {
     let emit = || {
         let (files_read, bytes_read) = stats.totals();
         let _ = event_tx.send(ScanEvent::HashProgress(HashProgress {
             files_read,
             bytes_read,
+            files_checked: checked.files.load(Ordering::Relaxed),
+            files_total: scanned.files_scanned,
+            bytes_checked: checked.bytes.load(Ordering::Relaxed),
+            bytes_total: scanned.bytes_scanned,
         }));
     };
     emit();
@@ -644,6 +676,9 @@ mod tests {
             unreachable!()
         };
         assert_eq!((last.files_read, last.bytes_read), (2, 4));
+        // Every scanned file was reached by the end.
+        assert_eq!((last.files_checked, last.files_total), (4, 4));
+        assert_eq!((last.bytes_checked, last.bytes_total), (4, 4));
     }
 
     #[test]

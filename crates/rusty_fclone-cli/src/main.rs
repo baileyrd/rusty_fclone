@@ -997,15 +997,40 @@ fn report_progress(format: Format, progress: &ScanProgress, progress_line: &mut 
 
 fn report_hash_progress(format: Format, progress: &HashProgress, progress_line: &mut ProgressLine) {
     match format {
-        Format::Text => progress_line.update(&format!(
-            "hashing... {} file reads, {} bytes",
-            progress.files_read, progress.bytes_read
-        )),
+        Format::Text => progress_line.update(&hash_progress_line(progress)),
         Format::Json => print_json(&JsonEvent::HashProgress {
             files_read: progress.files_read,
             bytes_read: progress.bytes_read,
+            files_checked: progress.files_checked,
+            files_total: progress.files_total,
+            bytes_checked: progress.bytes_checked,
+            bytes_total: progress.bytes_total,
         }),
     }
+}
+
+/// The live hashing line: how far hashing has got through the scanned
+/// files (smallest first, so files lead bytes), then what it has read.
+fn hash_progress_line(p: &HashProgress) -> String {
+    format!(
+        "hashing... {}/{} files ({:.1}%), {}/{} bytes ({:.1}%) checked; {} file reads, {} bytes read",
+        p.files_checked,
+        p.files_total,
+        percent(p.files_checked, p.files_total),
+        p.bytes_checked,
+        p.bytes_total,
+        percent(p.bytes_checked, p.bytes_total),
+        p.files_read,
+        p.bytes_read
+    )
+}
+
+/// `done` as a percentage of `total`; 100 when there is nothing to do.
+fn percent(done: u64, total: u64) -> f64 {
+    if total == 0 {
+        return 100.0;
+    }
+    done as f64 * 100.0 / total as f64
 }
 
 fn report_error(format: Format, err: &FileError) {
@@ -1544,6 +1569,10 @@ enum JsonEvent {
     HashProgress {
         files_read: u64,
         bytes_read: u64,
+        files_checked: u64,
+        files_total: u64,
+        bytes_checked: u64,
+        bytes_total: u64,
     },
     Finished {
         files_scanned: u64,
@@ -1683,6 +1712,22 @@ mod tests {
         let journal =
             plan_file::read_journal(&plan_file::default_journal_path(&plan_path)).unwrap();
         assert_eq!(journal.len(), 1);
+    }
+
+    #[test]
+    fn hash_progress_line_shows_checked_out_of_total_and_reads() {
+        let line = hash_progress_line(&HashProgress {
+            files_read: 3,
+            bytes_read: 40,
+            files_checked: 25,
+            files_total: 200,
+            bytes_checked: 1,
+            bytes_total: 0,
+        });
+        assert_eq!(
+            line,
+            "hashing... 25/200 files (12.5%), 1/0 bytes (100.0%) checked; 3 file reads, 40 bytes read"
+        );
     }
 
     #[test]
